@@ -3,6 +3,7 @@ package app.marlboroadvance.mpvex.ui.browser.emby
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
 
 /**
  * 统一的分页列表状态机（对应清单 1.1「全量列表改真分页」）。
@@ -75,6 +76,13 @@ class PagedList<T>(
   var appending: Boolean by mutableStateOf(false)
     private set
 
+  /** 已有快照时的后台刷新；刷新期间继续展示 [items]，不切回首次加载态。 */
+  var refreshing: Boolean by mutableStateOf(false)
+    private set
+
+  /** 最近失败的是保留旧内容的刷新；重试时必须继续刷新而不是误追加下一页。 */
+  private var refreshFailed: Boolean = false
+
   /** 服务端报告的总数；null 表示还没拿到（此时只能靠「本页不满」判断到底）。 */
   var total: Int? by mutableStateOf(null)
     private set
@@ -100,6 +108,10 @@ class PagedList<T>(
   var error: String? by mutableStateOf(null)
     private set
 
+  /** 至少成功应用过一页；成功空页也算已加载，用于区分“未请求”和“空结果”。 */
+  var loaded: Boolean by mutableStateOf(false)
+    private set
+
   /** 已经到底（服务端总数已取尽，或某页返回不满）。 */
   var hasMore: Boolean by mutableStateOf(true)
     private set
@@ -112,6 +124,29 @@ class PagedList<T>(
    */
   fun nextIndex(): Int = consumed
 
+  /** 只保存稳定分页数据，不把进行中的请求和错误带到下一次组合。 */
+  fun snapshot(): PagedListSnapshot<T> = PagedListSnapshot(
+    items = items,
+    total = total,
+    consumed = consumed,
+    hasMore = hasMore,
+    loaded = loaded,
+  )
+
+  /** 恢复缓存快照；瞬态 loading/appending/error 一律重置。 */
+  fun restore(snapshot: PagedListSnapshot<T>) {
+    items = snapshot.items
+    total = snapshot.total
+    consumed = snapshot.consumed.coerceAtLeast(0)
+    hasMore = snapshot.hasMore
+    loaded = snapshot.loaded
+    loading = false
+    appending = false
+    refreshing = false
+    refreshFailed = false
+    error = null
+  }
+
   /**
    * 重新加载第一页（切换分类 / 改筛选 / 改排序时调用）。
    *
@@ -119,22 +154,58 @@ class PagedList<T>(
    */
   suspend fun reload(loader: suspend (startIndex: Int, limit: Int) -> PagedResult<T>?) {
     loading = true
+    refreshing = false
+    refreshFailed = false
     error = null
     appending = false
     hasMore = true
     consumed = 0
+    loaded = false
     try {
-      apply(loader(0, pageSize) ?: PagedResult(emptyList(), null, 0), replace = true)
+      items = emptyList()
+      fetchPages(loader, replace = true)
+    } catch (e: CancellationException) {
+      throw e
     } catch (e: Exception) {
       // ⚠️ 这里**故意不静默吞**：错误要显示出来 + 给重试按钮。
       // 原来的做法是 catch 掉返回空列表，用户看到的是「库里什么都没有」。
       error = e.message ?: "加载失败"
-      items = emptyList()
-      total = null
-      hasMore = false
-      consumed = 0
+      if (consumed == 0) {
+        items = emptyList()
+        total = null
+        hasMore = false
+      }
     } finally {
       loading = false
+    }
+  }
+
+  suspend fun refresh(loader: suspend (startIndex: Int, limit: Int) -> PagedResult<T>?) {
+    if (!loaded) {
+      reload(loader)
+      return
+    }
+    if (loading || appending || refreshing) return
+
+    refreshing = true
+    refreshFailed = false
+    error = null
+    val requested = consumed.coerceAtLeast(pageSize)
+    try {
+      val fresh = PagedList(pageSize = pageSize, keyOf = keyOf)
+      fresh.reload(loader)
+      while (fresh.error == null && fresh.hasMore && fresh.nextIndex() < requested) {
+        fresh.loadMore(loader)
+      }
+      fresh.error?.let { throw IllegalStateException(it) }
+      restore(fresh.snapshot())
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      refreshFailed = true
+      error = e.message ?: "刷新失败"
+    } finally {
+      refreshing = false
     }
   }
 
@@ -144,13 +215,13 @@ class PagedList<T>(
    * 已经在加载或已到底时**直接返回** —— 所以可以放心地在触底回调里无脑调。
    */
   suspend fun loadMore(loader: suspend (startIndex: Int, limit: Int) -> PagedResult<T>?) {
-    if (loading || appending || !hasMore) return
+    if (loading || appending || refreshing || !hasMore) return
     appending = true
     error = null
-    val from = nextIndex()
     try {
-      val r = loader(from, pageSize) ?: PagedResult(emptyList(), null, 0)
-      apply(r, replace = false)
+      fetchPages(loader, replace = false)
+    } catch (e: CancellationException) {
+      throw e
     } catch (e: Exception) {
       error = e.message ?: "加载更多失败"
     } finally {
@@ -158,12 +229,35 @@ class PagedList<T>(
     }
   }
 
-  /** 出错后重试：首页就重载第一页，否则继续加载下一页。 */
+  /** 出错后重试最近失败的操作。 */
   suspend fun retry(loader: suspend (startIndex: Int, limit: Int) -> PagedResult<T>?) {
-    if (items.isEmpty()) reload(loader) else loadMore(loader)
+    if (refreshFailed) refresh(loader) else if (consumed == 0) reload(loader) else loadMore(loader)
+  }
+
+  /** 用服务端已确认的新条目更新一项；不改变游标和分页状态。 */
+  fun updateFirst(predicate: (T) -> Boolean, transform: (T) -> T): Boolean {
+    val index = items.indexOfFirst(predicate)
+    if (index < 0) return false
+    items = items.toMutableList().also { it[index] = transform(it[index]) }
+    return true
+  }
+
+  private suspend fun fetchPages(
+    loader: suspend (startIndex: Int, limit: Int) -> PagedResult<T>?,
+    replace: Boolean,
+  ) {
+    var first = replace
+    repeat(MAX_FILTERED_PAGES) {
+      val result = loader(nextIndex(), pageSize) ?: PagedResult(emptyList(), null, 0)
+      apply(result, replace = first)
+      first = false
+      if (result.items.isNotEmpty() || !hasMore) return
+    }
+    error = "过滤条目过多，请重试以继续加载。"
   }
 
   private fun apply(r: PagedResult<T>, replace: Boolean) {
+    loaded = true
     // 本页之前已有多少条 —— 用来判断「这一页是不是一条新的都没添进来」。
     // 必须在合并之前取。
     val before = items.size
@@ -174,33 +268,28 @@ class PagedList<T>(
     if (replace) {
       val seen = HashSet<Any>(r.items.size)
       items = r.items.filter { seen.add(keyOf(it)) }
-      consumed = r.items.size // 服务端给了多少就算多少，与去重结果无关
+      consumed = r.consumedCount // 服务端原始消费数，包括客户端过滤掉的条目
     } else {
       // 追加时去重：某些服务端（SmartStrm）会忽略 StartIndex 反复返回同一批，
       // 不去重会出现「第二页和第一页一模一样」的错觉。
       val seen = items.mapTo(HashSet(), keyOf)
       items = items + r.items.filter { seen.add(keyOf(it)) }
-      consumed += r.items.size
+      consumed += r.consumedCount
     }
     total = r.totalCount
-    // 判断「还有没有」，**优先看服务端总数**。
-    // 只有服务端没给总数时才退回「本页不满 pageSize 即到底」——
-    // 服务端在同一页里返回了重复项时，去重会让本页看起来不满，用它判断会**提前截断**。
-    // ⚠️ 两个比较对象必须分清：
-    //   hasMore   比 [items]（用户真正看到的条数）与服务端总数
-    //   到底判断比 [PagedResult.items]（服务端原始返回条数）与 pageSize
-    // ⚠️ 「这一页一条新的都没有」也判到底：那是服务端在原地打转
-    // （SmartStrm 忽略 StartIndex 时就会这样），再翻下去也是白翻。
+    // 可见条目经类型过滤和去重，游标及总数判断只能使用原始消费数。
+    // 有可见条目却全重复才是停滞；全过滤页仍要继续请求后面的内容。
     hasMore = when {
-      r.exhausted -> false
-      items.size == before && consumed > 0 -> false
-      r.totalCount != null -> items.size < r.totalCount
-      r.items.size < r.pageSize -> false
+      r.exhausted || r.consumedCount == 0 -> false
+      !replace && r.items.isNotEmpty() && items.size == before -> false
+      r.totalCount != null && r.totalCount > 0 -> consumed < r.totalCount
+      r.consumedCount < r.pageSize -> false
       else -> true
     }
   }
 
   companion object {
+    private const val MAX_FILTERED_PAGES = 50
     const val DEFAULT_PAGE_SIZE = 100
 
     /**
@@ -219,6 +308,15 @@ class PagedList<T>(
   }
 }
 
+/** 可跨组合缓存的稳定分页快照。 */
+data class PagedListSnapshot<T>(
+  val items: List<T>,
+  val total: Int?,
+  val consumed: Int,
+  val hasMore: Boolean,
+  val loaded: Boolean,
+)
+
 /**
  * 一页的结果。
  *
@@ -232,4 +330,5 @@ data class PagedResult<T>(
   val totalCount: Int?,
   val pageSize: Int,
   val exhausted: Boolean = false,
+  val consumedCount: Int = items.size,
 )

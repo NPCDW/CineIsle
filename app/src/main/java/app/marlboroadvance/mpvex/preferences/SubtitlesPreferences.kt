@@ -55,9 +55,7 @@ class SubtitlesPreferences(
   val defaultSubDelay = preferenceStore.getInt("sub_default_delay")
   val defaultSubSpeed = preferenceStore.getFloat("sub_default_speed", 1f)
   
-  val pickerPath = preferenceStore.getString("sub_picker_path")
   
-  val subtitleSaveFolder = preferenceStore.getString("sub_save_folder", "")
 }
 
 enum class SubtitleJustification(

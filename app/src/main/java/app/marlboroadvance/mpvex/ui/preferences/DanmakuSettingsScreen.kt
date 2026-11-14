@@ -42,16 +42,8 @@ import org.koin.compose.koinInject
 /**
  * 弹幕设置（独立页）。
  *
- * ## 为什么单独一页
- *
- * 弹幕的全部参数 —— 总开关、源地址、AppId / AppSecret、自动匹配 —— 原本**只在 mpv
- * 播放页的「更多 ⋮」里**那个面板中才能改。问题有两个：
- * 1. 那个面板要**先进入播放器**才够得着，而弹幕默认是关的 ⇒ 用户在设置里
- *    找不到、也不知道有这东西（用户反馈「找不到弹幕」）；
- * 2. 源与凭证是**配置性质**的东西，放在播放中途的面板里既难找又难改。
- *
- * ⇒ 把它们都搬到这里。播放页那个面板保留（播着的时候顺手调字号/透明度很自然），
- * 但**两边写的是同一份偏好**，所以在哪改都同步。
+ * The former in-player sheet has been removed. This screen is the single configuration surface for
+ * the retained master switch, source credentials, and automatic matching.
  */
 @Serializable
 object DanmakuSettingsScreen : Screen {
@@ -191,7 +183,7 @@ object DanmakuSettingsScreen : Screen {
 
           item {
             Text(
-              text = stringResource(R.string.danmaku_render_hint),
+              text = stringResource(R.string.danmaku_auto_render_hint),
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
               modifier = Modifier.padding(top = 8.dp, bottom = 24.dp),
@@ -204,10 +196,7 @@ object DanmakuSettingsScreen : Screen {
 }
 
 /**
- * 一行开关。
- *
- * 形状照搬播放页弹幕面板里那个（`DanmakuSheet` 内的私有版），
- * 但**不带图标** —— 设置页里每行都挂一个图标只会变噪声。
+ * Shared settings-screen toggle row without an icon.
  */
 @Composable
 private fun ToggleRow(

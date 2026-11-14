@@ -6,7 +6,6 @@ import android.app.Activity
 import android.content.Intent
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import app.marlboroadvance.mpvex.domain.emby.EmbyClient
 import app.marlboroadvance.mpvex.domain.emby.EmbyLog
 import app.marlboroadvance.mpvex.domain.emby.EmbyRepository
 import app.marlboroadvance.mpvex.domain.emby.EmbyServer
@@ -114,75 +113,21 @@ object EmbyPlaybackReporter {
   var idProvider: (() -> String?)? = null
 
   /**
-   * 由播放页提供的「当前位置」，单位 ticks；读不到返回 null。
-   *
-   * 为什么需要：本类默认读 `PlayerLib.getPropertyInt("time-pos")`，而
-   * `PlayerLib.canTouchNative = isMpv && coreReady` ⇒ **GSY 内核下恒读不到**。
-   * GSY 播放页用 `GSYVideoManager.instance().curPlayerManager.currentPosition` 喂进来。
-   *
-   * ⚠️ 一旦设了就以它的返回值为准（哪怕是 null），**不再回退**到 mpv 属性 ——
-   * 两边同时存在时回退会读到上一个内核的残留位置。
-   */
-  @Volatile
-  var positionProvider: (() -> Long?)? = null
-
-  /**
-   * 由播放页提供的「是否暂停」；读不到返回 null（按「未暂停」处理）。
-   *
-   * 同一个理由：mpv 的 `pause` 属性在 GSY 内核下读不到。
-   */
-  @Volatile
-  var pausedProvider: (() -> Boolean?)? = null
-
-  /**
    * 当前这场播放的令牌。
    *
-   * 一场播放一个（见 [EmbyPlaybackLifecycleObserver.token]）。存在的唯一原因：
-   * 切换内核时新旧两个播放页会**短暂共存**（GSY 的 `onCreate` 先于 mpv 的 `onDestroy`），
-   * 两个观察者都指向本单例。没有令牌的话，旧页面退场那次 [stop] 会拿**新页面**刚写进来的
-   * `currentItemId` / `playSessionId` 去发 Stopped —— 把刚开始的那一集结算掉。
+   * 即使页面生命周期交错，旧页面的 [stop] 也不能结算新页面刚建立的会话。
    */
   @Volatile
   private var sessionToken: Any? = null
 
-  /** 与 [itemIds] **同序同长**的媒体源 Id（多版本条目预热时要用与播放一致的那个） */
+  /** 与 [itemIds] **同序同长**的媒体源 Id，用于逐集上报实际版本。 */
   private var mediaSourceIds: List<String> = emptyList()
-
-  /**
-   * 已经预热过的 `"服务器Id:条目Id"`。
-   *
-   * 服务端 probe 完就写库了，同一条**没必要再打一次**；这份记录让「同一场播放里
-   * 来回切集」不会重复预热，也让本类对服务器的请求总数 = 条目数（每条最多一次）。
-   */
-  private val warmedKeys = HashSet<String>()
-
-  /**
-   * 预热任务（单槽）。
-   *
-   * ⚠️ 必须串行：用户明确要求「不能同时向 CDN 发大量请求」。这里用**一个 Job 槽**
-   * 保证同一时刻最多一条预热在飞 —— 上一个还没回来（服务端 probe 慢时可能十几秒）
-   * 就直接放弃新的预热，而不是排队堆起来。预热是纯优化，少做一次没有后果。
-   */
-  private var warmJob: Job? = null
-
-  /**
-   * 排队中的下一条预热（`itemId` / 媒体源 Id）。
-   *
-   * 只保留**最新**一个：切集是往前走的，排一队旧的没有意义；同时保证「永远只有一个
-   * 预热在飞」这条硬约束 —— 用户在意的是网盘 CDN 的风控，并发请求是大忌。
-   */
-  private var pendingWarm: Pair<String, String?>? = null
 
   /**
    * 结算「上一场还没收尾的播放」。
    *
-   * 只在切换内核时用到：GSY 的 `onCreate` 先于 mpv 的 `onDestroy`，两场会短暂共存。
-   * 不在这里结算的话，mpv 那场发出的 Stopped 会因为令牌不符被 [stop] 拒掉，
-   * 服务端上就一直挂着一条「正在播放」（网页端「正在播放」里那条不走）。
-   *
-   * ⚠️ 位置取 [lastReportedTicks]、**不取实时读数**：此刻新页面已经把 `positionProvider`
-   * 换成它自己的了，读出来是新片的 0 秒 —— 拿它给旧片发 Stopped 等于把旧片续播点清零。
-   * 一次都没成功上报过（ticks ≤ 0）就干脆不发，服务端本来也没有那条记录。
+   * 启动新会话前先结算本单例尚未收尾的上一场播放。
+   * 位置取 [lastReportedTicks]，避免新页面的状态覆盖旧会话。
    */
   private fun settlePreviousSession() {
     val itemId = currentItemId ?: return
@@ -220,7 +165,7 @@ object EmbyPlaybackReporter {
     val sid = intent?.getLongExtra(EXTRA_SERVER_ID, -1L) ?: -1L
     if (ids.isNullOrEmpty() || sid <= 0) return false
 
-    // 上一场还没收尾（切内核时新旧两个播放页短暂共存）⇒ 先结算它，再认领这一场。
+    // 上一场还没收尾时先结算它，再认领这一场。
     // 顺序不能反：settlePreviousSession 读的是「当前字段」，一旦下面开始覆盖就晚了。
     if (sessionToken != null && sessionToken !== token) settlePreviousSession()
     // 认领这一场：之后只有拿着同一令牌的 stop 才能收尾
@@ -297,25 +242,7 @@ object EmbyPlaybackReporter {
       }
     }
 
-    // 让播放页的 Emby 快捷操作（收藏等）拿到当前 server / item
-    EmbyPlayerActions.bind(intent)
-    // ⚠️「不喜欢」同样必须**起播时就 bind**。
-    //  之前只在 `reportProgressOnce()` 里、且仅当检测到切集时才 bind ——
-    //  于是刚进播放页那一整段时间 `DislikePlayerActions.currentKey` 还是 null，
-    //  横屏点按钮只会提示「当前视频没有可标记的来源」（反馈）。
-    //  切集时那次 bind 保留：它是「画面已经切到下一集」的权威时机。
-    //  bind 对相同 key 幂等（直接 return，零查询），两处都调没有额外开销。
-    app.marlboroadvance.mpvex.ui.player.DislikePlayerActions.bind(
-      app.marlboroadvance.mpvex.domain.dislike.DislikeKey(sid, firstId),
-      // ⚠️ 片名必须传。播放器里标记时**只有 id**，不传的话存进库里的记录
-      //   `title` 是空串 —— 管理页只能显示「（无标题）」，用户认不出标的是哪一部。
-      //   播放页本来就有片名（启动播放器时作为 title extra 传进来的），顺手带上即可。
-      title = intent?.getStringExtra("title").orEmpty(),
-    )
-
     startPolling()
-    // 第一条已经在放了 ⇒ 顺手把**下一条**预热掉（服务端 probe 完，切过去就秒开）。
-    warmNextItem(firstId)
     return true
   }
 
@@ -337,27 +264,15 @@ object EmbyPlaybackReporter {
   fun stop(token: Any? = null) {
     if (token != null && token !== sessionToken) return
 
-    // ⚠️ 位置必须在摘掉 provider **之前**读。
-    //    两个 provider 是 GSY 内核唯一的位置来源（`PlayerLib` 在 GSY 下 `canTouchNative`
-    //    恒 false，属性读出来是 null），mpv 这条路进到 `onDestroy` 时内核也已经被
-    //    `cleanupMPV()` 拆掉了。原来「先摘 provider、后读位置」的顺序 ⇒ 两者都读不到
-    //    ⇒ 只能退回 `lastReportedTicks`（最多差 10 秒）；播放不满 10 秒就退出时它还是 0，
-    //    于是 Stopped 把续播点写成 0 —— 用户看到的就是「退出后已观看 0%」。
+    // Read the live mpv position before cleanup closes the native handle.
     val itemId = currentItemId
     val liveTicks = if (itemId != null) readPositionTicks() else null
 
     sessionToken = null
     pollingJob?.cancel()
     pollingJob = null
-    // 预热只是优化：用户已经离开播放页了，没必要再占着一条请求
-    warmJob?.cancel()
-    warmJob = null
-    pendingWarm = null
-    // ⚠️ 先摘掉回调再往下走：这些 lambda 捕获着 Activity，不摘就是静态引用把它钉住
+    // Drop the Activity callback before asynchronous cleanup continues.
     idProvider = null
-    positionProvider = null
-    pausedProvider = null
-    EmbyPlayerActions.release()
 
     if (itemId == null) return
     // 实时读数优先；读不到才用「最后一次成功上报的位置」（别让 Stopped 把续播点写成 0）。
@@ -413,79 +328,7 @@ object EmbyPlaybackReporter {
   }
 
   /**
-   * 预热「[currentId] 的下一条」。
-   *
-   * ## 为什么需要它（v142）
-   *
-   * 随机播放 / 连播都是「起播才去请求这一条」。strm 条目在服务端还没 probe 过源文件时，
-   * 那次请求要先让服务端读远端文件、把大小时长写库 —— 能挂到分钟级。用户在播放页
-   * 点「下一个」，看到的就是又卡住了；同一部片第二次播就快了，因为服务端已经有缓存。
-   *
-   * 所以这里提前一条：当前这条放起来之后（[WARM_DELAY_MS] 之后，别跟它抢带宽），
-   * 用 [EmbyClient.warmStream] 让服务端先把下一条 probe 完。
-   *
-   * ## 三条硬约束（都是「别把服务器打爆」）
-   *
-   * · **只预热下一条**：不做整列表预取，请求数 = 条目数 × 1；
-   * · **串行**：单槽 [warmJob]，上一个没回来就不起新的；期间新的请求只**记成待办**
-   *   （[pendingWarm]），当前这条跑完再接着做 —— 不排队堆积、不并发；
-   * · **不跟 302**：[EmbyClient.warmStream] 内部 `followRedirects=false`，
-   *   请求只到我们自己的 Emby 服务器，**一个字节都不打网盘 CDN**。
-   *
-   * ⚠️ 本服务器的形态是「Emby 只存 .strm，真实文件在网盘 CDN 上」，所以这一条尤其要紧：
-   * 预热**不增加** CDN 的总请求量（那次服务端读远端文件的 probe 本来就要在切播时发生），
-   * 只是把它从「用户等待时」提前到「当前这条还在播时」。
-   *
-   * 预热失败 / 超时都没有后果：切到那一条时播放器自己再请求一次，行为与没有预热时一致。
-   */
-  private fun warmNextItem(currentId: String) {
-    val idx = itemIds.indexOf(currentId)
-    if (idx < 0 || idx + 1 >= itemIds.size) return
-    val nextId = itemIds[idx + 1]
-    val key = "$serverId:$nextId"
-    if (key in warmedKeys) return
-    val sourceId = mediaSourceIds.getOrNull(idx + 1)?.takeIf { it.isNotBlank() }
-
-    // ⚠️ 顺序要紧：先判「有没有在飞」，再记账。反过来的话，被跳过的那条会被误记成
-    //    「已预热」，之后就再也不会真的预热它了。
-    if (warmJob?.isActive == true) {
-      // 串行但不丢：只保留**最新**一个待办（旧的已经过时了，没必要排一队）
-      pendingWarm = nextId to sourceId
-      return
-    }
-    startWarm(nextId, sourceId)
-  }
-
-  /** 真正发一条预热（调用方保证同一时刻只有一个在飞） */
-  private fun startWarm(itemId: String, mediaSourceId: String?) {
-    val key = "$serverId:$itemId"
-    if (key in warmedKeys) return
-    warmedKeys.add(key)
-    // 记录别无限长：一场播放的条目数有限，真到几千条时清一次（服务端本来就已缓存）
-    if (warmedKeys.size > 512) warmedKeys.clear()
-    warmJob = scope.launch {
-      // 先让当前这条自己的缓冲跑起来，别跟它抢链路
-      delay(WARM_DELAY_MS)
-      runCatching {
-        val repository = get<EmbyRepository>(EmbyRepository::class.java)
-        val server = repository.getServer(serverId) ?: return@launch
-        EmbyClient.warmStream(server, itemId, mediaSourceId = mediaSourceId)
-      }
-      // 跑完再看有没有排队的：有就接着做（仍然只有一个在飞）
-      val queued = pendingWarm
-      pendingWarm = null
-      if (queued != null) startWarm(queued.first, queued.second)
-    }
-  }
-
-  /**
-   * 预热前的等待：当前这条刚起播时链路最紧张（拉容器头 + 首帧 + 缓冲），
-   * 这时候再压一条预热上去，帮倒忙的概率比帮忙大。6 秒后当前这条基本已经稳住。
-   */
-  private const val WARM_DELAY_MS = 6_000L
-
-  /**
-   * 「Start 已经发出去了但还没回来」的宽限期。
+   * "Start 已经发出去了但还没回来" 的宽限期。
    *
    * 轮询间隔 10 秒，给两轮的时间：超过这个时长还没有 `PlaySessionId` 就认为那次
    * Start 真的失败了（没网 / 服务端 500 / 回包字段缺失），[ensureSession] 才补发。
@@ -532,7 +375,7 @@ object EmbyPlaybackReporter {
         // ⚠️ **整轮兜住**。这里是 IO 协程的根：`scope` 用的是 `SupervisorJob` 且没有
         // CoroutineExceptionHandler ⇒ 任何一条漏兜的异常都会冒到线程的默认处理器，
         // 也就是「未捕获异常 ⇒ 进程直接死」。而本类恰好在**换片瞬间**读播放器状态
-        // （mpv 正在销毁/重建 core、GSY 的 manager 刚 detach），正是最容易抛的时刻 ——
+        // （mpv 正在销毁/重建 core），正是最容易抛的时刻 ——
         // 用户看到的就是「切下一集偶发闪退」。内部各步该兜的仍然各自兜，但兜漏一处
         // 不该由用户买单。
         runCatching { reportProgressOnce() }
@@ -572,18 +415,6 @@ object EmbyPlaybackReporter {
       playSessionId = ""
       // 换条目 ⇒ 上一场补发记录作废；新条目的 Start 马上就来
       sessionRepairFor = null
-      // 同步播放页 UI（收藏按钮等）到新的这一集。
-      // 各自兜住：任何一处抛都不该让下面的 Start 不发（漏一条 Start，这一集就不进
-      // 「继续观看」了）。
-      runCatching { EmbyPlayerActions.onItemChanged(playingItemId) }
-      // 「不喜欢」按钮同样要跟着切。走**内存快照**（一次 HashMap 查找，无 IO），
-      // 所以连播时按钮状态与画面在同一帧完成，不会出现"先亮后暗"
-      runCatching {
-        app.marlboroadvance.mpvex.ui.player.DislikePlayerActions.bind(
-          app.marlboroadvance.mpvex.domain.dislike.DislikeKey(serverId, playingItemId),
-        )
-      }
-
       if (previousItemId != null) {
         runCatching {
           repository.reportPlaybackStopped(
@@ -614,9 +445,6 @@ object EmbyPlaybackReporter {
       // 新一集从 0 秒起播（连播不续播）⇒ 本场起点跟着归零，回落保护自然失效
       sessionStartTicks = 0L
       sessionStartedAt = android.os.SystemClock.elapsedRealtime()
-      // 切到下一条了 ⇒ 立刻把「再下一条」预热掉。这就是 v142 修「随机播放切下一个
-      // 还是卡住」的那一刀：卡的不是客户端，是服务端还没 probe 过那条 strm 的远端源。
-      warmNextItem(playingItemId)
       return
     }
 
@@ -707,37 +535,14 @@ object EmbyPlaybackReporter {
 
   // ─── mpv 属性读取 ───
 
-  /**
-   * 当前播放位置（ticks）；**读不到返回 null**。
-   *
-   * ① 播放页给了 [positionProvider] 就用它（GSY 内核走这条，见那里的注释）；
-   * ② 否则读 mpv 的 `time-pos`。
-   *
-   * ⚠️ 读不到绝不能当成 0：`PlayerLib.getPropertyInt` 在内核还没就绪（`coreReady`
-   * 未置位）、或当前内核不是 mpv 时返回 null。把这个 null 写成 0 发出去，等于告诉
-   * 服务端「这部片从头开始播」—— 服务端于是把续播点清零，「继续观看」里那条记录
-   * 就退回到第 0 秒。比「这一轮不报」有害得多，所以宁可跳过本轮。
-   */
+  /** Current mpv position in Emby ticks; null means the native property is unavailable. */
   private fun readPositionTicks(): Long? {
-    // ⚠️ provider 存在就以它的返回值为准（哪怕是 null），不回退 —— 两边同时存在时
-    //    回退会读到上一个内核残留的位置。provider 抛异常同样按「读不到」处理。
-    positionProvider?.let { provider ->
-      return runCatching { provider() }
-        .onFailure { EmbyLog.warn("positionProvider 异常（已忽略）", it) }
-        .getOrNull()
-    }
     val seconds = runCatching { PlayerLib.getPropertyInt("time-pos") }.getOrNull() ?: return null
     return EmbyTicks.secondsToTicks(seconds.toLong())
   }
 
-  private fun readIsPaused(): Boolean {
-    pausedProvider?.let { provider ->
-      return runCatching { provider() }
-        .onFailure { EmbyLog.warn("pausedProvider 异常（已忽略）", it) }
-        .getOrNull() ?: false
-    }
-    return runCatching { PlayerLib.getPropertyBoolean("pause") }.getOrNull() == true
-  }
+  private fun readIsPaused(): Boolean =
+    runCatching { PlayerLib.getPropertyBoolean("pause") }.getOrNull() == true
 
   /**
    * 当前正在播的 Emby 条目 Id。
@@ -796,12 +601,12 @@ object EmbyPlaybackReporter {
   const val EXTRA_ITEM_IDS = "emby_item_ids"
 
   /**
-   * 当前播放的媒体源 Id（在线字幕搜索要用）。
+   * 当前播放的媒体源 Id，用于进度上报与多版本播放状态。
    *
    * 为什么单独一个 extra 而不是让播放页反查：反查要走
    * `GET /Items/{Id}` 再从 `MediaSources` 里挑，播放页是**每切一集都变**的，
-   * 而这个值在启动播放器时就已经知道了。多版本媒体（4K/1080P 各带不同字幕）
-   * 时挑错就搜到别的版本的字幕，所以必须由启动侧显式传。
+   * 而这个值在启动播放器时就已经知道了。多版本媒体（4K/1080P）选错时，
+   * 服务端会把进度落到错误版本，所以必须由启动侧显式传。
    */
   const val EXTRA_MEDIA_SOURCE_ID = "emby_media_source_id"
 
@@ -839,9 +644,8 @@ object EmbyPlaybackReporter {
     /**
      * 本场播放的令牌。
      *
-     * 每个播放页一个。切换内核时新旧页面会短暂共存（GSY 的 `onCreate` 先于 mpv 的
-     * `onDestroy`），两个观察者指向同一个单例 —— 旧页面必须能认出「我要收尾的那一场
-     * 已经不是当前这一场了」，否则会拿新页面刚写进去的条目去发 Stopped。
+     * 每个播放页一个。若页面生命周期交错，旧页面必须认出当前会话已被新页面接管，
+     * 否则会拿新页面刚写进去的条目去发 Stopped。
      */
     private val token = Any()
 
@@ -855,8 +659,7 @@ object EmbyPlaybackReporter {
      * ## 为什么不能只靠 [onDestroy]
      *
      * 1. **内核已经拆了**：`PlayerActivity` 的 `super.onDestroy()` 在最后一行，那时
-     *    `cleanupMPV()` 已经跑过、GSY 那边 `super.onDestroy()` 反而在最前面 ——
-     *    两条路都读不到实时位置，只能退回「最后一次上报的位置」。
+     *    `cleanupMPV()` 已经跑过，读不到实时位置，只能退回「最后一次上报的位置」。
      * 2. **进程随时可能被回收**：返回手势 / 从最近任务划掉之后，系统可以在 `onDestroy`
      *    刚结束时就杀掉进程，那条才 `launch` 出去的请求根本来不及发出。
      *
@@ -881,9 +684,7 @@ object EmbyPlaybackReporter {
  * 供 EmbyViewModel 调用：写入上报所需的 extra。
  *
  * @param mediaSourceIds 与 [itemIds] **同序同长**的媒体源 Id 列表；
- *   取不到的用空串占位（在线字幕搜索会跳过空串）。
- *   用列表而不是单值，是因为播放器支持连播 —— 切集后当前媒体源会变，
- *   播放页按当前 `playlistIndex` 取对应那个。
+ *   取不到的用空串占位，保证切集后仍可按 `playlistIndex` 对齐。
  */
 internal fun Intent.putEmbyPlaybackExtras(
   server: EmbyServer,

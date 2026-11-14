@@ -52,7 +52,7 @@ fun PlayerStatusIndicators(
   netSpeedBytesPerSec: Long?,
   modifier: Modifier = Modifier,
 ) {
-  val controlColor = MaterialTheme.colorScheme.onSurface
+  val controlColor = app.marlboroadvance.mpvex.ui.theme.controlColor
 
   // 时钟每分钟跳一次就够了；用「对齐到下一分钟」而不是每秒，
   // 否则控制条显示期间每秒重组一次，白烧电（红线 54 的性能纪律）。
@@ -65,12 +65,7 @@ fun PlayerStatusIndicators(
   val speed = netSpeedBytesPerSec.takeIf { showNetSpeed }
   if (!showClock && !showBattery && speed == null) return
 
-  // ⚠️ 刻意**不用** `Arrangement.spacedBy` 等距排列。
-  //
-  // 三项是两类东西：时钟 / 电量是**设备状态**，网速是**这条流的运行状态**。
-  // 等距摆成一排会读作「三个同级读数」，一行三个单元、又长又碎；
-  // 分组之后段内 6dp、段间 12dp，眼睛看到的是「时间电量 │ 网速」两块，
-  // 总宽也比等距略窄（少 4dp），且开关增减时不会把整条重新等分。
+  // Speed belongs immediately before battery so battery remains the far-right status.
   Row(
     modifier = modifier,
     verticalAlignment = Alignment.CenterVertically,
@@ -81,24 +76,25 @@ fun PlayerStatusIndicators(
         color = controlColor.copy(alpha = 0.85f),
         style = MaterialTheme.typography.labelMedium,
         maxLines = 1,
-        // 电量不在时不留尾巴：padding 挂在自己的尾部，由「后面还有没有别的」决定
-        modifier = if (showBattery && batteryPercent >= 0 || speed != null) {
-          Modifier.padding(end = 6.dp)
+        modifier = if (speed != null || showBattery && batteryPercent >= 0) {
+          Modifier.padding(end = 12.dp)
         } else {
           Modifier
         },
+      )
+    }
+    if (speed != null) {
+      NetworkSpeedLabel(
+        speedBytesPerSec = speed,
+        tint = controlColor.copy(alpha = 0.85f),
+        modifier = if (showBattery && batteryPercent >= 0) Modifier.padding(end = 12.dp) else Modifier,
       )
     }
     if (showBattery && batteryPercent >= 0) {
       BatteryWithPercent(
         percent = batteryPercent,
         tint = controlColor.copy(alpha = 0.85f),
-        modifier = if (speed != null) Modifier.padding(end = 12.dp) else Modifier,
       )
-    }
-    // 网速放最后：顺序固定为 时钟 / 电量 / 网速，不随开关变化重排 —— 位置一动就会显得跳。
-    if (speed != null) {
-      NetworkSpeedLabel(speedBytesPerSec = speed)
     }
   }
 }

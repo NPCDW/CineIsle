@@ -1,7 +1,6 @@
 package app.marlboroadvance.mpvex.ui.player
 
 import android.content.Context
-import android.os.Environment
 import android.util.AttributeSet
 import android.util.Log
 
@@ -40,10 +39,8 @@ private const val MPV_HWDEC_CODECS = "h264,hevc,mpeg2video,vc1,vp8,vp9,av1"
 /**
  * 网络流（http/https）在 lavf 协议层的基准选项：中途断了接着拉，而不是直接判死。
  *
- * ⚠️ 这里只放**与取流无关的通用项**，不要往字符串里塞只对某类地址成立的开关 ——
- * [app.marlboroadvance.mpvex.ui.player.PlayerActivity] 每次换片都会用这个常量
- * **整体重写** `stream-lavf-o`，再按地址是不是本地代理决定是否追加 `seekable=1`。
- * 两处必须共用同一个常量：谁在别处硬编码一份，换片时就会把「断流重连」悄悄弄丢。
+ * 这里只放通用重连项，初始化时统一设置 `stream-lavf-o`。
+ * HTTP 的可寻址能力由协议层正常判断，不按地址强制断言；换片也保留这些基准选项。
  */
 internal const val LAVF_STREAM_OPTS = "reconnect=1,reconnect_streamed=1,reconnect_delay_max=20"
 
@@ -131,9 +128,12 @@ class MPVView(
     // `mediacodec-copy`（每帧 12.4 MB 回拷 + 12.4 MB 上传，4K60 ≈ 1.5 GB/s）。
     // 代价见 [DefaultDecoder.HardwarePlus]：字幕 / OSD / 着色器 / 截图全部失效。
     val directOutput = decoderPreferences.isDirectOutput()
+    val anime4kEnabled = decoderPreferences.enableAnime4K.get() &&
+      decoderPreferences.anime4kMode.get() != Anime4KManager.Mode.OFF.name
     setVo(
       when {
         directOutput -> "mediacodec_embed"
+        anime4kEnabled && decoderPreferences.gpuNext.get() && !decoderPreferences.useVulkan.get() -> "gpu"
         decoderPreferences.gpuNext.get() -> "gpu-next"
         else -> "gpu"
       },
@@ -278,17 +278,13 @@ class MPVView(
 
     MPVLib.setPropertyBoolean("keep-open", true)
     MPVLib.setPropertyBoolean("input-default-bindings", true)
+    // Compose owns the complete player chrome. User config must not re-enable a second seek UI.
+    MPVLib.setOptionString("osc", "no")
+    MPVLib.setOptionString("osd-bar", "no")
 
     MPVLib.setOptionString("tls-verify", "yes")
     MPVLib.setOptionString("tls-ca-file", "${context.filesDir.path}/cacert.pem")
 
-    val screenshotDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-    screenshotDir.mkdirs()
-    MPVLib.setOptionString("screenshot-directory", screenshotDir.path)
-
-    VideoFilters.entries.forEach {
-      MPVLib.setOptionString(it.mpvProperty, it.preference(decoderPreferences).get().toString())
-    }
 
     MPVLib.setOptionString("speed", playerPreferences.defaultSpeed.get().toString())
 
@@ -396,6 +392,7 @@ class MPVView(
       "video-params/aspect" to MPVLib.MpvFormat.MPV_FORMAT_DOUBLE,
       "video-params/w" to MPVLib.MpvFormat.MPV_FORMAT_INT64,
       "video-params/h" to MPVLib.MpvFormat.MPV_FORMAT_INT64,
+      "video-params/rotate" to MPVLib.MpvFormat.MPV_FORMAT_INT64,
       "eof-reached" to MPVLib.MpvFormat.MPV_FORMAT_FLAG,
       "user-data/mpvex/show_text" to MPVLib.MpvFormat.MPV_FORMAT_STRING,
       "user-data/mpvex/toggle_ui" to MPVLib.MpvFormat.MPV_FORMAT_STRING,
@@ -532,7 +529,9 @@ class MPVView(
     if (decoderPreferences.isDirectOutput()) return
     runCatching {
       val enabled = decoderPreferences.enableAnime4K.get()
-      val gpuNextActive = decoderPreferences.gpuNext.get()
+      val mode = decoderPreferences.anime4kMode.get()
+      val runtimeFallbackActive = enabled && mode != Anime4KManager.Mode.OFF.name
+      val gpuNextActive = decoderPreferences.gpuNext.get() && !runtimeFallbackActive
       val useVulkan = decoderPreferences.useVulkan.get()
 
       val shaderChain =
@@ -540,7 +539,7 @@ class MPVView(
           isEnabled = enabled,
           gpuNextActive = gpuNextActive,
           useVulkan = useVulkan,
-          modeStr = decoderPreferences.anime4kMode.get(),
+          modeStr = mode,
           qualityStr = decoderPreferences.anime4kQuality.get(),
         )
 

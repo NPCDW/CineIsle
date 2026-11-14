@@ -1,5 +1,10 @@
 package app.marlboroadvance.mpvex.ui.cine
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.openEmbyMediaCard
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -92,6 +97,7 @@ fun CineSearchOverlay(
   val app = context.applicationContext as Application
   val viewModel: EmbyViewModel = viewModel(factory = EmbyViewModel.factory(app))
   val server by viewModel.currentServer.collectAsState()
+  CompositionLocalProvider(LocalEmbyImageServer provides server) {
   val space = CineTheme.space
   val colors = CineTheme.colors
   val keyboard = LocalSoftwareKeyboardController.current
@@ -102,6 +108,8 @@ fun CineSearchOverlay(
   var searching by remember { mutableStateOf(false) }
   var errorText by remember { mutableStateOf<String?>(null) }
   var lastTerm by remember { mutableStateOf("") }
+  val noServerText = stringResource(R.string.cine_search_no_server)
+  val emptyDescription = stringResource(R.string.cine_search_empty_desc, lastTerm.ifBlank { query })
 
   val focusRequester = remember { FocusRequester() }
   LaunchedEffect(Unit) { focusRequester.requestFocus() }
@@ -123,7 +131,7 @@ fun CineSearchOverlay(
     val current = server
     if (current == null) {
       searching = false
-      errorText = context.getString(R.string.cine_search_no_server)
+      errorText = noServerText
       return@LaunchedEffect
     }
     val found = runCatching { viewModel.search(current, term, limit = SEARCH_LIMIT) }
@@ -212,7 +220,7 @@ fun CineSearchOverlay(
         results.isEmpty() -> CineStatePanel(
           icon = Icons.Outlined.SearchOff,
           title = stringResource(R.string.cine_search_empty_title),
-          description = context.getString(R.string.cine_search_empty_desc, lastTerm.ifBlank { query }),
+          description = emptyDescription,
         )
 
         else -> CineMediaGrid(
@@ -221,7 +229,7 @@ fun CineSearchOverlay(
           columns = columns,
           onClick = { media ->
             keyboard?.hide()
-            play(media.item, media.resumeSeconds)
+            openEmbyMediaCard(media.item, onOpenDetail) { play(it, media.resumeSeconds) }
           },
           onLongClick = { media ->
             keyboard?.hide()
@@ -232,6 +240,7 @@ fun CineSearchOverlay(
         )
       }
     }
+  }
   }
 }
 
@@ -379,7 +388,7 @@ fun CineGridOverlay(
       items = items,
       cardWidth = cardWidth,
       columns = columns,
-      onClick = { play(it.item, it.resumeSeconds) },
+      onClick = { media -> openEmbyMediaCard(media.item, onOpenDetail) { play(it, media.resumeSeconds) } },
       onLongClick = { onOpenDetail(it.item) },
     )
   }
@@ -418,6 +427,7 @@ private fun CineMediaGrid(
     itemsIndexed(items) { _, media ->
       CinePosterCard(
         media = media,
+        server = media.imageServer,
         width = cardWidth,
         onClick = { onClick(media) },
         onLongClick = { onLongClick(media) },

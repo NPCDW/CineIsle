@@ -1,5 +1,9 @@
 package app.marlboroadvance.mpvex.ui.cine.list
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,7 +26,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.CloudOff
-import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -56,10 +59,12 @@ import app.marlboroadvance.mpvex.ui.browser.emby.EmbyDetailScreen
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyPagingFooter
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyPersonScreen
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyViewModel
+import app.marlboroadvance.mpvex.ui.browser.emby.FavoriteMediaFilter
 import app.marlboroadvance.mpvex.ui.browser.emby.PagedList
 import app.marlboroadvance.mpvex.ui.browser.emby.PagedResult
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImage
 import app.marlboroadvance.mpvex.ui.browser.emby.pagingSource
+import app.marlboroadvance.mpvex.ui.browser.emby.rememberBrowsePage
 import app.marlboroadvance.mpvex.ui.browser.emby.rememberPredictivePreloadDistance
 import app.marlboroadvance.mpvex.ui.cine.CineTheme
 import app.marlboroadvance.mpvex.ui.cine.components.CineFilterChip
@@ -88,11 +93,12 @@ import org.koin.compose.koinInject
  * 翻页之后顺序就断了，用户会以为「排序坏了」。宁可不给，也不给一个会骗人的按钮。
  */
 @Composable
-fun CineFavoritesScreen(modifier: Modifier = Modifier) {
+fun CineFavoritesScreen(modifier: Modifier = Modifier, onBackToServers: (() -> Unit)? = null) {
   val context = LocalContext.current
   val app = context.applicationContext as Application
   val viewModel: EmbyViewModel = viewModel(factory = EmbyViewModel.factory(app))
   val server by viewModel.currentServer.collectAsState()
+  CompositionLocalProvider(LocalEmbyImageServer provides server) {
   val backStack = LocalBackStack.current
   val prefs = koinInject<BrowserPreferences>()
 
@@ -104,21 +110,32 @@ fun CineFavoritesScreen(modifier: Modifier = Modifier) {
   val scope = rememberCoroutineScope()
 
   var tab by remember { mutableIntStateOf(0) }
+  var mediaFilter by remember { mutableStateOf(FavoriteMediaFilter.ALL) }
   var actors by remember { mutableStateOf<List<EmbyItem>>(emptyList()) }
   var actorsLoading by remember { mutableStateOf(false) }
   var reloadTicket by remember { mutableIntStateOf(0) }
 
-  val page = remember { PagedList<EmbyItem>(keyOf = { it.Id ?: it.Name ?: "" }) }
+  val page = server?.let { rememberBrowsePage(it, "cine-favorites-v2:${mediaFilter.name}") }
+    ?: remember { PagedList<EmbyItem>(keyOf = { it.Id ?: it.Name ?: "" }) }
   val gridState = rememberLazyGridState()
   val preloadDistance = rememberPredictivePreloadDistance(prefs)
 
+  val queryFilter = mediaFilter
   suspend fun loadPage(startIndex: Int, limit: Int): PagedResult<EmbyItem>? {
     val current = server ?: return null
-    val result = viewModel.loadFavorites(current, startIndex, limit)
-    return PagedResult(result.items, result.totalCount, limit)
+    val result = viewModel.loadFavorites(
+      current, startIndex, limit, includeItemTypes = queryFilter.includeItemTypes,
+    )
+    return PagedResult(
+      items = result.items.filter(queryFilter::accepts),
+      totalCount = null,
+      pageSize = limit,
+      exhausted = result.totalCount > 0 && startIndex + result.consumedCount >= result.totalCount,
+      consumedCount = result.consumedCount,
+    )
   }
 
-  LaunchedEffect(server?.id, tab, reloadTicket) {
+  LaunchedEffect(server?.id, tab, mediaFilter, reloadTicket) {
     if (tab == 0) page.reload(::loadPage)
   }
 
@@ -138,9 +155,9 @@ fun CineFavoritesScreen(modifier: Modifier = Modifier) {
     loader = ::loadPage,
   )
 
-  val mediaUi = remember(server?.id, page.items) {
+  val mediaUi = remember(server, page.items, queryFilter) {
     val current = server ?: return@remember emptyList()
-    page.items.map { viewModel.toCineMedia(current, it) }
+    page.items.filter(queryFilter::accepts).map { viewModel.toCineMedia(current, it) }
   }
 
   val columns = if (wide) 4 else 2
@@ -151,8 +168,7 @@ fun CineFavoritesScreen(modifier: Modifier = Modifier) {
   val bottomInset = LocalNavigationBarHeight.current + 24.dp
 
   Column(modifier = modifier.fillMaxSize().background(colors.surface)) {
-    // 根 tab，没有返回键
-    CineGlassTopBar(title = stringResource(R.string.cine_nav_favorites))
+    CineGlassTopBar(title = stringResource(R.string.cine_nav_favorites), onBack = onBackToServers)
 
     Row(
       modifier = Modifier.padding(start = space.screenH, top = 12.dp, bottom = 4.dp),
@@ -168,6 +184,21 @@ fun CineFavoritesScreen(modifier: Modifier = Modifier) {
         selected = tab == 1,
         onClick = { tab = 1 },
       )
+    }
+
+    if (tab == 0) {
+      Row(
+        modifier = Modifier.padding(start = space.screenH, end = space.screenH, top = 4.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        FavoriteMediaFilter.entries.forEach { filter ->
+          CineFilterChip(
+            text = filter.label,
+            selected = mediaFilter == filter,
+            onClick = { mediaFilter = filter },
+          )
+        }
+      }
     }
 
     if (tab == 0) {
@@ -249,9 +280,8 @@ fun CineFavoritesScreen(modifier: Modifier = Modifier) {
       backStack.add(EmbyDetailScreen(itemId = media.id, title = media.title))
     },
     // 取消收藏后这条要从「收藏」里消失 ⇒ 重拉第一页
-    onChanged = { reloadTicket++ },
-    onDeleted = { reloadTicket++ },
   )
+  }
 }
 
 /** 收藏的演员：圆形头像墙 */
@@ -313,6 +343,7 @@ private fun FavoritePeopleGrid(
                 .background(colors.skeleton),
             ) {
               EmbyImage(
+                server = server,
                 url = if (server != null && personId != null) {
                   EmbyClient.imageUrl(server, personId, "Primary", person.PrimaryImageTag, 300)
                 } else {
@@ -338,133 +369,6 @@ private fun FavoritePeopleGrid(
       }
     }
   }
-}
-
-/**
- * Cine 历史页（M3）。
- *
- * 数据走 `loadHistory`（已看过的条目，服务端按播放时间倒序），与 Classic 同一个接口。
- * 网格里带进度条：历史页的高频动作是「接着看」，进度是它唯一需要的额外信息。
- */
-@Composable
-fun CineHistoryScreen(modifier: Modifier = Modifier) {
-  val context = LocalContext.current
-  val app = context.applicationContext as Application
-  val viewModel: EmbyViewModel = viewModel(factory = EmbyViewModel.factory(app))
-  val server by viewModel.currentServer.collectAsState()
-  val backStack = LocalBackStack.current
-  val prefs = koinInject<BrowserPreferences>()
-
-  val wide = rememberCineWide()
-  val space = CineTheme.space
-  val colors = CineTheme.colors
-  val type = CineTheme.type
-  val playController = rememberCinePlayController()
-  val actionSheet = rememberCineActionSheetState()
-  val scope = rememberCoroutineScope()
-
-  var reloadTicket by remember { mutableIntStateOf(0) }
-  val page = remember { PagedList<EmbyItem>(keyOf = { it.Id ?: it.Name ?: "" }) }
-  val gridState = rememberLazyGridState()
-  val preloadDistance = rememberPredictivePreloadDistance(prefs)
-
-  suspend fun loadPage(startIndex: Int, limit: Int): PagedResult<EmbyItem>? {
-    val current = server ?: return null
-    val result = viewModel.loadHistory(current, startIndex, limit)
-    return PagedResult(result.items, result.totalCount, limit)
-  }
-
-  LaunchedEffect(server?.id, reloadTicket) { page.reload(::loadPage) }
-  page.AutoLoadMore(source = gridState.pagingSource(), distance = preloadDistance, loader = ::loadPage)
-
-  val mediaUi = remember(server?.id, page.items) {
-    val current = server ?: return@remember emptyList()
-    page.items.map { viewModel.toCineMedia(current, it) }
-  }
-
-  val columns = if (wide) 4 else 2
-  val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-  val cardWidth: Dp = (
-    (screenWidth - space.screenH * 2 - space.itemGap * (columns - 1)) / columns
-    ).coerceAtLeast(120.dp)
-  val bottomInset = LocalNavigationBarHeight.current + 24.dp
-
-  Column(modifier = modifier.fillMaxSize().background(colors.surface)) {
-    CineGlassTopBar(title = stringResource(R.string.cine_nav_history))
-
-    val errorText = page.error
-    when {
-      page.loading && page.items.isEmpty() -> CollectionSkeleton(
-        cardWidth = cardWidth,
-        columns = columns,
-      )
-
-      errorText != null && page.items.isEmpty() -> CineStatePanel(
-        icon = Icons.Outlined.CloudOff,
-        title = stringResource(R.string.cine_state_error_title),
-        description = errorText,
-        isError = true,
-        primaryLabel = stringResource(R.string.cine_state_error_action),
-        onPrimary = { reloadTicket++ },
-      )
-
-      !page.loading && page.items.isEmpty() -> CineStatePanel(
-        icon = Icons.Outlined.History,
-        title = stringResource(R.string.cine_history_empty_title),
-        description = stringResource(R.string.cine_history_empty_desc),
-      )
-
-      else -> CinePosterGrid(
-        items = mediaUi,
-        cardWidth = cardWidth,
-        columns = columns,
-        state = gridState,
-        contentPadding = PaddingValues(
-          start = space.screenH,
-          end = space.screenH,
-          top = 14.dp,
-          bottom = bottomInset,
-        ),
-        // 单击进详情，长按弹玻璃菜单
-        onClick = { media ->
-          backStack.add(EmbyDetailScreen(itemId = media.id, title = media.title))
-        },
-        onLongClick = { media -> actionSheet.show(media) },
-        header = {
-          Text(
-            text = stringResource(
-              R.string.cine_history_count,
-              mediaUi.size,
-            ),
-            style = type.cardMeta,
-            color = colors.onSurfaceVariant,
-            modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
-          )
-        },
-        footer = {
-          EmbyPagingFooter(
-            appending = page.appending,
-            hasMore = page.hasMore,
-            error = page.error,
-            loadedCount = mediaUi.size,
-            onRetry = { scope.launch { page.retry(::loadPage) } },
-          )
-        },
-      )
-    }
-  }
-
-  CineActionSheetHost(
-    state = actionSheet,
-    server = server,
-    viewModel = viewModel,
-    playController = playController,
-    onOpenDetail = { media ->
-      backStack.add(EmbyDetailScreen(itemId = media.id, title = media.title))
-    },
-    onChanged = { reloadTicket++ },
-    onDeleted = { reloadTicket++ },
-  )
 }
 
 /** 骨架：与真实网格同列同比例，数据落地不跳位 */

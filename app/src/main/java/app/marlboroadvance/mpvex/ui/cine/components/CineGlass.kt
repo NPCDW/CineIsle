@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,6 +32,17 @@ import dev.chrisbanes.haze.hazeSource
  */
 @Suppress("CompositionLocalAllowlist")
 val LocalCineHaze: ProvidableCompositionLocal<HazeState?> = staticCompositionLocalOf { null }
+
+/**
+ * Whether Cine glass consumers should sample and blur the current Haze source.
+ *
+ * Pages override this with `false` while their main scroll container is moving. The value changes
+ * only at scroll start/stop, so glass consumers switch once to their existing flat fallback rather
+ * than invalidating composition for every scroll pixel. Keeping this separate from [LocalCineHaze]
+ * also leaves the source and every glass surface at exactly the same size in both modes.
+ */
+@Suppress("CompositionLocalAllowlist")
+val LocalCineHazeEnabled: ProvidableCompositionLocal<Boolean> = compositionLocalOf { true }
 
 /**
  * 把内容标记成「可以被玻璃层取样的背景」。
@@ -109,7 +121,7 @@ fun Modifier.cineGlass(
 }
 
 /**
- * 有模糊源就上 Haze，没有就退回平涂。
+ * 有模糊源且当前页面静止时上 Haze；滚动中或没有源时退回同尺寸平涂。
  *
  * 拆成独立函数是为了让「有没有模糊」这一个判断只写一次 —— 上层 [cineGlass]
  * 只负责投影 / 描边这些与模糊无关的部分。
@@ -123,9 +135,10 @@ private fun Modifier.cineHazeEffect(
   flat: Color,
 ): Modifier {
   val hazeState = LocalCineHaze.current
+  val hazeEnabled = LocalCineHazeEnabled.current
   val colors = CineTheme.colors
 
-  if (hazeState == null) {
+  if (hazeState == null || !hazeEnabled) {
     return this.background(flat, shape)
   }
 

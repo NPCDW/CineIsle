@@ -1,8 +1,12 @@
 package app.marlboroadvance.mpvex.domain.emby
 
-import android.widget.Toast
 import app.marlboroadvance.mpvex.database.repository.EmbyServerRepository
-import kotlinx.coroutines.CompletableDeferred
+import app.marlboroadvance.mpvex.database.repository.EmbyServerLoadState
+import app.marlboroadvance.mpvex.domain.postgres.PostgresException
+import app.marlboroadvance.mpvex.domain.postgres.PostgresFailure
+import java.security.MessageDigest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -11,425 +15,271 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/**
- * Emby 业务仓库。封装 [EmbyClient] 调用 + 持有当前会话服务器，
- * 对 UI 层暴露挂起 API，所有网络调用都切到 IO 线程。
- *
- * 用法：
- * ```
- * class EmbyLibraryScreenViewModel(private val repo: EmbyRepository): ViewModel() {
- *   val servers = repo.observeServers()
- *   fun loadLibs(server: EmbyServer) = viewModelScope.launch {
- *     val libs = repo.getVirtualFolders(server)
- *     ...
- *   }
- * }
- * ```
- */
+/** Read-only shared configuration and browse/play APIs. New auth tokens live only in this process. */
 class EmbyRepository(
   private val serverRepo: EmbyServerRepository,
   private val context: android.content.Context,
-  /**
-   * 收藏时间账本。Emby 只存 `IsFavorite` 这个布尔值，没有收藏时间戳
-   * （见 [app.marlboroadvance.mpvex.database.entities.FavoriteMarkEntity] 的 KDoc），
-   * 收藏页「收藏时间」排序只能靠它。
-   *
-   * ⚠️ 挂在这一层而不是各个 UI 调用点：单条收藏一共有三条路
-   * （详情页/媒体库卡片 → EmbyViewModel、播放器控件 → EmbyPlayerActions、
-   * 视界流红心 → FeedViewModel），它们最终都走 [setFavorite] / [favorite] / [unfavorite]。
-   * 在 UI 层记账迟早漏一条，而漏掉的表现是「排序里它凭空沉到最后」，很难查。
-   *
-   * 可空：仓库在单元测试里不需要账本，传 null 即退化为「不记录」。
-   */
-  private val favoriteClock: FavoriteClock? = null,
+  private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+  private val authenticate: (EmbyServer, String, String) -> EmbyAuthResult = EmbyClient::authenticateByName,
 ) {
-  // 仓库是 Koin 单例，用它自己的作用域维护"当前服务器"，保证跨页面一致
-  private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
   private val prefs by lazy {
     context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
   }
-
   private val _currentServer = MutableStateFlow<EmbyServer?>(null)
-  /** 当前正在浏览的服务器；null 表示未选择/未配置 */
   val currentServer: StateFlow<EmbyServer?> = _currentServer.asStateFlow()
+  val loadState: StateFlow<EmbyServerLoadState> = serverRepo.loadState
+  private val sessionLock = Any()
+  private val loginLock = Mutex()
+  private var sourceRevision = serverRepo.sourceChanged.value.revision
+  private var restoredSource: String? = null
+  private data class Session(val userId: String, val token: String, val lastConnected: Long)
+  private val sessions = mutableMapOf<String, Session>()
 
-  /**
-   * 第二地址（内网 / frp 公网双入口）的落盘与择优，见 [EmbyEndpointResolver]。
-   *
-   * 与 [failover] 的分工：这里换的是**同一台服务器**的入口，[failover] 换的是**服务器**。
-   * 顺序不能反 —— 内网抖一下就把用户甩到另一台服务器上是错的。
-   */
-  private val endpointStore = EmbyEndpointStore(context)
+  /** Includes source generation, UUID, credentials and the full shared HTTP/device identity. */
+  private fun sessionKey(server: EmbyServer): String {
+    val fields = listOf(server.sourceKey, server.sourceRevision.toString(), server.remoteId,
+      server.username, server.password, server.client, server.device, server.deviceId,
+      server.clientVersion, server.userAgent, server.baseUrl, server.reverseProxyId, server.reverseProxyUrl)
+    val digest = MessageDigest.getInstance("SHA-256")
+    fields.forEach { value ->
+      val bytes = value.toByteArray(Charsets.UTF_8)
+      digest.update("${bytes.size}:".toByteArray(Charsets.UTF_8))
+      digest.update(bytes)
+    }
+    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+  }
 
-  val endpoints: EmbyEndpointResolver =
-    EmbyEndpointResolver(
-      scope = scope,
-      store = endpointStore,
-    )
+  private fun sourceMatches(server: EmbyServer): Boolean = serverRepo.isCurrent(server)
 
-  /**
-   * 主 / 备服务器的自动接管（见 [EmbyFailoverController]）。
-   *
-   * 落盘在独立的 `emby_failover` 偏好里，**不动 Room 表** —— 加这个功能不需要任何迁移。
-   * 由仓库持有而不是做成另一个 Koin 单例：它要读的「当前服务器」、服务器列表都在这里，
-   * 做成单例会为了拿这两样再反向依赖回来，绕一圈没有收益。
-   */
-  val failover: EmbyFailoverController =
-    EmbyFailoverController(
-      context = context,
-      scope = scope,
-      currentServerProvider = { _currentServer.value },
-      // 自动切换只改内存：不写 current_server_id，重启后仍然回到用户选的那台
-      switchInMemory = { _currentServer.value = it },
-      loadServers = { serverRepo.getAll() },
-      // 一台服务器可能有两个入口，任一入口的失败都算「这台」的失败
-      hostBelongsTo = { server, host ->
-        server.host.equals(host, ignoreCase = true) ||
-          endpointStore.altFor(server.id)?.host?.equals(host, ignoreCase = true) == true
-      },
-    )
+  private fun overlay(server: EmbyServer): EmbyServer = sessions[sessionKey(server)]?.let {
+    server.copy(userId = it.userId, apiToken = it.token, lastConnected = it.lastConnected)
+  } ?: server
 
-  /** 「启动时恢复上次服务器」是否已完成。未完成前读 [currentServer] 一定是 null。 */
-  private val restored = CompletableDeferred<Unit>()
+  private fun readyServers(): List<EmbyServer> = when (val state = loadState.value) {
+    is EmbyServerLoadState.Ready -> state.servers
+    is EmbyServerLoadState.Failed -> throw PostgresException(state.reason)
+    EmbyServerLoadState.Loading -> throw PostgresException(PostgresFailure.LOAD)
+  }
+
+  private fun clearCurrent() { _currentServer.value = null }
+
+  /** Resolve an existing row against current source/credentials, applying its memory-only token. */
+  fun sessionServer(server: EmbyServer): EmbyServer = synchronized(sessionLock) {
+    if (!sourceMatches(server)) throw PostgresException(PostgresFailure.SOURCE_CHANGED)
+    val fresh = serverRepo.snapshotById(server.id)?.takeIf {
+      it.remoteId == server.remoteId && it.sourceKey == server.sourceKey
+    } ?: throw PostgresException(PostgresFailure.NOT_FOUND)
+    if (sessionKey(fresh) != sessionKey(server)) throw PostgresException(PostgresFailure.SOURCE_CHANGED)
+    overlay(fresh).also { it.requireSupportedConnection() }
+  }
+
+  /** Non-blocking image/player lookup; does not trigger config loading or JDBC. */
+  fun sessionSnapshotById(id: Long): EmbyServer? = synchronized(sessionLock) {
+    serverRepo.snapshotById(id)?.let { overlay(it) }
+  }
+
+  /** UI-only source-bound lookup by shared UUID; does not query or authenticate. */
+  fun sessionSnapshotByRemoteId(remoteId: String, source: app.marlboroadvance.mpvex.domain.postgres.PostgresSourceToken): EmbyServer? =
+    synchronized(sessionLock) {
+      serverRepo.snapshotServers().firstOrNull {
+        it.remoteId == remoteId && it.sourceKey == source.sourceKey && it.sourceRevision == source.revision
+      }?.let { overlay(it) }
+    }
+
+  private fun syncReady(servers: List<EmbyServer>) = synchronized(sessionLock) {
+    val state = serverRepo.sourceChanged.value
+    if (sourceRevision != state.revision) {
+      sourceRevision = state.revision
+      restoredSource = null
+      sessions.clear()
+      clearCurrent()
+    }
+    val source = state.sourceKey.ifBlank { servers.firstOrNull()?.sourceKey.orEmpty() }
+    if (servers.any { it.sourceKey != source || it.sourceRevision != state.revision }) return@synchronized
+    val keys = servers.mapTo(mutableSetOf(), ::sessionKey)
+    sessions.keys.retainAll(keys)
+    val current = _currentServer.value
+    if (current != null) {
+      val fresh = servers.firstOrNull { it.sourceKey == current.sourceKey && it.remoteId == current.remoteId }
+      // Keep the selected row visible even if its line/reverse reference becomes invalid: no fallback.
+      if (fresh == null) clearCurrent() else _currentServer.value = overlay(fresh)
+    } else if (restoredSource != source) {
+      val savedSource = prefs.getString(KEY_CURRENT_SOURCE, null)
+      val savedRemote = prefs.getString(KEY_CURRENT_REMOTE, null)
+      val preferred = servers.firstOrNull { savedSource == source && it.remoteId == savedRemote }
+        ?: servers.firstOrNull { !it.disabled && it.isLoggedIn }
+        ?: servers.firstOrNull { !it.disabled }
+      if (preferred != null) {
+        _currentServer.value = overlay(preferred)
+        prefs.edit().putString(KEY_CURRENT_SOURCE, preferred.sourceKey).putString(KEY_CURRENT_REMOTE, preferred.remoteId).apply()
+      }
+    }
+    restoredSource = source
+    if (servers.isEmpty()) clearCurrent()
+  }
 
   init {
-    // 拼 URL 的统一出口装上解析器：没装时行为与改造前完全一致（回落服务器自身配置）
-    EmbyEndpoints.resolver = endpoints
-    // 入口切换要给用户一句提示（v160）。
-    //
-    // 为什么不放在某个页面里：触发点是「任意一次真实请求失败」，那一刻用户可能
-    // 在首页、媒体库、甚至在播放器里 —— 没有哪个界面「拥有」这个事件。
-    // 放在仓库（Koin 单例、随 App 存活）才不会漏。
-    //
-    // ⚠️ Toast 必须在主线程：仓库的 scope 是 `Dispatchers.Default`，非主线程上
-    // `Toast#show()` 会抛 "Can't create handler inside thread that has not called
-    // Looper.prepare()"（Toast 的 TN 在构造时绑当前线程的 Looper）。
-    scope.launch {
-      endpoints.switched.collect { server ->
-        val now = endpoints.currentFor(server)
-        val text =
-          if (now.baseUrl == server.primaryEndpoint().baseUrl) {
-            "已切回主地址 ${now.host}:${now.port}"
-          } else {
-            "已切换到第二地址 ${now.host}:${now.port}"
-          }
-        withContext(Dispatchers.Main) {
-          Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
-        }
-      }
-    }
-    // 进出家门 / 切 WiFi / 断开蜂窝时重估所有配了双入口的服务器。
-    // 只在网络变化这一刻探，请求路径上零开销。
-    registerNetworkCallback()
-    // 让 [EmbyHttp] 的重试拦截器知道「当前该用哪个 token」——
-    // 401 自动重登后要拿**新** token 重放原请求，拦截器自己取不到。
-    EmbyHttp.installTokenSource { _currentServer.value?.apiToken.orEmpty() }
-    // 请求失败的处理顺序（很重要）：
-    //   ① 有第二地址 ⇒ 先让地址层竞速自救（换到内网/公网另一个入口，或确认只是网络闪断）；
-    //   ② 只有两个入口都不通，或者压根没配第二地址，才算「这台服务器有问题」，交给主备接管。
-    // 顺序反了会出现「家里内网抖一下就被甩到另一台服务器上」。
-    // 只挂 shared 那一档（API 请求），图片 / 拉流不走这里 —— 它们失败不代表服务器不可用。
-    EmbyHttp.onTransientFailure = failure@{ host, _ ->
-      val target = _currentServer.value ?: return@failure
-      scope.launch {
-        val outcome = runCatching {
-          endpoints.refresh(target, failedHost = host)
-        }.getOrDefault(EmbyEndpointResolver.Outcome.NoAlternate)
-        val deadLike =
-          outcome == EmbyEndpointResolver.Outcome.Dead ||
-            outcome == EmbyEndpointResolver.Outcome.NoAlternate
-        // 刚换过入口的 30 秒内不判死：新入口可能还在建连接
-        if (deadLike && !endpoints.switchedRecently(target.id)) {
-          failover.onRequestFailure(host)
-        }
-      }
-    }
-    // 收到 401 时自动重登一次再重放请求（对应清单 1.3）。
-    // 以前 token 过期只能靠各调用点手动 ensureLoggedIn 补，漏掉的地方
-    // 用户看到的是「筛选面板空着」「列表不刷新」这类莫名其妙的表现。
-    EmbyHttp.onUnauthorized = {
-      val target = _currentServer.value
-      if (target != null && target.username.isNotBlank() && target.password.isNotBlank()) {
-        scope.launch {
-          runCatching { relogin(target) }.onSuccess { setCurrentServer(it) }
-        }
-      }
-    }
-
-    // 启动后自动恢复上次使用的服务器
-    scope.launch {
+    EmbyHttp.installSessionSource { requested -> sessionServer(requested) }
+    EmbyHttp.onUnauthorized = unauthorized@{ requested ->
       try {
-        val all = runCatching { serverRepo.getAll() }.getOrDefault(emptyList())
-        if (all.isNotEmpty()) {
-          val savedId = prefs.getLong(KEY_CURRENT_SERVER_ID, -1L)
-          val preferred = all.firstOrNull { it.id == savedId && it.isLoggedIn }
-            ?: all.firstOrNull { it.isLoggedIn }
-            ?: all.firstOrNull()
-          if (preferred != null) setCurrentServer(preferred)
+        val target = sessionServer(requested)
+        if (target.apiToken != requested.apiToken && target.isLoggedIn) return@unauthorized target.apiToken
+        if (target.username.isBlank() || target.password.isBlank()) return@unauthorized null
+        kotlinx.coroutines.runBlocking(Dispatchers.IO) { relogin(target).apiToken }
+      } catch (error: CancellationException) { throw error } catch (_: Exception) { null }
+    }
+    // Observe only: constructing App/Koin does not load secure config or connect to PostgreSQL.
+    scope.launch {
+      serverRepo.sourceChanged.collect { source ->
+        synchronized(sessionLock) {
+          if (sourceRevision != source.revision) {
+            sourceRevision = source.revision
+            restoredSource = null
+            sessions.clear()
+            clearCurrent()
+          }
         }
-      } finally {
-        restored.complete(Unit)
       }
+    }
+    scope.launch {
+      loadState.collect { state -> if (state is EmbyServerLoadState.Ready) syncReady(state.servers) }
     }
   }
 
-  /**
-   * 等待「启动恢复」完成后返回当前服务器。
-   *
-   * 冷启动时服务器是从数据库异步恢复的，[currentServer] 一开始是 null。
-   * 如果直接读，首屏会误判成「没有服务器」而清空数据，用户必须手动点刷新才看得到内容。
-   * 因此所有首屏加载都要用这个方法取服务器。
-   */
   suspend fun awaitCurrentServer(): EmbyServer? {
-    restored.await()
+    if (loadState.value is EmbyServerLoadState.Loading) serverRepo.getAll()
+    val state = loadState.first { it !is EmbyServerLoadState.Loading }
+    if (state is EmbyServerLoadState.Failed) throw PostgresException(state.reason)
+    syncReady((state as EmbyServerLoadState.Ready).servers)
     return _currentServer.value
   }
 
-  /** 切换当前服务器（选择会被记住，下次启动自动恢复） */
-  fun setCurrentServer(server: EmbyServer) {
-    _currentServer.value = server
-    prefs.edit().putLong(KEY_CURRENT_SERVER_ID, server.id).apply()
+  /** Only source+remote UUID selection is persisted locally. No configuration or token is written. */
+  fun setCurrentServer(server: EmbyServer) = synchronized(sessionLock) {
+    val fresh = sessionServer(server)
+    _currentServer.value = fresh
+    prefs.edit().putString(KEY_CURRENT_SOURCE, fresh.sourceKey).putString(KEY_CURRENT_REMOTE, fresh.remoteId).apply()
+    Unit
   }
 
-  // ─── 第二地址（内网 / 公网双入口）───
-
-  /** 各服务器配的第二地址。UI 必须 collect 这个 flow，别直接调函数读快照 */
-  val endpointAlts: StateFlow<Map<Long, EmbyEndpoint>> = endpointStore.alts
-
-  /** 当前生效入口（可能已经切到第二地址） */
-  val activeEndpoints: StateFlow<Map<Long, EmbyEndpoint>> = endpoints.active
-
-  /** 这台此刻实际走在哪个入口 */
-  fun activeEndpointFor(server: EmbyServer): EmbyEndpoint = endpoints.currentFor(server)
-
-  /**
-   * 设置 / 取消某台的第二地址。
-   *
-   * 传 null 或空 host = 取消。改完立刻重估当前服务器，用户不用退出重进。
-   */
-  fun setAltEndpoint(serverId: Long, endpoint: EmbyEndpoint?) {
-    endpointStore.setAlt(serverId, endpoint)
-    if (endpoint == null || endpoint.host.isBlank()) {
-      endpoints.forget(serverId)
-      return
-    }
-    val current = _currentServer.value
-    if (current?.id == serverId) {
-      scope.launch { runCatching { endpoints.refresh(current) } }
-    }
-  }
-
-  /** 按 id 切换当前服务器 */
   suspend fun selectServer(id: Long): EmbyServer? {
-    val server = serverRepo.getById(id) ?: return null
+    val server = getServer(id) ?: return null
     setCurrentServer(server)
-    return server
+    return currentServer.value
   }
 
-  /**
-   * 用户在管理页**亲手**选了某台服务器。
-   *
-   * 与 [setCurrentServer] 的区别只有一点，但很关键：要告诉 [failover]「这是一次明确选择」——
-   * 清掉降级态、停掉后台的自动切回，否则用户刚点到备用上，20 秒后主恢复又把它抢回去。
-   */
-  fun selectServerAsUser(server: EmbyServer) {
-    setCurrentServer(server)
-    failover.onUserSelected(server)
-    // 用户主动选服务器时顺手定一次入口：从另一台切过来时，可能正好换了网络环境
-    if (endpointStore.altFor(server.id) != null) {
-      scope.launch { runCatching { endpoints.refresh(server) } }
-    }
-  }
+  fun selectServerAsUser(server: EmbyServer) { setCurrentServer(server) }
 
-  /**
-   * 监听默认网络变化。
-   *
-   * 「在家 / 在外」这件事不需要读 WiFi 名字（那要定位权限，而且连着家里 WiFi
-   * 也不代表内网那台可达 —— 访客网络、VLAN 隔离都会骗过它），改成：
-   * **网络一变就重新竞速两台地址，谁先通走谁**。判据是事实而不是猜测。
-   */
-  private fun registerNetworkCallback() {
-    val cm =
-      context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
-        as? android.net.ConnectivityManager ?: return
-    runCatching {
-      cm.registerDefaultNetworkCallback(
-        object : android.net.ConnectivityManager.NetworkCallback() {
-          override fun onAvailable(network: android.net.Network) {
-            // 回调在工作线程：只起协程，别在这里做网络
-            scope.launch {
-              runCatching { endpoints.refreshAll(serverRepo.getAll()) }
-            }
-          }
-        },
-      )
-    }.onFailure {
-      android.util.Log.w("EmbyRepository", "注册网络变化回调失败", it)
-    }
-  }
-
-  /** 重新从数据库读取并刷新当前服务器（例如凭据更新后） */
   suspend fun refreshCurrentServer(): EmbyServer? {
-    val id = _currentServer.value?.id ?: return null
-    val fresh = serverRepo.getById(id) ?: return null
-    setCurrentServer(fresh)
-    return fresh
+    refreshServers()
+    return currentServer.value
   }
 
-  /**
-   * 确保当前服务器处于已登录状态；未登录时用库中保存的账号密码自动重登。
-   * 返回可安全用于 API 调用的服务器，失败返回 null。
-   */
+  suspend fun refreshServers() {
+    serverRepo.refresh()
+    syncReady(readyServers())
+  }
+
   suspend fun ensureLoggedIn(server: EmbyServer? = _currentServer.value): EmbyServer? {
-    val target = server ?: return null
+    val target = server?.let(::sessionServer) ?: return null
     if (target.isLoggedIn) return target
     if (target.username.isBlank() || target.password.isBlank()) return null
-    return runCatching { relogin(target) }
-      .onSuccess { setCurrentServer(it) }
-      .getOrNull()
+    return try { relogin(target) }
+      catch (error: CancellationException) { throw error }
+      catch (error: PostgresException) { throw error }
+      catch (_: Exception) { null }
   }
 
-  // ─── 服务器管理（透传给 EmbyServerRepository）───
-  val servers = serverRepo.allServers
-
-  suspend fun getServers(): List<EmbyServer> = serverRepo.getAll()
-
-  suspend fun getServer(id: Long): EmbyServer? = serverRepo.getById(id)
-
-  suspend fun addServer(server: EmbyServer): Long = serverRepo.add(server)
-
-  suspend fun updateServer(server: EmbyServer) = serverRepo.update(server)
-
-  suspend fun deleteServer(server: EmbyServer) {
-    serverRepo.delete(server)
-    // 顺手清掉与它相关的「备用」映射与降级态：留着只会指向一个不存在的 id
-    failover.forgetServer(server.id)
-    // 第二地址与它的生效入口缓存同样要清（否则 id 复用时会串到新服务器上）
-    endpointStore.forget(server.id)
-    endpoints.forget(server.id)
+  val servers = serverRepo.allServers.map { rows -> synchronized(sessionLock) { rows.map(::overlay) } }
+  suspend fun getServers(): List<EmbyServer> {
+    val rows = serverRepo.getAll()
+    syncReady(rows)
+    return synchronized(sessionLock) { rows.map(::overlay) }
+  }
+  suspend fun getServer(id: Long): EmbyServer? = serverRepo.getById(id)?.let { row ->
+    synchronized(sessionLock) { overlay(row) }
   }
 
-  // ─── 登录 ───
-
-  /**
-   * 用 [host]/[port]/[useHttps]/[username]/[password] 登录，写入服务器记录。
-   * 返回保存后的服务器（含 id + apiToken + userId）。
-   *
-   * a7：同主机 + 同用户重复登录 = **更新原记录**（凭据刷新，不产生重复行）；
-   * 同主机 + **不同用户** = 新插一行，即「同一服务器多用户」的存在形态。
-   *
-   * 失败会抛 [EmbyApiException]。
-   */
-  suspend fun loginAndSave(
-    name: String,
-    host: String,
-    port: Int,
-    useHttps: Boolean,
-    username: String,
-    password: String,
-  ): EmbyServer = withContext(Dispatchers.IO) {
-    // 临时服务器对象（不入库）拿 token
-    val probe = EmbyServer(
-      name = name,
-      host = host,
-      port = port,
-      useHttps = useHttps,
-      username = username,
-      password = password,
-    )
-    val auth = EmbyClient.authenticateByName(probe, username, password)
-    val token = auth.AccessToken
-      ?: throw EmbyApiException(401, "AuthenticateByName 没返回 AccessToken")
-    val userId = auth.User?.Id ?: throw EmbyApiException(401, "AuthenticateByName 没返回 User.Id")
-
-    // 顺便拿服务器名/版本
-    val info = runCatching { EmbyClient.getPublicSystemInfo(probe) }.getOrNull()
-
-    // a7 多用户数据模型：**同一台服务器（host+port+https）下不同用户各占一行**，
-    // 各自带自己的 token / UserData 口径（播放进度、收藏、不喜欢标记全部分开）；
-    // 而**同一个用户**重复登录则更新原行，不新插 —— 不然每重登一次
-    // 管理页就多出一条一模一样的记录，用户根本分不清点哪个。
-    val existing =
-      runCatching { serverRepo.getAll() }.getOrDefault(emptyList()).firstOrNull {
-        it.host == probe.host &&
-          it.port == probe.port &&
-          it.useHttps == probe.useHttps &&
-          it.userId == userId
+  /** Authenticate the existing shared row, but keep all returned credentials in this process only. */
+  suspend fun relogin(server: EmbyServer): EmbyServer = withContext(Dispatchers.IO) {
+    loginLock.withLock {
+      val target = sessionServer(server)
+      // Concurrent 401s reuse the already-refreshed session rather than login repeatedly.
+      if (target.isLoggedIn && target.apiToken != server.apiToken) return@withLock target
+      val expectedKey = sessionKey(target)
+      val auth = authenticate(target, target.username, target.password)
+      val token = auth.AccessToken?.takeIf { it.isNotEmpty() } ?: throw EmbyApiException(401, "重登录失败")
+      val userId = auth.User?.Id?.takeIf { it.isNotEmpty() } ?: throw EmbyApiException(401, "重登录失败：无 User.Id")
+      synchronized(sessionLock) {
+        val fresh = sessionServer(target)
+        if (sessionKey(fresh) != expectedKey) throw PostgresException(PostgresFailure.SOURCE_CHANGED)
+        sessions[expectedKey] = Session(userId, token, System.currentTimeMillis())
+        val loggedIn = overlay(fresh)
+        if (_currentServer.value?.let(::sessionKey) == expectedKey) _currentServer.value = loggedIn
+        loggedIn
       }
-    if (existing != null) {
-      val refreshed =
-        existing.copy(
-          name = name,
-          username = username,
-          password = password,
-          userId = userId,
-          apiToken = token,
-          serverName = info?.ServerName ?: existing.serverName,
-          version = info?.Version ?: existing.version,
-          lastConnected = System.currentTimeMillis(),
-        )
-      serverRepo.update(refreshed)
-      val saved = serverRepo.getById(existing.id) ?: refreshed
-      // 正在用的正是这一台：token 换了必须立刻生效，否则后续请求还带着旧 token（401）
-      if (_currentServer.value?.id == existing.id) setCurrentServer(saved)
-      // ⚠️ 这里是 withContext 的 lambda（非 inline），不能 `return saved` ——
-      // 非局部返回会被编译器拒（RETURN_NOT_ALLOWED）。用 if/else 两分支
-      // 各自以表达式收尾，语义与「提前 return」完全一致。
-      saved
-    } else {
-      // 入库前先看一眼：这是不是第一台服务器（之前一台都没有）
-      val wasFirstServer = runCatching { serverRepo.getAll().isEmpty() }.getOrDefault(false)
-
-      // 入库（带凭据）
-      val id = serverRepo.add(
-        probe.copy(
-          userId = userId,
-          apiToken = token,
-          serverName = info?.ServerName ?: name,
-          version = info?.Version ?: "",
-        ),
-      )
-      // 入库时 createdAt 等被 Room 填，重新查一次返回完整对象
-      val saved = serverRepo.getById(id) ?: throw EmbyApiException(500, "无法读取新添加的服务器记录")
-
-      // 第一台服务器直接设为当前：没有历史选择可恢复，不设的话添加完
-      // 还得手动再点一下才能进库浏览
-      if (wasFirstServer) setCurrentServer(saved)
-      saved
     }
   }
 
-  /**
-   * 重新登录已有服务器记录（token 过期或被 revoke 时用）。
-   * 用 [server] 的用户名密码重新调 authenticateByName，回写凭据。
-   */
-  suspend fun relogin(server: EmbyServer): EmbyServer = withContext(Dispatchers.IO) {
-    val auth = EmbyClient.authenticateByName(server, server.username, server.password)
-    val token = auth.AccessToken ?: throw EmbyApiException(401, "重登录失败")
-    val userId = auth.User?.Id ?: throw EmbyApiException(401, "重登录失败：无 User.Id")
-    serverRepo.saveCredentials(
-      id = server.id,
-      userId = userId,
-      apiToken = token,
-      serverName = server.serverName,
-      version = server.version,
-    )
-    serverRepo.getById(server.id)?.copy(
-      userId = userId,
-      apiToken = token,
-    ) ?: server
+  /** Search-only auth: suspendable Call, memory overlay only, no selection or home refresh. */
+  private suspend fun searchLogin(server: EmbyServer): EmbyServer = loginLock.withLock {
+    val target = sessionServer(server)
+    if (target.isLoggedIn && target.apiToken != server.apiToken) return@withLock target
+    if (target.username.isBlank() || target.password.isBlank()) throw EmbyApiException(401, "")
+    val expectedKey = sessionKey(target)
+    val auth = EmbyClient.authenticateForSearch(target)
+    currentCoroutineContext().ensureActive()
+    val token = auth.AccessToken?.takeIf { it.isNotEmpty() } ?: throw EmbyApiException(401, "")
+    val userId = auth.User?.Id?.takeIf { it.isNotEmpty() } ?: throw EmbyApiException(401, "")
+    synchronized(sessionLock) {
+      val fresh = sessionServer(target)
+      if (sessionKey(fresh) != expectedKey) throw PostgresException(PostgresFailure.SOURCE_CHANGED)
+      sessions[expectedKey] = Session(userId, token, System.currentTimeMillis())
+      // Deliberately do not assign _currentServer, even if this row happens to be selected.
+      overlay(fresh)
+    }
   }
+
+  private suspend fun <T> searchRequest(server: EmbyServer, request: suspend (EmbyServer) -> T): T {
+    val fresh = sessionServer(server)
+    val target = if (fresh.isLoggedIn) fresh else searchLogin(fresh)
+    val result = try {
+      request(target)
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (error: EmbyApiException) {
+      if (error.code != 401) throw error
+      currentCoroutineContext().ensureActive()
+      // Only one explicit 401 session recovery, never IO/timeout/cancellation retries.
+      request(searchLogin(target))
+    }
+    currentCoroutineContext().ensureActive()
+    sessionServer(server) // Source/row/credentials must still match before publishing a late result.
+    return result
+  }
+
+  suspend fun searchMediaPage(
+    server: EmbyServer,
+    term: String,
+    includeItemTypes: List<String>,
+    limit: Int = 80,
+  ): EmbyItemsResult = searchRequest(server) { EmbyClient.searchMediaPage(it, term, includeItemTypes, limit) }
+
+  suspend fun searchPersonPage(server: EmbyServer, term: String, limit: Int = 40): EmbyItemsResult =
+    searchRequest(server) { EmbyClient.searchPersonPage(it, term, limit) }
 
   // ─── 媒体库 / 媒体 ───
 
   /** 媒体库列表（根级 VirtualFolders） */
   suspend fun getVirtualFolders(server: EmbyServer): List<EmbyItem> =
     withContext(Dispatchers.IO) {
-      EmbyClient.getVirtualFolders(server).Items
+      EmbyClient.getVirtualFolders(sessionServer(server)).Items
     }
 
   /** 库内媒体分页 */
@@ -493,7 +343,7 @@ class EmbyRepository(
     fields: String = EmbyClient.ITEM_FIELDS,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
     EmbyClient.getItems(
-      server,
+      sessionServer(server),
       parentId = parentId,
       sortBy = sortBy,
       sortOrder = sortOrder,
@@ -540,7 +390,7 @@ class EmbyRepository(
     sortBy: String? = null,
     sortOrder: String? = null,
   ): EmbyItemsResult = getItems(
-    server = server,
+    server = sessionServer(server),
     parentId = parentId,
     sortBy = sortBy,
     sortOrder = sortOrder,
@@ -572,7 +422,7 @@ class EmbyRepository(
     sortBy: String? = null,
     sortOrder: String? = null,
   ): EmbyItemsResult = getItems(
-    server = server,
+    server = sessionServer(server),
     parentId = parentId,
     sortBy = sortBy,
     sortOrder = sortOrder,
@@ -615,7 +465,7 @@ class EmbyRepository(
       currentCoroutineContext().ensureActive()
       val limit = (maxItems - scanned).coerceAtMost(pageSize)
       val page = EmbyClient.getItems(
-        server = server,
+        server = sessionServer(server),
         parentId = query.parentId,
         sortBy = query.sortBy,
         sortOrder = query.sortOrder,
@@ -646,9 +496,9 @@ class EmbyRepository(
       )
       val items = page.Items
       if (page.TotalRecordCount > 0) total = page.TotalRecordCount
-      if (items.isEmpty()) break
-      scanned += items.size
-      startIndex += items.size
+      if (page.consumedCount == 0) break
+      scanned += page.consumedCount
+      startIndex += page.consumedCount
       onChunk(EmbyScanChunk(scanned = scanned, total = total, items = items))
       if (total > 0 && startIndex >= total) break
     }
@@ -658,19 +508,42 @@ class EmbyRepository(
   /** 某媒体库的筛选可选项（类型 / 标签 / 年份 / 分级） */
   suspend fun getFilterOptions(    server: EmbyServer,
     parentId: String? = null,
-  ): EmbyFilterOptions = withContext(Dispatchers.IO) { EmbyClient.getFilterOptions(server, parentId) }
+  ): EmbyFilterOptions = withContext(Dispatchers.IO) { EmbyClient.getFilterOptions(sessionServer(server), parentId) }
 
   /** 继续观看 */
   suspend fun getResumeItems(server: EmbyServer, limit: Int = 20): List<EmbyItem> =
-    withContext(Dispatchers.IO) { EmbyClient.getResumeItems(server, limit = limit).Items }
+    withContext(Dispatchers.IO) { EmbyClient.getResumeItems(sessionServer(server), limit = limit).Items }
 
   /** 最新加入 */
   suspend fun getLatestItems(server: EmbyServer, limit: Int = 16): List<EmbyItem> =
-    withContext(Dispatchers.IO) { EmbyClient.getLatestItems(server, limit = limit) }
+    withContext(Dispatchers.IO) { EmbyClient.getLatestItems(sessionServer(server), limit = limit) }
+
+  /** Explicitly authorized Episode-only user-state writes; no shared configuration writes. */
+  suspend fun setMediaFavorite(server: EmbyServer, item: EmbyItem, enabled: Boolean): EmbyUserData =
+    mediaOperation(server, item) { EmbyClient.setMediaFavorite(it, item, enabled) }
+
+  suspend fun setMediaPlayed(server: EmbyServer, item: EmbyItem, enabled: Boolean): EmbyUserData =
+    mediaOperation(server, item) { EmbyClient.setMediaPlayed(it, item, enabled) }
+
+  private suspend fun mediaOperation(
+    server: EmbyServer, item: EmbyItem, operation: (EmbyServer) -> EmbyUserData,
+  ): EmbyUserData = withContext(Dispatchers.IO) {
+    EmbyClient.requireUserStateMedia(item)
+    val target = ensureLoggedIn(sessionServer(server))
+      ?: throw EmbyEpisodeOperationException("请先登录后再操作")
+    currentCoroutineContext().ensureActive()
+    val result = operation(target)
+    currentCoroutineContext().ensureActive()
+    val fresh = sessionServer(server)
+    if (!fresh.isLoggedIn || fresh.userId != target.userId) {
+      throw EmbyEpisodeOperationException("登录身份已变化，请刷新后核对状态")
+    }
+    result
+  }
 
   /** 媒体详情 */
   suspend fun getItem(server: EmbyServer, itemId: String): EmbyItem =
-    withContext(Dispatchers.IO) { EmbyClient.getItem(server, itemId) }
+    withContext(Dispatchers.IO) { EmbyClient.getItem(sessionServer(server), itemId) }
 
   /**
    * 收藏夹列表。
@@ -684,11 +557,15 @@ class EmbyRepository(
     limit: Int = 100,
     sortBy: String? = null,
     sortOrder: String? = null,
+    includeItemTypes: List<String>? = null,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
+    val mediaTypes = if (includeItemTypes == listOf("Movie")) listOf("Video") else null
     EmbyClient.getFavoriteItems(
-      server = server,
+      server = sessionServer(server),
       startIndex = startIndex,
       limit = limit,
+      mediaTypes = mediaTypes,
+      includeItemTypes = includeItemTypes,
       sortBy = sortBy,
       sortOrder = sortOrder,
     )
@@ -701,7 +578,7 @@ class EmbyRepository(
    * 见 [EmbyClient.getFavoritePersons] 的说明。
    */
   suspend fun getFavoritePersons(server: EmbyServer): List<EmbyItem> =
-    withContext(Dispatchers.IO) { EmbyClient.getFavoritePersons(server) }
+    withContext(Dispatchers.IO) { EmbyClient.getFavoritePersons(sessionServer(server)) }
 
   /**
    * 收藏的类型 / 工作室列表（收藏页「类型 / 工作室」tab）。
@@ -710,14 +587,14 @@ class EmbyRepository(
    * 正式条目，所以走服务端 `Filters=IsFavorite` 筛选，不需要客户端再过滤。
    */
   suspend fun getFavoriteGenres(server: EmbyServer): EmbyItemsResult =
-    withContext(Dispatchers.IO) { EmbyClient.getFavoriteGenres(server) }
+    withContext(Dispatchers.IO) { EmbyClient.getFavoriteGenres(sessionServer(server)) }
 
   suspend fun getFavoriteStudios(server: EmbyServer): EmbyItemsResult =
-    withContext(Dispatchers.IO) { EmbyClient.getFavoriteStudios(server) }
+    withContext(Dispatchers.IO) { EmbyClient.getFavoriteStudios(sessionServer(server)) }
 
   /** 按 Id 取单个人员（演员作品页收藏红心查当前状态用） */
   suspend fun getPersonById(server: EmbyServer, personId: String): EmbyItem? =
-    withContext(Dispatchers.IO) { EmbyClient.getPersonById(server, personId) }
+    withContext(Dispatchers.IO) { EmbyClient.getPersonById(sessionServer(server), personId) }
 
   /**
    * 读单个人员的收藏真值（true=已收藏 / false=未收藏 / null=读不到）。
@@ -727,7 +604,7 @@ class EmbyRepository(
    * `IsFavorite=true` 列表查询），专门绕开「按 URL 缓存导致回读拿到旧值」的坑。
    */
   suspend fun getPersonFavoriteState(server: EmbyServer, personId: String): Boolean? =
-    withContext(Dispatchers.IO) { EmbyClient.getPersonFavoriteState(server, personId) }
+    withContext(Dispatchers.IO) { EmbyClient.getPersonFavoriteState(sessionServer(server), personId) }
 
   /**
    * 随机播放：返回 [limit] 个随机项。可指定 [includeItemTypes]
@@ -740,7 +617,7 @@ class EmbyRepository(
     limit: Int = 50,
     isFavorite: Boolean? = null,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getRandomItems(server, parentId, includeItemTypes, limit, isFavorite)
+    EmbyClient.getRandomItems(sessionServer(server), parentId, includeItemTypes, limit, isFavorite)
   }
 
   // ─── 相似推荐 / 即混 / 续播 ───
@@ -757,7 +634,7 @@ class EmbyRepository(
     mediaTypes: List<String>? = listOf("Video"),
     excludeIdList: List<String>? = null,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getSimilarItems(server, itemId, limit, includeItemTypes, mediaTypes, excludeIdList)
+    EmbyClient.getSimilarItems(sessionServer(server), itemId, limit, includeItemTypes, mediaTypes, excludeIdList)
   }
 
   /** 即混（服务端基于种子自动续播一批）。 */
@@ -769,7 +646,7 @@ class EmbyRepository(
     mediaTypes: List<String>? = listOf("Video"),
     filters: List<String>? = null,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getInstantMixItems(server, itemId, limit, includeItemTypes, mediaTypes, filters)
+    EmbyClient.getInstantMixItems(sessionServer(server), itemId, limit, includeItemTypes, mediaTypes, filters)
   }
 
   /** 续播列表。服务端没开「剧集自动续播」时会是空列表。 */
@@ -778,19 +655,19 @@ class EmbyRepository(
     limit: Int = 20,
     seriesId: String? = null,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getNextUpItems(server, limit, seriesId)
+    EmbyClient.getNextUpItems(sessionServer(server), limit, seriesId)
   }
 
   // ─── 合集（BoxSet）───
   // ⚠️ REST 路径是 `/Collections` 不是 `/BoxSets`（那是 Jellyfin 的命名），
-  // 且参数名一律 `Ids`（只有 Playlist 增删用 `EntryIds`）。详见 [EmbyClient] 5.7 节。
+  // 且参数名一律 `Ids`。详见 [EmbyClient] 5.7 节。
 
   suspend fun getCollections(
     server: EmbyServer,
     startIndex: Int = 0,
     limit: Int = 100,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getCollections(server, startIndex, limit)
+    EmbyClient.getCollections(sessionServer(server), startIndex, limit)
   }
 
   suspend fun getCollectionItems(
@@ -799,79 +676,17 @@ class EmbyRepository(
     startIndex: Int = 0,
     limit: Int = 100,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getCollectionItems(server, collectionId, startIndex, limit)
+    EmbyClient.getCollectionItems(sessionServer(server), collectionId, startIndex, limit)
   }
 
-  /**
-   * 新建合集。返回 null 表示**建成了但拿不到 Id**（部分部署只在 `Location` 头里给地址），
-   * 调用方要能接受这种情况：提示「已创建，请刷新」而不是当失败。
-   */
-  suspend fun createCollection(
-    server: EmbyServer,
-    name: String,
-    itemIds: List<String> = emptyList(),
-    parentId: String? = null,
-  ): EmbyCollectionCreationResult = withContext(Dispatchers.IO) {
-    EmbyClient.createCollection(server, name, itemIds, parentId)
-  }
-
-  suspend fun addToCollection(
-    server: EmbyServer,
-    collectionId: String,
-    itemIds: List<String>,
-  ): Boolean = withContext(Dispatchers.IO) {
-    EmbyClient.addToCollection(server, collectionId, itemIds)
-  }
-
-  suspend fun removeFromCollection(
-    server: EmbyServer,
-    collectionId: String,
-    itemIds: List<String>,
-  ): Boolean = withContext(Dispatchers.IO) {
-    EmbyClient.removeFromCollection(server, collectionId, itemIds)
-  }
-
-  // ─── 显示偏好（DisplayPreferences）───
-  // ⚠️ 粒度是「每个媒体库一份」而不是「每个用户一份」，且写操作是**整体覆盖**。
-  // 详见 [EmbyClient] 5.8 节与 [EmbyDisplayPrefsCodec]。
-
-  /** 读某个目标的显示偏好。目标不存在时返回 null（404 / 空响应都当「还没有」） */
+  /** Read existing display preferences; Android never persists them remotely. */
   suspend fun getDisplayPreferences(
     server: EmbyServer,
     displayPreferencesId: String,
     client: String = EmbyClient.DISPLAY_PREFS_CLIENT,
   ): EmbyDisplayPreferences? = withContext(Dispatchers.IO) {
-    EmbyClient.getDisplayPreferences(server, displayPreferencesId, client)
+    EmbyClient.getDisplayPreferences(sessionServer(server), displayPreferencesId, client)
   }
-
-  /** 写某个目标的显示偏好（整体覆盖，务必先读后写，理由见上） */
-  suspend fun postDisplayPreferences(
-    server: EmbyServer,
-    displayPreferencesId: String,
-    client: String,
-    preferences: EmbyDisplayPreferences,
-  ): Boolean = withContext(Dispatchers.IO) {
-    EmbyClient.postDisplayPreferences(server, displayPreferencesId, client, preferences)
-  }
-
-  /**
-   * 拉条目章节（清单 #19：GSY 内核的章节数据源）。
-   *
-   * mpv 侧的章节来自容器内嵌章节表；GSY 没有章节能力，只能走这里。
-   * 详见 [EmbyClient.getItemChapters] 的 KDoc —— 那里面写清了由此产生的
-   * 「同文件两内核章节数可能不同」的能力边界，别在别处重复解释。
-   *
-   * 拿不到就返回空列表**而不是抛异常**：本地文件根本没这个 Emby 条目、
-   * 或者服务端没刮削章节，都是正常情况，不该让播放页崩。
-   */
-  suspend fun getItemChapters(
-    server: EmbyServer,
-    itemId: String,
-  ): List<EmbyChapter> =
-    withContext(Dispatchers.IO) {
-      runCatching { EmbyClient.getItemChapters(server, itemId) }
-        .getOrDefault(emptyList())
-    }
 
   /**
    * 拉条目的片头 / 片尾分段（a1 精准跳过片头片尾）。
@@ -885,68 +700,11 @@ class EmbyRepository(
     itemId: String,
   ): EmbyIntrosResult? =
     withContext(Dispatchers.IO) {
-      runCatching { EmbyClient.getItemIntros(server, itemId) }.getOrNull()
+      try { EmbyClient.getItemIntros(sessionServer(server), itemId) }
+      catch (e: CancellationException) { throw e } catch (_: Exception) { null }
     }
 
-  // ─── 播放列表（Emby 服务端）───
-  // ⚠️ 与本地播放列表（Room `PlaylistRepository`）是两套完全独立的东西，
-  // 详见 [EmbyClient] 里 5.5 节的说明。
-
-  suspend fun getPlaylists(
-    server: EmbyServer,
-    startIndex: Int = 0,
-    limit: Int = 100,
-  ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getPlaylists(server, startIndex, limit)
-  }
-
-  suspend fun getPlaylistItems(
-    server: EmbyServer,
-    playlistId: String,
-    startIndex: Int = 0,
-    limit: Int = 100,
-  ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getPlaylistItems(server, playlistId, startIndex, limit)
-  }
-
-  suspend fun createPlaylist(
-    server: EmbyServer,
-    name: String,
-    itemIds: List<String> = emptyList(),
-  ): EmbyPlaylistCreationResult = withContext(Dispatchers.IO) {
-    EmbyClient.createPlaylist(server, name, itemIds)
-  }
-
-  suspend fun addToPlaylist(
-    server: EmbyServer,
-    playlistId: String,
-    itemIds: List<String>,
-  ): EmbyPlaylistAddResult = withContext(Dispatchers.IO) {
-    EmbyClient.addToPlaylist(server, playlistId, itemIds)
-  }
-
-  suspend fun removeFromPlaylist(
-    server: EmbyServer,
-    playlistId: String,
-    entryIds: List<String>,
-  ) = withContext(Dispatchers.IO) {
-    EmbyClient.removeFromPlaylist(server, playlistId, entryIds)
-  }
-
-  suspend fun movePlaylistItem(
-    server: EmbyServer,
-    playlistId: String,
-    entryId: String,
-    newIndex: Int,
-  ) = withContext(Dispatchers.IO) {
-    EmbyClient.movePlaylistItem(server, playlistId, entryId, newIndex)
-  }
-
-  suspend fun deletePlaylist(server: EmbyServer, playlistId: String) = withContext(Dispatchers.IO) {
-    EmbyClient.deletePlaylist(server, playlistId)
-  }
-
-  // ─── 字幕在线搜索 ───
+   // ─── 字幕在线搜索 ───
 
   /**
    * 搜在线字幕候选（详见 [EmbyClient.searchRemoteSubtitles]）。
@@ -961,7 +719,7 @@ class EmbyRepository(
     isPerfectMatch: Boolean? = null,
   ): List<EmbyRemoteSubtitle> = withContext(Dispatchers.IO) {
     EmbyClient.searchRemoteSubtitles(
-      server = server,
+      server = sessionServer(server),
       itemId = itemId,
       language = language,
       mediaSourceId = mediaSourceId,
@@ -970,22 +728,10 @@ class EmbyRepository(
   }
 
   /**
-   * 让服务端把选中的在线字幕存进媒体库，返回新的字幕轨索引（可能为 null = 失败）。
-   */
-  suspend fun downloadRemoteSubtitle(
-    server: EmbyServer,
-    itemId: String,
-    subtitleId: String,
-    mediaSourceId: String? = null,
-  ): EmbySubtitleDownloadResult = withContext(Dispatchers.IO) {
-    EmbyClient.downloadRemoteSubtitle(server, itemId, subtitleId, mediaSourceId)
-  }
-
-  /**
    * 取已存到服务器的字幕字节。
    *
    * ⚠️ 返回的是**内存里的字节**而不是落盘文件 —— 落盘与命名由 UI 层的
-   * `SubtitleDownloadSaver` 负责（它才知道该放进哪个字幕目录、叫什么名字）。
+   * temporary playback consumer 负责；没有字幕导出或服务器持久化。
    */
   suspend fun downloadSubtitleStream(
     server: EmbyServer,
@@ -994,92 +740,10 @@ class EmbyRepository(
     subtitleIndex: Int,
     format: String = "srt",
   ): ByteArray = withContext(Dispatchers.IO) {
-    EmbyClient.downloadSubtitleStream(server, itemId, mediaSourceId, subtitleIndex, format)
+    EmbyClient.downloadSubtitleStream(sessionServer(server), itemId, mediaSourceId, subtitleIndex, format)
   }
 
-  // ─── 收藏 / 删除 / 已看 ───
-
-  suspend fun favorite(server: EmbyServer, itemId: String) = withContext(Dispatchers.IO) {
-    val data = EmbyClient.setFavorite(server, itemId, true)
-    // 记账（见构造参数的说明）：服务端不记时间，客户端现在记
-    favoriteClock?.stamp(server.id, listOf(itemId))
-    data
-  }
-
-  suspend fun unfavorite(server: EmbyServer, itemId: String) = withContext(Dispatchers.IO) {
-    val data = EmbyClient.setFavorite(server, itemId, false)
-    favoriteClock?.forget(server.id, listOf(itemId))
-    data
-  }
-
-  /** 加入 / 取消收藏；返回服务器回传的 UserData（含 IsFavorite），调用方据此确认真实状态 */
-  suspend fun setFavorite(
-    server: EmbyServer,
-    itemId: String,
-    favorite: Boolean,
-  ): EmbyUserData? = withContext(Dispatchers.IO) {
-    val data = EmbyClient.setFavorite(server, itemId, favorite)
-    if (favorite) {
-      favoriteClock?.stamp(server.id, listOf(itemId))
-    } else {
-      favoriteClock?.forget(server.id, listOf(itemId))
-    }
-    data
-  }
-
-  /**
-   * 取消收藏的「用力」版：额外补一次标准 DELETE 方法（见 [EmbyClient.unfavoriteHard]）。
-   *
-   * 只在回读确认「取消收藏没生效」时作为重试用 —— 部分兼容服务端对
-   * `POST .../Delete` 回 200 却不落库，需要标准写法兜底。
-   */
-  suspend fun unfavoriteHard(server: EmbyServer, itemId: String): EmbyUserData? = withContext(Dispatchers.IO) {
-    val data = EmbyClient.unfavoriteHard(server, itemId)
-    favoriteClock?.forget(server.id, listOf(itemId))
-    data
-  }
-
-  /**
-   * 删除媒体 —— **物理删除服务器上的文件**（媒体库 + 磁盘），不可逆。
-   *
-   * 见 [EmbyClient.deleteItem]：需管理员权限，失败会抛 [app.marlboroadvance.mpvex.domain.emby.EmbyApiException]。
-   */
-  suspend fun deleteItem(server: EmbyServer, itemId: String) = withContext(Dispatchers.IO) {
-    EmbyClient.deleteItem(server, itemId)
-  }
-
-  suspend fun markPlayed(server: EmbyServer, itemId: String) = withContext(Dispatchers.IO) {
-    EmbyClient.setPlayed(server, itemId, true)
-  }
-
-  suspend fun markUnplayed(server: EmbyServer, itemId: String) = withContext(Dispatchers.IO) {
-    EmbyClient.setPlayed(server, itemId, false)
-  }
-
-  /** 标记已看 / 未看；返回服务器回传的 UserData（含 Played），调用方据此确认真实状态 */
-  suspend fun setPlayed(
-    server: EmbyServer,
-    itemId: String,
-    played: Boolean,
-  ): EmbyUserData? = withContext(Dispatchers.IO) {
-    EmbyClient.setPlayed(server, itemId, played)
-  }
-
-  /**
-   * a8：标记已看 / 未看 **并同时清掉播放进度**，一个请求写完（见 [EmbyClient.setPlayedWithClearPosition]）。
-   *
-   * 这是「标记已看 / 未看」UI 动作的**主路径**： Emby Web 的同一动作本来就是
-   * 两个字段一起写的，旧路径只翻 Played 位、留下陈旧的续播点。
-   */
-  suspend fun setPlayedWithClearPosition(
-    server: EmbyServer,
-    itemId: String,
-    played: Boolean,
-  ): EmbyUserData? = withContext(Dispatchers.IO) {
-    EmbyClient.setPlayedWithClearPosition(server, itemId, played)
-  }
-
-  // ─── 播放进度上报 ───
+   // ─── 播放进度上报 ───
 
   suspend fun reportPlaybackStart(
     server: EmbyServer,
@@ -1097,7 +761,7 @@ class EmbyRepository(
     playSessionId: String? = null,
   ): String = withContext(Dispatchers.IO) {
     EmbyClient.reportPlaybackStart(
-      server,
+      sessionServer(server),
       itemId,
       positionTicks,
       mediaSourceId = mediaSourceId,
@@ -1115,7 +779,7 @@ class EmbyRepository(
     mediaSourceId: String? = null,
   ) = withContext(Dispatchers.IO) {
     EmbyClient.reportPlaybackProgress(
-      server,
+      sessionServer(server),
       itemId,
       playSessionId,
       positionTicks,
@@ -1132,12 +796,12 @@ class EmbyRepository(
     server: EmbyServer,
     itemId: String,
   ): Pair<String, String?>? = withContext(Dispatchers.IO) {
-    EmbyClient.requestPlaybackSession(server, itemId)
+    EmbyClient.requestPlaybackSession(sessionServer(server), itemId)
   }
 
   /** 按 Id 批量取条目（首页「继续观看」补本地最近播放用，见 [EmbyRecentPlays]） */
   suspend fun getItemsByIds(server: EmbyServer, ids: List<String>): List<EmbyItem> =
-    withContext(Dispatchers.IO) { EmbyClient.getItemsByIds(server, ids).Items }
+    withContext(Dispatchers.IO) { EmbyClient.getItemsByIds(sessionServer(server), ids).Items }
 
   suspend fun reportPlaybackStopped(
     server: EmbyServer,
@@ -1146,7 +810,7 @@ class EmbyRepository(
     positionTicks: Long,
     mediaSourceId: String? = null,
   ) = withContext(Dispatchers.IO) {
-    EmbyClient.reportPlaybackStopped(server, itemId, playSessionId, positionTicks, mediaSourceId)
+    EmbyClient.reportPlaybackStopped(sessionServer(server), itemId, playSessionId, positionTicks, mediaSourceId)
   }
 
   /** 搜索媒体（服务端 SearchTerm 匹配），可按指定方式排序 */
@@ -1162,7 +826,7 @@ class EmbyRepository(
     recursive: Boolean = true,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
     EmbyClient.searchItems(
-      server = server,
+      server = sessionServer(server),
       term = term,
       includeItemTypes = includeItemTypes,
       limit = limit,
@@ -1171,33 +835,6 @@ class EmbyRepository(
       parentId = parentId,
       recursive = recursive,
     )
-  }
-
-  /**
-   * 直播电视频道列表（`/LiveTv/Channels`）。
-   *
-   * 与 [searchItems] 一样走 IO 线程；服务端没启用直播电视时返回空列表。
-   */
-  suspend fun getLiveTvChannels(server: EmbyServer): List<EmbyItem> =
-    withContext(Dispatchers.IO) {
-      EmbyClient.getLiveTvChannels(server)
-    }
-
-  /**
-   * 直播电视节目单（`/LiveTv/Programs`，a2 + c1）。
-   *
-   * [channelId] 为 null 时拿「所有频道」在窗口内的节目（频道网格的正在播出）；
-   * 非 null 时拿单个频道的时间轴。时间参数是 ISO 8601 UTC 字符串。
-   * 服务端没有 EPG 数据源时返回空列表。
-   */
-  suspend fun getLiveTvPrograms(
-    server: EmbyServer,
-    channelId: String? = null,
-    startTime: String,
-    endTime: String,
-    limit: Int = 500,
-  ): List<EmbyItem> = withContext(Dispatchers.IO) {
-    EmbyClient.getLiveTvPrograms(server, channelId, startTime, endTime, limit)
   }
 
   /**
@@ -1211,7 +848,7 @@ class EmbyRepository(
     parentId: String? = null,
     limit: Int = 60,
   ): List<EmbyItem> = withContext(Dispatchers.IO) {
-    EmbyClient.searchPersons(server, term, parentId, limit)
+    EmbyClient.searchPersons(sessionServer(server), term, parentId, limit)
   }
 
   /**
@@ -1225,7 +862,7 @@ class EmbyRepository(
     startIndex: Int = 0,
     limit: Int? = null,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getSeasons(server, seriesId, startIndex, limit)
+    EmbyClient.getSeasons(sessionServer(server), seriesId, startIndex, limit)
   }
 
   /** 某一季下的剧集列表（分页参数同上，见 [getSeasons]） */
@@ -1236,21 +873,13 @@ class EmbyRepository(
     startIndex: Int = 0,
     limit: Int? = null,
   ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getEpisodes(server, seriesId, seasonId, startIndex, limit)
-  }
-
-  /** 按播放时间倒序拉取历史记录（Emby 的 DatePlayed 排序） */
-  suspend fun getPlayedHistory(
-    server: EmbyServer,
-    limit: Int = 60,
-    startIndex: Int = 0,
-  ): EmbyItemsResult = withContext(Dispatchers.IO) {
-    EmbyClient.getPlayedHistory(server, limit, startIndex)
+    EmbyClient.getEpisodes(sessionServer(server), seriesId, seasonId, startIndex, limit)
   }
 
   companion object {
     private const val PREFS_NAME = "emby_session"
-    private const val KEY_CURRENT_SERVER_ID = "current_server_id"
+    private const val KEY_CURRENT_SOURCE = "current_source_key_v2"
+    private const val KEY_CURRENT_REMOTE = "current_remote_uuid_v2"
   }
 
   // ─── URL 构造（图片 / 流 / 字幕）───
@@ -1262,28 +891,14 @@ class EmbyRepository(
     tag: String? = null,
     maxWidth: Int = 480,
     maxHeight: Int? = null,
-  ): String = EmbyClient.imageUrl(server, itemId, imageType, tag, maxWidth, maxHeight)
+    imageIndex: Int? = null,
+  ): String = EmbyClient.imageUrl(sessionServer(server), itemId, imageType, tag, maxWidth, maxHeight, imageIndex)
 
   fun videoStreamUrl(
     server: EmbyServer,
     itemId: String,
-    static: Boolean = true,
     mediaSourceId: String? = null,
-  ): String = EmbyClient.videoStreamUrl(server, itemId, static, mediaSourceId)
-
-  /**
-   * 「让服务器转码」后的播放地址（本机解不了的编码走这条，见 [EmbyClient.transcodeStreamUrl]）。
-   *
-   * 会先向服务器要一次播放方案（`PlaybackInfo`），所以是个挂起函数、有网络往返；
-   * 只在用户明确选择「服务器转码播放」时才调用，不要放进默认播放路径。
-   */
-  suspend fun transcodeStreamUrl(
-    server: EmbyServer,
-    itemId: String,
-    startTimeTicks: Long = 0L,
-    /** 多版本媒体要转码的那个版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
-    mediaSourceId: String? = null,
-  ): String = EmbyClient.transcodeStreamUrl(server, itemId, startTimeTicks, mediaSourceId = mediaSourceId)
+  ): String = EmbyClient.videoStreamUrl(sessionServer(server), itemId, mediaSourceId)
 
   /**
    * 多版本媒体：**指定版本**的直连播放地址（先问一次 `PlaybackInfo`）。
@@ -1298,11 +913,7 @@ class EmbyRepository(
     server: EmbyServer,
     itemId: String,
     mediaSourceId: String,
-  ): String? = EmbyClient.directStreamUrlForSource(server, itemId, mediaSourceId)
-
-  /** 离线下载原始文件的 URL（支持 Range，可断点续传）。 */
-  fun itemDownloadUrl(server: EmbyServer, itemId: String): String =
-    EmbyClient.itemDownloadUrl(server, itemId)
+  ): String? = EmbyClient.directStreamUrlForSource(sessionServer(server), itemId, mediaSourceId)
 
   fun subtitleUrl(
     server: EmbyServer,
@@ -1310,7 +921,7 @@ class EmbyRepository(
     mediaSourceId: String,
     subtitleIndex: Int,
     format: String = "srt",
-  ): String = EmbyClient.subtitleUrl(server, itemId, mediaSourceId, subtitleIndex, format)
+  ): String = EmbyClient.subtitleUrl(sessionServer(server), itemId, mediaSourceId, subtitleIndex, format)
 }
 
 /**

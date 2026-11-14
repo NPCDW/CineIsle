@@ -12,10 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MoreTime
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -33,7 +30,6 @@ import app.marlboroadvance.mpvex.preferences.AudioPreferences
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.ui.player.TrackNode
 import app.marlboroadvance.mpvex.ui.theme.spacing
-import `is`.xyz.mpv.MPVLib
 import kotlinx.collections.immutable.ImmutableList
 import org.koin.compose.koinInject
 
@@ -43,7 +39,7 @@ import java.util.Locale
 fun AudioTracksSheet(
   tracks: ImmutableList<TrackNode>,
   onSelect: (TrackNode) -> Unit,
-  onAddAudioTrack: () -> Unit,
+  onDisable: () -> Unit,
   onOpenDelayPanel: () -> Unit,
   onDismissRequest: () -> Unit,
   modifier: Modifier = Modifier,
@@ -54,16 +50,16 @@ fun AudioTracksSheet(
   GenericTracksSheet(
     tracks,
     onDismissRequest = onDismissRequest,
+    landscapeSide = true,
     header = {
-      AddTrackRow(
-        stringResource(R.string.player_sheets_add_ext_audio),
-        onAddAudioTrack,
-        actions = {
-          IconButton(onClick = onOpenDelayPanel) {
-            Icon(Icons.Default.MoreTime, null)
-          }
-        },
-      )
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End,
+      ) {
+        androidx.compose.material3.TextButton(onClick = onDisable) {
+          Text(stringResource(R.string.player_sheets_tracks_off))
+        }
+      }
     },
     track = {
       AudioTrackRow(
@@ -106,6 +102,7 @@ fun AudioTracksSheet(
             )
           }
         }
+        TrackSyncBar(R.string.player_sheets_audio_delay_card_title, onOpenDelayPanel)
       }
     },
     modifier = modifier,

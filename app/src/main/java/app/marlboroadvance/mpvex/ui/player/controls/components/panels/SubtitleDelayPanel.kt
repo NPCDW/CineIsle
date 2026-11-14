@@ -54,7 +54,6 @@ import app.marlboroadvance.mpvex.ui.theme.spacing
 import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.delay
 import org.koin.compose.koinInject
-import org.koin.compose.koinInject
 import kotlin.math.roundToInt
 
 @Composable
@@ -80,17 +79,25 @@ fun SubtitleDelayPanel(
       delay = delayFloat,
       onDelayChange = {
         PlayerLib.setPropertyDouble("sub-delay", it.toDouble())
+        PlayerLib.setPropertyDouble("secondary-sub-delay", it.toDouble())
       },
       speed = speedFloat,
-      onSpeedChange = { PlayerLib.setPropertyDouble("sub-speed", it.toDouble()) },
+      onSpeedChange = {
+        PlayerLib.setPropertyDouble("sub-speed", it.toDouble())
+        PlayerLib.setPropertyDouble("secondary-sub-speed", it.toDouble())
+      },
       onApply = {
         preferences.defaultSubDelay.set((delayFloat * 1000).roundToInt())
         val currentSpeed = speed ?: 1.0
         if (currentSpeed in 0.1..10.0) preferences.defaultSubSpeed.set(currentSpeed.toFloat())
       },
       onReset = {
-        PlayerLib.setPropertyDouble("sub-delay", preferences.defaultSubDelay.get() / 1000.0)
-        PlayerLib.setPropertyDouble("sub-speed", preferences.defaultSubSpeed.get().toDouble())
+        val defaultDelay = preferences.defaultSubDelay.get() / 1000.0
+        val defaultSpeed = preferences.defaultSubSpeed.get().toDouble()
+        PlayerLib.setPropertyDouble("sub-delay", defaultDelay)
+        PlayerLib.setPropertyDouble("secondary-sub-delay", defaultDelay)
+        PlayerLib.setPropertyDouble("sub-speed", defaultSpeed)
+        PlayerLib.setPropertyDouble("secondary-sub-speed", defaultSpeed)
       },
     )
   }

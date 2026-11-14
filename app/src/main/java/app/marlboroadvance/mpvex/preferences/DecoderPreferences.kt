@@ -12,31 +12,8 @@ class DecoderPreferences(
 ) {
   val profile = preferenceStore.getString("mpv_profile", "fast")
 
-  /**
-   * 默认解码方式（设置 → 解码器 →「默认解码器」）。
-   *
-   * ## 默认值带两代老键迁移
-   *
-   * 历史上有过两个开关，都必须映射过来，否则老用户升级后行为会变：
-   *  - `try_hw_dec`（最早只有它）：关掉的人诉求就是「别硬解」⇒ [DefaultDecoder.Software]。
-   *  - `direct_output`（后来单独的「直出模式」开关）：打开的人要的是零拷贝
-   *    ⇒ [DefaultDecoder.HardwarePlus]。它的优先级高于 `try_hw_dec`。
-   *
-   * 迁移目标用的是**老名字**：`Auto` / `HardwarePlus` / `Software` 这几个枚举 name
-   * 从 v218 就写进了用户机器，改名等于让所有人的选择静默失效。
-   *
-   * 新键一旦写入，两个老键就再也不参与判断（老键也不用清理，留着无害）。
-   */
-  val decoderMode = preferenceStore.getEnum(
-    "mpv_decoder_mode",
-    when {
-      // ⚠️ `getBoolean` 返回的是 `Preference<Boolean>`，这里要的是**当下这一个值**，
-      // 必须 `.get()` 同步读出来；漏了就是「Condition type mismatch」。
-      preferenceStore.getBoolean("direct_output", false).get() -> DefaultDecoder.HardwarePlus
-      !preferenceStore.getBoolean("try_hw_dec", true).get() -> DefaultDecoder.Software
-      else -> DefaultDecoder.Auto
-    },
-  )
+  /** Default decoder mode. Legacy booleans are migrated synchronously by startup cleanup. */
+  val decoderMode = preferenceStore.getEnum("mpv_decoder_mode", DefaultDecoder.Auto)
 
   /**
    * 渲染器：true = gpu-next（libplacebo），false = 旧版 gpu。
@@ -100,17 +77,7 @@ class DecoderPreferences(
   val hdrEnabled = preferenceStore.getBoolean("hdr_enabled", true)
 
   val debanding = preferenceStore.getEnum("debanding", Debanding.None)
-  val debandIterations = preferenceStore.getInt("deband_iterations", 1)
-  val debandThreshold = preferenceStore.getInt("deband_threshold", 48)
-  val debandRange = preferenceStore.getInt("deband_range", 16)
-  val debandGrain = preferenceStore.getInt("deband_grain", 32)
 
-  val brightnessFilter = preferenceStore.getInt("filter_brightness")
-  val saturationFilter = preferenceStore.getInt("filter_saturation")
-  val gammaFilter = preferenceStore.getInt("filter_gamma")
-  val contrastFilter = preferenceStore.getInt("filter_contrast")
-  val hueFilter = preferenceStore.getInt("filter_hue")
-  val sharpnessFilter = preferenceStore.getInt("filter_sharpness")
 
   // Anime4K Preferences
   val enableAnime4K = preferenceStore.getBoolean("enable_anime4k", false)

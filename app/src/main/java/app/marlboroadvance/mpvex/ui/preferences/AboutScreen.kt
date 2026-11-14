@@ -93,6 +93,7 @@ object AboutScreen : Screen {
   @Composable
   override fun Content() {
     val context = LocalContext.current
+    val githubUrl = stringResource(R.string.github_repo_url)
     val backstack = LocalBackStack.current
     val clipboardManager = LocalClipboardManager.current
     val packageManager: PackageManager = context.packageManager
@@ -268,15 +269,6 @@ object AboutScreen : Screen {
                     fontWeight = FontWeight.Bold,
                     color = cs.onPrimaryContainer,
                   )
-                  Text(
-                    text = stringResource(id = R.string.i18n_project_name_en),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    // 层级本身就是质感：标题 100%、英文名 88%、版本 82%、
-                    // 设备信息 85%（字号最小，反而要比版本行实一点）。全部拉成
-                    // 同一个「实」度会显得像一块印刷品，没有主次。
-                    color = cs.onPrimaryContainer.copy(alpha = 0.88f),
-                  )
                   Spacer(Modifier.height(4.dp))
                   Text(
                     text = "v$versionName $buildType",
@@ -319,7 +311,7 @@ object AboutScreen : Screen {
                     context.startActivity(
                       Intent(
                         Intent.ACTION_VIEW,
-                        context.getString(R.string.github_repo_url).toUri(),
+                        githubUrl.toUri(),
                       ),
                     )
                   },
@@ -335,7 +327,7 @@ object AboutScreen : Screen {
                     ),
                 ) {
                   Text(
-                    text = "GitHub",
+                    text = stringResource(id = R.string.i18n_about_upstream_project),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                   )
@@ -477,10 +469,15 @@ private data class Acknowledgment(
 /**
  * 「关于」页列出的是**主要开源项目** —— 完整依赖清单在「开源许可」页（AboutLibraries 生成）。
  *
- * 顺序从上游往下排：直接上游 → 两个播放内核 → Emby 客户端与投屏 → 其余库。
+ * 顺序从上游往下排：直接上游 → 更早的播放器基础 → 播放内核 → Emby 客户端 → 其余库。
  */
 private val ACKNOWLEDGMENTS =
   listOf(
+    Acknowledgment(
+      name = "CineIsle",
+      summaryRes = R.string.i18n_ack_cineisle_summary,
+      url = "https://github.com/nu1lkali/CineIsle",
+    ),
     Acknowledgment(
       name = "mpvEx",
       summaryRes = R.string.i18n_ack_mpvex_summary,
@@ -490,16 +487,6 @@ private val ACKNOWLEDGMENTS =
       name = "mpv-android / libmpv",
       summaryRes = R.string.i18n_ack_mpv_android_summary,
       url = "https://github.com/mpv-android/mpv-android",
-    ),
-    Acknowledgment(
-      name = "GSYVideoPlayer",
-      summaryRes = R.string.i18n_ack_gsy_summary,
-      url = "https://github.com/CarGuo/GSYVideoPlayer",
-    ),
-    Acknowledgment(
-      name = "AndroidX Media3 / ExoPlayer",
-      summaryRes = R.string.i18n_ack_media3_summary,
-      url = "https://github.com/androidx/media",
     ),
     Acknowledgment(
       name = "DanmakuFlameMaster",
@@ -512,19 +499,9 @@ private val ACKNOWLEDGMENTS =
       url = "https://github.com/MediaBrowser/Emby.SDK",
     ),
     Acknowledgment(
-      name = "UPnPCast",
-      summaryRes = R.string.i18n_ack_upnpcast_summary,
-      url = "https://github.com/yinnho/UPnPCast",
-    ),
-    Acknowledgment(
       name = "AboutLibraries",
       summaryRes = R.string.i18n_ack_aboutlibraries_summary,
       url = "https://github.com/mikepenz/AboutLibraries",
-    ),
-    Acknowledgment(
-      name = "SMBJ · Sardine · Commons Net · NanoHTTPD",
-      summaryRes = R.string.i18n_ack_network_summary,
-      url = "https://github.com/hierynomus/smbj",
     ),
     Acknowledgment(
       name = "Telephoto",

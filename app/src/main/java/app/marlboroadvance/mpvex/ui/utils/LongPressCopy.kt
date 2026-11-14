@@ -51,31 +51,36 @@ fun longClickWithHaptic(onLongClick: (() -> Unit)?): (() -> Unit)? {
  * 处于弃用状态，而平台 API 从 API 11 起就没变过。这里要的是「粘得住」，
  * 不需要 Compose 那层抽象。
  *
- * @param text 要复制的内容；**null / 全空白时完全不挂手势**（不留一个长按了没反应的死区）
+ * @param text 要复制的内容；**null / 全空白且无 [onClick] 时完全不挂手势**
  * @param label 剪贴板条目的标签（系统「复制自 XXX」提示用），只影响剪贴板元信息
+ * @param onClick 可选的普通点击；与长按共用同一个 `combinedClickable`，避免叠手势
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun Modifier.longPressToCopy(text: String?, label: String = "内容"): Modifier {
+fun Modifier.longPressToCopy(
+  text: String?,
+  label: String = "内容",
+  onClick: (() -> Unit)? = null,
+): Modifier {
   val context = LocalContext.current
   val haptics = LocalHapticFeedback.current
   val interaction = remember { MutableInteractionSource() }
   val value = text?.takeIf { it.isNotBlank() }
-  return if (value == null) {
+  return if (value == null && onClick == null) {
     this
   } else {
     this.combinedClickable(
       interactionSource = interaction,
       indication = null,
-      onLongClick = {
-        // 触觉只在**真的复制成功**时给：失败还震一下等于骗人。
-        if (copyTextWithToast(context, label, value)) {
-          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+      onLongClick = value?.let { copyValue ->
+        {
+          // 触觉只在**真的复制成功**时给：失败还震一下等于骗人。
+          if (copyTextWithToast(context, label, copyValue)) {
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+          }
         }
       },
-      // combinedClickable 的 onClick 是必填项。这些文字本来就没有点击行为，
-      // 给个空实现即可 —— 它顺带把这一小块的点击「吃掉」，不会往上冒泡惊动父层。
-      onClick = {},
+      onClick = onClick ?: {},
     )
   }
 }

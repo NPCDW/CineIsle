@@ -1,5 +1,9 @@
 package app.marlboroadvance.mpvex.ui.browser.emby
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -75,6 +79,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.marlboroadvance.mpvex.domain.emby.EmbyClient
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
 import app.marlboroadvance.mpvex.domain.emby.EmbyUserData
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
@@ -112,6 +117,7 @@ data class EmbyPersonScreen(
       factory = EmbyViewModel.factory(context.applicationContext as Application),
     )
     val server by viewModel.currentServer.collectAsState()
+    CompositionLocalProvider(LocalEmbyImageServer provides server) {
     val scope = rememberCoroutineScope()
     val browserPreferences = koinInject<BrowserPreferences>()
     val gridColumns by browserPreferences.embyLibraryGridColumns.collectAsState()
@@ -437,46 +443,6 @@ data class EmbyPersonScreen(
               contentDescription = "随机播放作品",
             )
           }
-          // ── 右上角收藏红心 ──
-          // 与详情页同一套交互：乐观更新红心 → 请求服务器 → 按结果修正并弹 Toast。
-          val isFavorite = personItem?.UserData?.IsFavorite == true
-          IconButton(
-            enabled = personItem != null,
-            onClick = {
-              val current = personItem ?: return@IconButton
-              val currentServer = server ?: return@IconButton
-              val wasFavorite = current.UserData?.IsFavorite == true
-              // 乐观更新：先把红心翻过来，动效才跟得上手指；失败再回滚
-              personItem = current.copy(
-                UserData = (current.UserData ?: EmbyUserData()).copy(IsFavorite = !wasFavorite),
-              )
-              scope.launch {
-                val result = viewModel.toggleFavorite(currentServer, current)
-                val nowFavorite = result.getOrNull()
-                personItem = current.copy(
-                  UserData = (current.UserData ?: EmbyUserData())
-                    .copy(IsFavorite = nowFavorite ?: wasFavorite),
-                )
-                Toast.makeText(
-                  context,
-                  when (nowFavorite) {
-                    true -> "已收藏「$personName」"
-                    false -> "已取消收藏「$personName」"
-                    null -> "收藏失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
-                  },
-                  Toast.LENGTH_SHORT,
-                ).show()
-              }
-            },
-          ) {
-            // 与媒体详情页同款：弹跳 + 星光 + 红心渐变；尺寸对齐详情页的 24dp
-            FavoriteHeartIcon(
-              isFavorite = isFavorite,
-              isToggling = false,
-              iconSize = 24.dp,
-              idleColor = LocalContentColor.current,
-            )
-          }
         },
       )
 
@@ -527,7 +493,8 @@ data class EmbyPersonScreen(
               item(span = { GridItemSpan(maxLineSpan) }) { headerContent(0.dp) }
               items(visibleItems, key = { it.Id ?: it.Name ?: "" }) { item ->
                 EmbyMediaCard(
-                  title = item.Name ?: "",
+                  title = item.displayTitle(),
+                  contentDescription = item.Name,
                   subtitle = item.ProductionYear?.toString(),
                   imageUrl = server?.let { viewModel.imageUrl(it, item, "Primary", 400) },
                   progress = null,
@@ -536,7 +503,7 @@ data class EmbyPersonScreen(
                   modifier = Modifier.animateItem(),
                   onClick = {
                     item.Id?.let { id ->
-                      backStack.add(EmbyDetailScreen(itemId = id, title = item.Name ?: ""))
+                      backStack.add(EmbyDetailScreen(itemId = id, title = item.displayTitle()))
                     }
                   },
                 )
@@ -579,6 +546,7 @@ data class EmbyPersonScreen(
           modifier = Modifier.align(Alignment.TopCenter),
         )
       }
+    }
     }
   }
 }

@@ -94,6 +94,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -183,6 +185,7 @@ internal data class GachaCard(
   val title: String,
   val posterUrl: String?,
   val backdropUrl: String?,
+  val server: EmbyServer? = null,
 )
 
 /**
@@ -452,6 +455,7 @@ internal fun EmbyGachaDrawDialog(
   resolveDetail: (suspend (GachaCard) -> GachaCard)? = null,
   style: EmbyGachaStyle = EmbyGachaStyle.CLASSIC,
   reelCards: List<GachaCard> = emptyList(),
+  server: EmbyServer? = cards.firstOrNull()?.server ?: LocalEmbyImageServer.current,
 ) {
   val count = cards.size
   /** 中奖卡（只有单抽会给出来，多抽时为 null） */
@@ -484,9 +488,9 @@ internal fun EmbyGachaDrawDialog(
    * 选中了一张卡」就是这么来的（预加载 3 秒超时就带着一堆没下完的图开转了）。
    * 现在等预加载结束、按 [EmbyImageLoader.peek] 逐个核对，缺图的一律不上轮盘。
    */
-  var reelStrip by remember(rollId) { mutableStateOf(emptyList<GachaCard>()) }
+  var reelStrip by remember(server, rollId) { mutableStateOf(emptyList<GachaCard>()) }
   /** 封面凑不齐（服务器慢 / 某张挂了）⇒ 放弃轮盘，退回经典翻牌 */
-  var slotAbort by remember(rollId) { mutableStateOf(false) }
+  var slotAbort by remember(server, rollId) { mutableStateOf(false) }
 
   // 多抽的「主色」取这一批里最高的稀有度：抽到 SSR 时整场都是金色排场
   val bestRarity = remember(cards) {
@@ -562,9 +566,9 @@ internal fun EmbyGachaDrawDialog(
   var spinBase by remember { mutableStateOf(0f) }
 
   // 多抽：点开的那一张（null = 看网格）
-  var focused by remember { mutableStateOf<GachaCard?>(null) }
+  var focused by remember(server) { mutableStateOf<GachaCard?>(null) }
   // 补完详情的副本：网格上的小卡用列表数据，展开后才换成带简介的那一份
-  var focusedDetail by remember { mutableStateOf<GachaCard?>(null) }
+  var focusedDetail by remember(server) { mutableStateOf<GachaCard?>(null) }
   var detailLoading by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   // 停稳的那一下要「叮」一下：视觉之外必须给触感，否则静音环境下只剩「画面停了」
@@ -587,7 +591,7 @@ internal fun EmbyGachaDrawDialog(
   // ── 重抽时「法阵闪回 0」的修复（v202）──
   //
   // 时序：`rollGacha` 先把 `gachaCards` 清空 → 本组件的 `count` 变 0 →
-  // `LaunchedEffect(rollId, count)` 抢先重跑，而首行 `if (cards.isEmpty()) return` 让
+  // `LaunchedEffect(server, rollId, count)` 抢先重跑，而首行 `if (cards.isEmpty()) return` 让
   // **六个 Animatable 的 snapTo(0) 全被跳过**（idle 也在下面被 restart）。
   // 等新数据回来、effect 再跑一次时才 snapTo —— 此刻画面上法阵早已停在原来的角度，
   // 用户看到的就是刻度环「亮一下、转回去、重新转」。
@@ -595,7 +599,7 @@ internal fun EmbyGachaDrawDialog(
   // 组合期改 Animatable 只能 `snapTo`（挂起函数），所以包一层 `LaunchedEffect(Unit)`；
   // 判据用 `phase != Awaiting`，只在「Card/Burst 态遇到清空」时触发一次，不会每帧重来。
   if (cards.isEmpty() && phase != GachaPhase.Awaiting) {
-    LaunchedEffect(rollId) {
+    LaunchedEffect(server, rollId) {
       charge.snapTo(0f)
       flash.snapTo(0f)
       shock.snapTo(0f)
@@ -620,7 +624,7 @@ internal fun EmbyGachaDrawDialog(
     }
   }
 
-  LaunchedEffect(rollId, count) {
+  LaunchedEffect(server, rollId, count) {
     if (cards.isEmpty()) {
       phase = GachaPhase.Awaiting
       return@LaunchedEffect
@@ -659,7 +663,7 @@ internal fun EmbyGachaDrawDialog(
     val preload = if (slotMode) {
       async {
         withTimeoutOrNull(SLOT_PRELOAD_MS) {
-          preloadGachaPosters((slotCandidates + listOfNotNull(drawnCard)).mapNotNull { it.posterUrl })
+          preloadGachaPosters(slotCandidates + listOfNotNull(drawnCard), server)
         }
       }
     } else {
@@ -688,8 +692,8 @@ internal fun EmbyGachaDrawDialog(
       // 缺任何一张（包括中奖卡自己）就整场退回经典翻牌 —— 一排空框比不做轮盘难看十倍，
       // 也正是真机反馈「滚到后面没卡片了、在一个虚空位置选中一张卡」的成因。
       val drawn = drawnCard
-      val readyCards = slotCandidates.filter { EmbyImageLoader.peek(it.posterUrl) != null }
-      val drawnReady = drawn != null && EmbyImageLoader.peek(drawn.posterUrl) != null
+      val readyCards = slotCandidates.filter { hasGachaPoster(it, server) }
+      val drawnReady = drawn != null && hasGachaPoster(drawn, server)
       if (drawn == null || readyCards.size < SLOT_MIN_POOL || !drawnReady) {
         // 凑不齐：标记退场，下面走经典翻牌
         slotAbort = true
@@ -901,6 +905,7 @@ internal fun EmbyGachaDrawDialog(
             lock = { lock.value },
             pulse = { idle.value },
             fade = { reelFade.value },
+            server = server,
           )
         }
         if (count == 1) {
@@ -942,6 +947,7 @@ internal fun EmbyGachaDrawDialog(
                 title = card.title,
                 rarity = embyGachaRarityOf(card.item),
                 posterUrl = card.posterUrl,
+                server = card.server ?: server,
                 backdropUrl = card.backdropUrl,
                 detailAlpha = detailIn.value,
                 secondaryLabel = "重抽",
@@ -1046,6 +1052,7 @@ internal fun EmbyGachaDrawDialog(
                   row.forEachIndexed { colIndex, card ->
                     GachaMiniCard(
                       card = card,
+                      server = card.server ?: server,
                       rarity = embyGachaRarityOf(card.item),
                       code = codes[rowIndex * columns + colIndex],
                       captionHeight = captionH,
@@ -1250,6 +1257,7 @@ internal fun EmbyGachaDrawDialog(
                     title = focus.title,
                     rarity = embyGachaRarityOf(focus.item),
                     posterUrl = shown.posterUrl,
+                    server = shown.server ?: focus.server ?: server,
                     backdropUrl = shown.backdropUrl,
                     overview = shown.item.Overview,
                     detailAlpha = 1f,
@@ -1377,6 +1385,7 @@ private fun GachaSlotReel(
   /** 0 = 还在轮盘；1 = 已完全交给结果卡（同时整体放大 10%，做出「推近」的纵深） */
   fade: () -> Float,
   modifier: Modifier = Modifier,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   BoxWithConstraints(modifier = modifier.fillMaxSize()) {
     // 卡宽按可用宽度取 30%：手机竖屏约 3 张满屏、平板/横屏自动变大，
@@ -1447,6 +1456,7 @@ private fun GachaSlotReel(
                 contentDescription = null,
                 fallbackUrl = card.backdropUrl,
                 maxWidth = SLOT_POSTER_WIDTH,
+                server = card.server ?: server,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
               )
@@ -1731,12 +1741,34 @@ private fun buildSlotStrip(
  * 并发数由它内部的信号量压到 4 —— 这里不用自己限流。
  * 单张失败只当那一张不可用（调用方用 `peek` 核对后把它剔出卡带）。
  */
-private suspend fun preloadGachaPosters(urls: List<String>) {
-  if (urls.isEmpty()) return
+private suspend fun preloadGachaPosters(cards: List<GachaCard>, server: EmbyServer?) {
   coroutineScope {
-    urls.distinct()
-      .map { url -> async { runCatching { EmbyImageLoader.load(url, SLOT_POSTER_WIDTH) } } }
-      .awaitAll()
+    cards.mapNotNull { card ->
+      val row = card.server ?: server ?: return@mapNotNull null
+      val url = card.posterUrl?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+      row to url
+    }.distinct().map { (row, url) ->
+      async {
+        try {
+          EmbyImageLoader.load(row, url, SLOT_POSTER_WIDTH)
+        } catch (e: CancellationException) {
+          throw e
+        } catch (_: Exception) {
+          null
+        }
+      }
+    }.awaitAll()
+  }
+}
+
+private fun hasGachaPoster(card: GachaCard, server: EmbyServer?): Boolean {
+  val row = card.server ?: server ?: return false
+  return try {
+    EmbyImageLoader.peek(row, card.posterUrl) != null
+  } catch (e: CancellationException) {
+    throw e
+  } catch (_: Exception) {
+    false
   }
 }
 
@@ -1763,6 +1795,7 @@ private fun GachaMiniCard(
   onClick: () -> Unit,
   /** 长按 = 跳过详情层，直接播这张。 */
   onPlayDirect: () -> Unit,
+  server: EmbyServer? = card.server ?: LocalEmbyImageServer.current,
 ) {
   val haptic = LocalHapticFeedback.current
   val shape = RoundedCornerShape(10.dp)
@@ -1816,6 +1849,7 @@ private fun GachaMiniCard(
         contentDescription = card.title,
         fallbackUrl = card.backdropUrl,
         maxWidth = 240,
+        server = card.server ?: server,
         contentScale = ContentScale.Crop,
         modifier = Modifier.fillMaxSize(),
       )
@@ -1964,6 +1998,7 @@ private fun GachaResultCard(
   dismissLabel: String? = "取消",
   onPlay: () -> Unit,
   onDismiss: () -> Unit,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   val shape = RoundedCornerShape(24.dp)
   Column(
@@ -2018,9 +2053,10 @@ private fun GachaResultCard(
     Row {
       EmbyImage(
         url = posterUrl,
-        contentDescription = title,
+        contentDescription = item.Name,
         fallbackUrl = backdropUrl,
         maxWidth = 420,
+        server = server,
         contentScale = ContentScale.Crop,
         modifier = Modifier
           .size(width = 96.dp, height = 144.dp)

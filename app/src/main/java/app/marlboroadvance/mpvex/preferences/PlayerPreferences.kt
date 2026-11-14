@@ -3,50 +3,13 @@ package app.marlboroadvance.mpvex.preferences
 
 import app.marlboroadvance.mpvex.preferences.preference.PreferenceStore
 import app.marlboroadvance.mpvex.preferences.preference.getEnum
-import app.marlboroadvance.mpvex.ui.player.PlayerOrientation
-import app.marlboroadvance.mpvex.ui.player.RepeatMode
-import app.marlboroadvance.mpvex.ui.player.VideoAspect
-
-/** 前进 / 后退步长的默认秒数（沿用改这个功能之前的行为，不让老用户看到变化）。 */
-const val SEEK_STEP_DEFAULT_SECONDS = 10
-
-/** 步长下限：1 秒。再小的话连点几下才动一下，手感反而变差。 */
-const val SEEK_STEP_MIN_SECONDS = 1
-
-/** 步长上限：300 秒（5 分钟）。超过这个量级它就不是「细调」而是「跳章」了。 */
-const val SEEK_STEP_MAX_SECONDS = 300
-
-/** 快进/快退步长的取值范围，供滑块用。 */
-val SEEK_STEP_RANGE = SEEK_STEP_MIN_SECONDS..SEEK_STEP_MAX_SECONDS
-
-/**
- * 把任意输入夹进 [SEEK_STEP_MIN_SECONDS] ~ [SEEK_STEP_MAX_SECONDS]。
- *
- * 必要性：偏好可能来自①用户手改 xml、②旧版本遗留的超大值、
- * ③滑块与 [SEEK_STEP_MIN_SECONDS] 边界不同步。**不夹紧会算出 0 秒**
- * （按了没反应，正是红线里「静默 return 是产品 bug」那一类）。
- */
-fun coerceSeekStepSeconds(value: Int): Int =
-  value.coerceIn(SEEK_STEP_MIN_SECONDS, SEEK_STEP_MAX_SECONDS)
 
 class PlayerPreferences(
   preferenceStore: PreferenceStore,
 ) {
-  val orientation = preferenceStore.getEnum("player_orientation", PlayerOrientation.Video)
   val invertDuration = preferenceStore.getBoolean("invert_duration")
   val holdForMultipleSpeed = preferenceStore.getFloat("hold_for_multiple_speed", 2f)
   val showDynamicSpeedOverlay = preferenceStore.getBoolean("show_dynamic_speed_overlay", true)
-  val showDoubleTapOvals = preferenceStore.getBoolean("show_double_tap_ovals", true)
-  val showSeekTimeWhileSeeking = preferenceStore.getBoolean("show_seek_time_while_seeking", true)
-  /**
-   * 左下角悬浮的「上一条 / 下一条」小切换按钮。
-   *
-   * 它是**控制条收起时**才出现的那一层常驻件：不用呼出控制条也能切上/下一条。
-   * 控制条一展开，中部已有大的上一集/下一集，这个小件自动让位。
-   * 另有三种情况不显示：设置关掉（本项）、队列里没有上/下一条（单文件播放）、
-   * 以及播放队列弹窗展开期间（否则会浮在弹窗之上压住左下角）。
-   */
-  val showFloatingPlaylistSwitcher = preferenceStore.getBoolean("show_floating_playlist_switcher", true)
   val usePreciseSeeking = preferenceStore.getBoolean("use_precise_seeking", false)
 
   val brightnessGesture = preferenceStore.getBoolean("gestures_brightness", true)
@@ -55,7 +18,6 @@ class PlayerPreferences(
   val horizontalSwipeToSeek = preferenceStore.getBoolean("horizontal_swipe_to_seek", true)
   val horizontalSwipeSensitivity = preferenceStore.getFloat("horizontal_swipe_sensitivity", 0.05f)
 
-  val customAspectRatios = preferenceStore.getStringSet("custom_aspect_ratios", emptySet())
 
   val defaultSpeed = preferenceStore.getFloat("default_speed", 1f)
   val speedPresets =
@@ -63,8 +25,6 @@ class PlayerPreferences(
       "default_speed_presets",
       setOf("0.25", "0.5", "0.75", "1.0", "1.25", "1.5", "1.75", "2.0", "2.5", "3.0", "3.5", "4.0"),
     )
-  val displayVolumeAsPercentage = preferenceStore.getBoolean("display_volume_as_percentage", true)
-  val swapVolumeAndBrightness = preferenceStore.getBoolean("display_volume_on_right")
   val showLoadingCircle = preferenceStore.getBoolean("show_loading_circle", true)
   val savePositionOnQuit = preferenceStore.getBoolean("save_position", true)
 
@@ -144,18 +104,9 @@ class PlayerPreferences(
   val allowGesturesInPanels = preferenceStore.getBoolean("allow_gestures_in_panels")
   val showSystemStatusBar = preferenceStore.getBoolean("show_system_status_bar")
   val showSystemNavigationBar = preferenceStore.getBoolean("show_system_navigation_bar")
-  val reduceMotion = preferenceStore.getBoolean("reduce_motion", true)
   val playerTimeToDisappear = preferenceStore.getInt("player_time_to_disappear", 4000)
 
-  val defaultVideoZoom = preferenceStore.getFloat("default_video_zoom", 0f)
-  val panAndZoomEnabled = preferenceStore.getBoolean("pan_and_zoom_enabled", false)
 
-  val includeSubtitlesInSnapshot = preferenceStore.getBoolean("include_subtitles_in_snapshot", false)
-
-  val playlistMode = preferenceStore.getBoolean("playlist_mode", true)
-  val playlistViewMode = preferenceStore.getBoolean("playlist_view_mode_list", true) // true = list, false = grid
-
-  val useWavySeekbar = preferenceStore.getBoolean("use_wavy_seekbar", true)
 
   val customSkipDuration = preferenceStore.getInt("custom_skip_duration", 90)
 
@@ -180,62 +131,6 @@ class PlayerPreferences(
    * 片尾自动跳 = 跳到视频结尾（触发连播的下一集 / 停在末帧）。
    */
   val autoSkipOutro = preferenceStore.getBoolean("auto_skip_outro", false)
-
-  /**
-   * 播放页控制条上「快进 / 快退」按钮单次跳动的秒数，默认各 **10**。
-   *
-   * ⚠️ 与 [customSkipDuration] 是**两个不同的功能**，别混：
-   * - `customSkipDuration`（默认 90s）：剧集开头/结尾自动跳过片头片尾的那个长跳。
-   * - 本项：控制条中间两个小圆钮「<< / >>」的步长。
-   *
-   * **前进与后退是两个独立值**，而不是共用一个 —— 两者的实际用途不同：
-   * 「跳片头」用 10 秒后跳刚刚好，而「跳过一段无聊的过场」可能要 30 秒；
-   * 反过来也有「想细看前一帧」的时刻。合成一个值会把两种需求都别扭。
-   *
-   * 取值范围见 [SEEK_STEP_RANGE]，读取时务必过一遍 [coerceSeekStepSeconds]：
-   * 偏好文件可能被手改、也可能来自旧版本，不夹紧会算出 0 秒（点了没反应）。
-   */
-  val seekForwardSeconds =
-    preferenceStore.getInt("seek_forward_seconds", SEEK_STEP_DEFAULT_SECONDS)
-
-  /** 快退步长（秒）。与 [seekForwardSeconds] 分开存，理由见那里。 */
-  val seekBackwardSeconds =
-    preferenceStore.getInt("seek_backward_seconds", SEEK_STEP_DEFAULT_SECONDS)
-
-  /**
-   * 控制条是否显示**系统时钟**（默认关）。
-   *
-   * 全屏看片时手机屏幕常年被盖住，能瞥一眼时间/电量比掏手机强。
-   */
-  val showPlayerClock = preferenceStore.getBoolean("show_player_clock", false)
-
-  /**
-   * 控制条是否显示**电量百分比**（默认关）。
-   */
-  val showPlayerBattery = preferenceStore.getBoolean("show_player_battery", false)
-
-  /**
-   * 控制条是否显示**网络加载速度**（默认开）。
-   *
-   * 只有在网络流（http / https）上才有读数，本地文件整条不渲染 —— 判定在
-   * `MpvNetSpeedSampler.sample()` 里，这里只负责「用户要不要看」。
-   *
-   * 默认开而时钟 / 电量默认关，是因为它们不是一类东西：那两个是**设备状态**，
-   * 与片子无关；网速是**这条流能不能跟上码率**的唯一现场证据 ——
-   * 卡顿 / 转圈时第一时间要看的就是它。
-   */
-  val showPlayerNetSpeed = preferenceStore.getBoolean("show_player_net_speed", true)
-
-  /**
-   * GIF 录制的输出宽度（px，等比缩放）。
-   *
-   * GIF 只有 256 色，宽度就是「清晰度 ↔ 体积」的主开关，而体积是**按宽度平方**涨的：
-   * 同一段 5 秒画面：480 约 1.3~8MB、640 约 2~10MB、960 约 3.6~9MB、1280 约 6~17MB。
-   * **默认 480** 兼顾两者；960 / 1280 用来看清细节（脸、字幕）。
-   * 录制面板里的「清晰度」五档写的就是这个值（与 GifRecorder.WIDTH_OPTIONS 对应），
-   * 实际输出还会封顶到视频自身分辨率（源比目标窄时不放大）。
-   */
-  val gifWidth = preferenceStore.getInt("gif_width", 480)
 
   // ── mpv 播放缓存（清单 #18 / 原 3.3）──
   //
@@ -273,8 +168,6 @@ class PlayerPreferences(
    */
   val diskCacheSizeMb = preferenceStore.getInt("mpv_disk_cache_size_mb", 512)
 
-  val repeatMode = preferenceStore.getEnum("repeat_mode", RepeatMode.OFF)
-  val shuffleEnabled = preferenceStore.getBoolean("shuffle_enabled", false)
 
   /**
    * 播放器**震动反馈总开关**，默认**开**。
@@ -304,29 +197,6 @@ class PlayerPreferences(
    */
   val autoplayNextCountdownSeconds = preferenceStore.getInt("autoplay_next_countdown_seconds", 5)
 
-  /**
-   * 「下一集」衔接预取（Yamby 的 `next_up_sec` 对位能力）。
-   *
-   * ## 解决什么
-   *
-   * 连播切集时新集要重新 `loadfile` + 建 HTTP 连接 + 服务端 prepare，
-   * 高码率片源上这几百毫秒~数秒就是「播完黑一下」的来源。
-   *
-   * ## 做法与代价
-   *
-   * 不用 mpv 的 `prefetch-playlist`：那会让新旧两路同时拉流，70GB 级的片源上
-   * 带宽直接对半分，反而把当前这集拉卡（大文件卡顿刚修完，不能再引入这个副作用）。
-   * 这里只做**廉价的预热**：小流量 Range 请求打一次下一集的流地址，
-   * 让 DNS / TLS / 服务端转码方案缓存热起来，切集时首次握手快一个数量级。
-   *
-   * 提前量刻意给短（默认 45 秒，可关）：太早预热会被服务端视为「放弃的会话」，
-   * 有些服务端（Jellyfin 某些版本）还会把上一路转码停掉。
-   */
-  val prefetchNextEpisode = preferenceStore.getBoolean("prefetch_next_episode", true)
-
-  /** 提前多久预热下一集（秒）。0 = 关闭。 */
-  val prefetchNextEpisodeSeconds = preferenceStore.getInt("prefetch_next_episode_seconds", 45)
-
   /** 下一集卡片在片尾多少秒前开始悬停（Yamby 的 `next_up_sec`）。 */
   val nextUpShowSeconds = preferenceStore.getInt("next_up_show_seconds", 30)
 
@@ -338,28 +208,6 @@ class PlayerPreferences(
    * 都关掉 = 播完静默切集，什么都不显示。
    */
   val showNextUpCard = preferenceStore.getBoolean("show_next_up_card", true)
-
-  /**
-   * 默认播放内核："MPV" 或 "GSY"。
-   *
-   * 默认 mpv —— 它是原始内核，功能最全；GSYVideoPlayer 作为兼容兜底存在，
-   * 需要用户在设置里主动切换，或用「长按播放切换备用内核」临时用一次。
-   */
-  val playbackEngine = preferenceStore.getString("playback_engine", "MPV")
-
-  /**
-   * 长按反选内核：打开后，长按一个视频会用「与默认相反」的内核播放。
-   *
-   * 典型场景是「这个片 mpv 播不动，临时用 Exo 试试」，
-   * 不需要先去设置里切默认内核再回来点。
-   */
-  val longPressReverseEngine = preferenceStore.getBoolean("long_press_reverse_engine", true)
-
-  /*
-   * 注：GSY 的解码内核（IJK / System / ExoPlayer）不在这里 ——
-   * 它是 GSY 播放页自己的配置，见 [GsyPreferences.kernel]，
-   * 配置入口在「设置 → GSY 播放器」。mpv 这边只有 [playbackEngine] 决定默认走哪套播放页。
-   */
 
   /**
    * 记住每部剧的播放速度：同一部剧切下一集时沿用上一集调过的倍速。
@@ -424,16 +272,6 @@ class PlayerPreferences(
    */
   val lastPlaybackSpeed = preferenceStore.getFloat("last_playback_speed", 0f)
 
-  /**
-   * 视频预加载。
-   *
-   * 打开后：当前视频播放满 [PRELOAD_TRIGGER_SECONDS] 秒时，后台取下一个视频**开头**一段数据，
-   * 等用户真的切过去时首帧来得更快，观感更接近「无缝」。
-   *
-   * 默认关闭 —— 预加载会额外占一点带宽，弱网或流量环境应由用户自己决定。
-   */
-  val preloadNextVideo = preferenceStore.getBoolean("preload_next_video", false)
-
   val autoPiPOnNavigation = preferenceStore.getBoolean("auto_pip_on_navigation", false)
 
   /**
@@ -449,20 +287,4 @@ class PlayerPreferences(
 
   val keepScreenOnWhenPaused = preferenceStore.getBoolean("keep_screen_on_when_paused", false)
 
-  // Persist aspect ratio setting (default to Fit)
-  val defaultVideoAspect = preferenceStore.getEnum("default_video_aspect", VideoAspect.Fit)
-  val defaultCustomAspectRatio = preferenceStore.getObject(
-    key = "default_custom_aspect_ratio",
-    defaultValue = -1.0,
-    serializer = { it.toString() },
-    deserializer = { it.toDoubleOrNull() ?: -1.0 }
-  )
-
-  companion object {
-    /** 播放满多少秒后开始预加载下一个视频（用户需求：2 秒）。 */
-    const val PRELOAD_TRIGGER_SECONDS = 2
-
-    /** 预取的数据量：够覆盖容器头 + 开头关键帧即可，取多了反而挤占当前视频的带宽。 */
-    const val PRELOAD_BYTES = 2L * 1024 * 1024
-  }
 }

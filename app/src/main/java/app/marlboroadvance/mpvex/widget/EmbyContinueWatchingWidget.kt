@@ -15,6 +15,10 @@ import app.marlboroadvance.mpvex.domain.emby.EmbyClient
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
 import app.marlboroadvance.mpvex.domain.emby.EmbyRepository
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImageLoader
+import app.marlboroadvance.mpvex.database.repository.EmbyServerLoadState
+import app.marlboroadvance.mpvex.domain.postgres.PostgresException
+import app.marlboroadvance.mpvex.domain.postgres.PostgresFailure
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -52,7 +56,9 @@ class EmbyContinueWatchingWidget : AppWidgetProvider() {
             appWidgetManager.updateAppWidget(id, buildViews(appContext, rows))
           }
         }
-      } catch (_: Throwable) {
+      } catch (e: CancellationException) {
+        throw e
+      } catch (_: Exception) {
         // 保持上一次的画面
       } finally {
         pendingResult.finish()
@@ -101,16 +107,16 @@ class EmbyContinueWatchingWidget : AppWidgetProvider() {
       // 万一没有（比如被系统在冷启动时先拉起 receiver），就当作「没数据」，
       // 不要抛异常把进程带崩。
       // GlobalContext.getOrNull() 直接返回 Koin?（不是 KoinApplication），拿到即可用。
-      val koin = GlobalContext.getOrNull() ?: return emptyList()
-      val repository = runCatching { koin.get<EmbyRepository>() }.getOrNull() ?: return emptyList()
-
-      // 优先用「当前服务器」；冷启动时它可能还没恢复好，退回第一台
-      val server = repository.currentServer.value
-        ?: runCatching { repository.getServers().firstOrNull() }.getOrNull()
-        ?: return emptyList()
-
-      val items = runCatching { repository.getResumeItems(server, MAX_ROWS) }
-        .getOrDefault(emptyList())
+      val koin = GlobalContext.getOrNull() ?: throw PostgresException(PostgresFailure.LOAD)
+      val repository = koin.get<EmbyRepository>()
+      // A widget is not allowed to start database/config restoration before the startup gate.
+      // Loading/failed means retain the previous RemoteViews, not render a no-server state.
+      val state = repository.loadState.value
+      if (state !is EmbyServerLoadState.Ready) {
+        throw PostgresException((state as? EmbyServerLoadState.Failed)?.reason ?: PostgresFailure.LOAD)
+      }
+      val server = repository.currentServer.value ?: return emptyList()
+      val items = repository.getResumeItems(server, MAX_ROWS)
 
       val rows = ArrayList<Row>(items.size)
       for (item in items.take(MAX_ROWS)) {
@@ -125,7 +131,7 @@ class EmbyContinueWatchingWidget : AppWidgetProvider() {
         }.getOrNull()
         val thumb =
           if (url != null) {
-            runCatching { EmbyImageLoader.load(url, THUMB_WIDTH) }.getOrNull()
+            runCatching { EmbyImageLoader.load(server, url, THUMB_WIDTH) }.getOrNull()
           } else {
             null
           }

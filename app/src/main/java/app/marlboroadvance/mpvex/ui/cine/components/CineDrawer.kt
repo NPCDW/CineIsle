@@ -29,12 +29,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
@@ -54,7 +52,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.marlboroadvance.mpvex.R
-import app.marlboroadvance.mpvex.ui.browser.emby.EmbyDownloadViewModel
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyViewModel
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyBrandGreen
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyLogo
@@ -62,14 +59,9 @@ import app.marlboroadvance.mpvex.ui.cine.CineTheme
 
 /**
  * 抽屉里可跳的功能入口。**刻意与老 UI AppBar 的功能全集一一对应** ——
- * 下载 / 离线 / 直播 / 播放列表 / 猜你喜欢 / 合集 / Emby 维护 / 设置，
- * 一个不少（搜索留在顶栏，它是高频交互且首页已有搜索胶囊）。
+ * 只读推荐 / 合集 / 服务器列表 / 本机设置（搜索留在顶栏）。
  */
 enum class CineDrawerEntry {
-  Downloads,
-  Offline,
-  LiveTv,
-  Playlists,
   Discover,
   Collections,
   ServerManage,
@@ -86,8 +78,7 @@ enum class CineDrawerEntry {
  * 都是「叠在 tab 之上的一层」，但抽屉是**半透明覆盖**而不是整页替换。
  *
  * ## 数据
- * 下载角标自己取 [EmbyDownloadViewModel]（与 Classic 顶栏 [app.marlboroadvance.mpvex.ui.browser.emby.EmbyDownloadEntryButton]
- * 同一份任务队列）—— 覆盖层各自取 ViewModel，[app.marlboroadvance.mpvex.ui.cine.CineRoot] 继续不碰数据。
+ * 当前服务器名来自共享 [EmbyViewModel]，根容器不碰媒体数据。
  *
  * ## ⚠️ 必须常驻组合
  * [visible] 传 false 时内部只留空盒子，进出场动画靠 AnimatedVisibility 播放。
@@ -103,13 +94,8 @@ fun CineDrawerOverlay(
 ) {
   val context = LocalContext.current
   val app = context.applicationContext as Application
-  val downloadViewModel: EmbyDownloadViewModel = viewModel(
-    factory = EmbyDownloadViewModel.factory(app),
-  )
   val embyViewModel: EmbyViewModel = viewModel(factory = EmbyViewModel.factory(app))
   val server by embyViewModel.currentServer.collectAsState()
-  val tasks by downloadViewModel.tasks.collectAsState()
-  val downloadsActive = tasks.count { it.isActive }
 
   // 系统返回键先收抽屉（抽屉是叠在 tab 之上的一层）
   BackHandler(enabled = visible, onBack = onDismiss)
@@ -142,7 +128,6 @@ fun CineDrawerOverlay(
       modifier = Modifier.align(Alignment.CenterStart),
     ) {
       DrawerPanel(
-        downloadsActive = downloadsActive,
         serverName = server?.name,
         onNavigate = onNavigate,
       )
@@ -153,7 +138,6 @@ fun CineDrawerOverlay(
 /** 面板本体：头部（品牌 + 服务器名）+ 「媒体」「系统」两组功能项 */
 @Composable
 private fun DrawerPanel(
-  downloadsActive: Int,
   serverName: String?,
   onNavigate: (CineDrawerEntry) -> Unit,
 ) {
@@ -212,27 +196,6 @@ private fun DrawerPanel(
     DrawerDivider()
 
     DrawerSection(stringResource(R.string.cine_drawer_section_media))
-    DrawerItem(
-      icon = Icons.Default.Download,
-      label = stringResource(R.string.cine_drawer_downloads),
-      badge = downloadsActive,
-      onClick = { onNavigate(CineDrawerEntry.Downloads) },
-    )
-    DrawerItem(
-      icon = Icons.Outlined.CloudOff,
-      label = stringResource(R.string.cine_drawer_offline),
-      onClick = { onNavigate(CineDrawerEntry.Offline) },
-    )
-    DrawerItem(
-      icon = Icons.Default.Tv,
-      label = stringResource(R.string.cine_drawer_live_tv),
-      onClick = { onNavigate(CineDrawerEntry.LiveTv) },
-    )
-    DrawerItem(
-      icon = Icons.AutoMirrored.Filled.PlaylistPlay,
-      label = stringResource(R.string.cine_drawer_playlists),
-      onClick = { onNavigate(CineDrawerEntry.Playlists) },
-    )
     DrawerItem(
       icon = Icons.Default.AutoAwesome,
       label = stringResource(R.string.cine_drawer_discover),

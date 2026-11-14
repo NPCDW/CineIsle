@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_nav_servers">服务器列表</string>
+    <string name="app_nav_aggregate_search">聚合检索</string>
+    <string name="app_nav_playback_history">播放历史</string>
+    <string name="app_nav_settings">设置</string>
+    <string name="app_nav_home">首页</string>
+    <string name="app_nav_favorites">收藏</string>
+    <string name="app_nav_search">搜索</string>
+    <string name="app_back_to_servers">返回服务器列表</string>
+</resources>

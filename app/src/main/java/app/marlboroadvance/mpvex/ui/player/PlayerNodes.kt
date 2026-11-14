@@ -1,16 +1,7 @@
 package app.marlboroadvance.mpvex.ui.player
 
-import dev.vivvvek.seeker.Segment
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-
-@Serializable
-data class ChapterNode(
-  val time: Float,
-  val title: String,
-) {
-  fun toSegment(): Segment = Segment(title, time)
-}
 
 @Serializable
 data class TrackNode(

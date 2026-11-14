@@ -46,7 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -63,8 +63,8 @@ object SettingsSearchScreen : Screen {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     override fun Content() {
-        val context = LocalContext.current
         val backstack = LocalBackStack.current
+        val resources = LocalResources.current
         val keyboardController = LocalSoftwareKeyboardController.current
         val focusRequester = remember { FocusRequester() }
 
@@ -73,7 +73,7 @@ object SettingsSearchScreen : Screen {
         val searchResults by remember(searchQuery) {
             derivedStateOf {
                 SearchablePreferences.search(searchQuery) { resId ->
-                    context.getString(resId)
+                    resources.getString(resId)
                 }
             }
         }

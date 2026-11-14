@@ -3,7 +3,6 @@ package app.marlboroadvance.mpvex.ui.player.engine
 import android.graphics.Bitmap
 import `is`.xyz.mpv.MPVLib
 import `is`.xyz.mpv.MPVNode
-import app.marlboroadvance.mpvex.ui.player.TrackNode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -11,16 +10,9 @@ import kotlinx.coroutines.flow.StateFlow
  * 播放内核门面（facade）。
  *
  * 全项目对播放内核的调用统一走这里，不再直接碰 [MPVLib]。
- *
- * 历史上这里还挂过一个 GSYVideoPlayer 分支（mpv 的 option/property 三元组被逐条
- * "翻译"成 GSY 的调用），那套翻译层是闪退 / 黑屏 / 拉满音量的根源，已整体删除。
- * 现在门面只转发 mpv，预留的 `kind` 字段保持原样，避免动到界面上几百处调用点。
+ * 常规播放固定使用 mpv，因此这里仅负责就绪门禁与 native 调用转发。
  */
 object PlayerLib {
-  /** 当前内核。整个进程内保持一致。 */
-  @Volatile
-  var kind: EngineKind = EngineKind.MPV
-
   // ─────────────── 内核就绪门禁（崩溃 #26 的根治手段）───────────────
 
   /**
@@ -73,14 +65,8 @@ object PlayerLib {
   /** 内核当前是否可安全调用。仅供诊断/测试用。 */
   val isCoreReady: Boolean get() = coreReady
 
-  private val isMpv: Boolean get() = kind == EngineKind.MPV
-
-  /**
-   * 真正可以打 native 的条件：**内核是 mpv，且已经 create 过**。
-   *
-   * 少了 `coreReady` 这一半，`isMpv` 为真就意味着「随便打」，而实际句柄可能还不存在。
-   */
-  private val canTouchNative: Boolean get() = isMpv && coreReady
+  /** 真正可以打 native 的条件：mpv 已经 create 过。 */
+  private val canTouchNative: Boolean get() = coreReady
 
   // ─────────────── 属性流（Compose 侧 collectAsState 用） ───────────────
 
@@ -122,9 +108,7 @@ object PlayerLib {
       if (canTouchNative) MPVLib.propNode[key] else emptyStateFlow()
     }
 
-  /** 轨道列表。mpv 侧由 track-list 推导；非 mpv 内核为空。 */
-  val gsyTrackNodes = MutableStateFlow<List<TrackNode>>(emptyList())
-
+  /** 轨道列表由 mpv 的 `track-list` 属性提供。 */
   // ─────────────── 属性读 ───────────────
 
   fun getPropertyInt(key: String): Int? = if (canTouchNative) MPVLib.getPropertyInt(key) else null
@@ -222,7 +206,7 @@ object PlayerLib {
    * 既卡主线程又不可靠（慢机器上 100ms 不够）。
    * 有了这个属性就能**轮询到真正空闲为止**，且带上限，避免死等。
    *
-   * 拿不到（GSY 内核 / 读取失败）时返回 true —— 即「视为已空闲」，
+   * 拿不到（内核未就绪 / 读取失败）时返回 true —— 即「视为已空闲」，
    * 宁可少等也不能卡住退出。
    */
   fun isIdleActive(): Boolean {
@@ -241,7 +225,7 @@ object PlayerLib {
    * 也就是确实 create 过。
    */
   fun destroy() {
-    if (isMpv) MPVLib.destroy()
+    MPVLib.destroy()
   }
 
   /** 截图 */

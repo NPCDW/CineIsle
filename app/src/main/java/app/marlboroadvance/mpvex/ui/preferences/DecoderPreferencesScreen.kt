@@ -435,12 +435,7 @@ object DecoderPreferencesScreen : Screen {
                   )
                 },
                 value = enableAnime4K,
-                onValueChange = { enabled ->
-                    preferences.enableAnime4K.set(enabled)
-                    if (enabled && !useVulkan) { // Only disable GPU Next if Vulkan is disabled
-                        preferences.gpuNext.set(false)
-                    }
-                },
+                onValueChange = preferences.enableAnime4K::set,
                 modifier = Modifier.settingsAnchor(R.string.pref_anime4k_title),
                 title = { Text(stringResource(R.string.pref_anime4k_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 summary = {

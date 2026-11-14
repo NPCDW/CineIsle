@@ -1,5 +1,9 @@
 package app.marlboroadvance.mpvex.ui.cine.library
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -52,6 +56,7 @@ import app.marlboroadvance.mpvex.R
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
 import app.marlboroadvance.mpvex.domain.emby.EmbyServer
 import app.marlboroadvance.mpvex.domain.emby.EmbyTicks
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.components.pullrefresh.PullRefreshGridBox
@@ -59,11 +64,14 @@ import app.marlboroadvance.mpvex.ui.browser.LocalNavigationBarHeight
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyDetailScreen
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyLibraryScreen
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyViewModel
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LegacySeasonLibraryContent
+import app.marlboroadvance.mpvex.ui.browser.emby.components.isSeasonLibraryEntry
 import app.marlboroadvance.mpvex.ui.browser.emby.PagedList
 import app.marlboroadvance.mpvex.ui.browser.emby.PagedResult
 import app.marlboroadvance.mpvex.ui.browser.emby.AutoLoadMore
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyPagingFooter
 import app.marlboroadvance.mpvex.ui.browser.emby.pagingSource
+import app.marlboroadvance.mpvex.ui.browser.emby.rememberBrowsePage
 import app.marlboroadvance.mpvex.ui.browser.emby.rememberPredictivePreloadDistance
 import app.marlboroadvance.mpvex.ui.cine.CineMediaUi
 import app.marlboroadvance.mpvex.ui.cine.CineTheme
@@ -115,6 +123,10 @@ fun CineLibraryScreen(
   val app = context.applicationContext as Application
   val viewModel: EmbyViewModel = viewModel(factory = EmbyViewModel.factory(app))
   val server by viewModel.currentServer.collectAsState()
+  if (isSeasonLibraryEntry(includeItemTypes, folderDive) &&
+    LegacySeasonLibraryContent(libraryId, server, viewModel, modifier)
+  ) return
+  CompositionLocalProvider(LocalEmbyImageServer provides server) {
   val backStack = LocalBackStack.current
   val scope = rememberCoroutineScope()
   val prefs = koinInject<BrowserPreferences>()
@@ -141,7 +153,12 @@ fun CineLibraryScreen(
   // 长按玻璃菜单：与首页共用同一份实现（状态放页面这层，Host 挂在页面末尾）
   val actionSheet = rememberCineActionSheetState()
 
-  val page = remember(libraryId) { PagedList<EmbyItem>(keyOf = { it.Id ?: it.Name ?: "" }) }
+  val page = server?.let { current ->
+    rememberBrowsePage(
+      current,
+      "cine-library-v1:$libraryId:$categoryIndex:$sortBy:$sortOrder:$folderDive:${category.includeItemTypes}:${category.favoritesOnly}",
+    )
+  } ?: remember(libraryId) { PagedList<EmbyItem>(keyOf = { it.Id ?: it.Name ?: "" }) }
   val isRefreshing = remember { mutableStateOf(false) }
 
   val gridState: LazyGridState = rememberLazyGridState()
@@ -179,11 +196,11 @@ fun CineLibraryScreen(
       },
       isFavorite = if (category.favoritesOnly) true else null,
     )
-    return PagedResult(result.items, result.totalCount, limit)
+    return PagedResult(result.items, result.totalCount, limit, consumedCount = result.consumedCount)
   }
 
   LaunchedEffect(server?.id, libraryId, categoryIndex, sortBy, reloadTicket) {
-    page.reload(::loadPage)
+    page.refresh(::loadPage)
   }
 
   page.AutoLoadMore(
@@ -193,7 +210,7 @@ fun CineLibraryScreen(
   )
 
   // ── 展示模型 ──
-  val mediaUi: List<CineMediaUi> = remember(server?.id, page.items) {
+  val mediaUi: List<CineMediaUi> = remember(server, page.items) {
     val s = server ?: return@remember emptyList()
     page.items.map { item -> viewModel.toCineMedia(s, item) }
   }
@@ -220,7 +237,7 @@ fun CineLibraryScreen(
         )
       }
 
-      else -> backStack.add(EmbyDetailScreen(itemId = item.Id ?: return, title = item.Name ?: ""))
+      else -> backStack.add(EmbyDetailScreen(itemId = item.Id ?: return, title = item.displayTitle()))
     }
   }
 
@@ -315,6 +332,7 @@ fun CineLibraryScreen(
                 val media = mediaUi[index]
                 CineMediaListRow(
                   media = media,
+                  server = media.imageServer,
                   onClick = { open(media) },
                   onLongClick = { actionSheet.show(media) },
                 )
@@ -333,9 +351,8 @@ fun CineLibraryScreen(
         } else {
           PullRefreshGridBox(
             isRefreshing = isRefreshing,
-            // 只重载一次：`reloadTicket++` 会再触发一次 LaunchedEffect 的 reload，
-            // 两者都写就是「下拉一次发两次请求」
-            onRefresh = { page.reload(::loadPage) },
+            // 已有快照时保留卡片静默刷新；冷进入才由 refresh 走首次加载骨架。
+            onRefresh = { page.refresh(::loadPage) },
             gridState = gridState,
             modifier = Modifier.fillMaxSize(),
           ) {
@@ -389,9 +406,8 @@ fun CineLibraryScreen(
       backStack.add(EmbyDetailScreen(itemId = media.id, title = media.title))
     },
     // 改完重拉当前页：收藏在「只看收藏」分类里会直接决定这条还在不在列表里
-    onChanged = { reloadTicket++ },
-    onDeleted = { reloadTicket++ },
   )
+  }
 }
 
 /**

@@ -48,6 +48,7 @@ fun CinePosterRow(
       items.take(POSTER_ROW_MAX).forEach { media ->
         CinePosterCard(
           media = media,
+          server = media.imageServer,
           width = cardWidth,
           onClick = { onClick(media) },
           onLongClick = onLongClick?.let { { it(media) } },
@@ -65,6 +66,7 @@ fun CinePosterRow(
       itemsIndexed(items) { _, media ->
         CinePosterCard(
           media = media,
+          server = media.imageServer,
           width = cardWidth,
           onClick = { onClick(media) },
           onLongClick = onLongClick?.let { { it(media) } },
@@ -95,6 +97,7 @@ fun CineWideRow(
       items.take(WIDE_ROW_MAX).forEach { media ->
         CineWideCard(
           media = media,
+          server = media.imageServer,
           width = cardWidth,
           onClick = { onClick(media) },
           onLongClick = onLongClick?.let { { it(media) } },
@@ -110,6 +113,7 @@ fun CineWideRow(
       itemsIndexed(items) { _, media ->
         CineWideCard(
           media = media,
+          server = media.imageServer,
           width = cardWidth,
           onClick = { onClick(media) },
           onLongClick = onLongClick?.let { { it(media) } },

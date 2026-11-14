@@ -1,9 +1,7 @@
 package app.marlboroadvance.mpvex.ui.preferences
 
-import android.content.Intent
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,7 +17,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.ViewQuilt
 import androidx.compose.material.icons.outlined.AutoAwesomeMotion
 import androidx.compose.material.icons.outlined.Audiotrack
 // ⚠️ material icons 的 `Icons.Outlined.X` 是**顶层扩展属性**，不是成员 ——
@@ -36,13 +33,11 @@ import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Palette
-import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.material.icons.outlined.Subtitles
-import androidx.compose.material.icons.outlined.ThumbDown
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -59,56 +54,41 @@ import androidx.compose.material.icons.outlined.Autorenew
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.DateRange
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Label
 import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material.icons.outlined.RoundedCorner
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Slideshow
 import androidx.compose.material.icons.outlined.ThumbUp
-import androidx.compose.material.icons.outlined.Title
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.ViewComfy
 import androidx.compose.material.icons.outlined.Widgets
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.marlboroadvance.mpvex.ui.browser.LocalNavigationBarHeight
 import app.marlboroadvance.mpvex.R
-import app.marlboroadvance.mpvex.domain.emby.EmbyRepository
 import app.marlboroadvance.mpvex.domain.emby.MediaSourcePreference
 import app.marlboroadvance.mpvex.preferences.AppLockMethod
 import app.marlboroadvance.mpvex.preferences.AppLockPreferences
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
 import app.marlboroadvance.mpvex.preferences.DanmakuPreferences
 import app.marlboroadvance.mpvex.preferences.FolderCoverRefreshPolicy
-import app.marlboroadvance.mpvex.preferences.GridTitleLines
 import app.marlboroadvance.mpvex.preferences.PhotoSlideshowInterval
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
-import app.marlboroadvance.mpvex.presentation.components.ConfirmDialog
-import app.marlboroadvance.mpvex.ui.browser.emby.PersonMergeScreen
-import app.marlboroadvance.mpvex.ui.browser.emby.aggregate.EmbyAggregateLibraryManageScreen
 import app.marlboroadvance.mpvex.ui.browser.emby.discover.SimilarAlgorithm
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyGachaStyle
-import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImageLoader
-import app.marlboroadvance.mpvex.ui.browser.emby.photo.EmbyPhotoSaver
-import app.marlboroadvance.mpvex.ui.browser.dialogs.FolderPickerDialog
 import app.marlboroadvance.mpvex.ui.lock.AppLockManageDialog
 import app.marlboroadvance.mpvex.ui.lock.PatternChangeDialog
 import app.marlboroadvance.mpvex.ui.lock.PatternSetupDialog
@@ -117,9 +97,8 @@ import app.marlboroadvance.mpvex.ui.lock.PinChangeDialog
 import app.marlboroadvance.mpvex.ui.lock.PinSetupDialog
 import app.marlboroadvance.mpvex.ui.lock.PinVerifyDialog
 import app.marlboroadvance.mpvex.ui.lock.UnlockMethodDialog
+import app.marlboroadvance.mpvex.ui.postgres.PostgresPreferencesScreen
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
-import app.marlboroadvance.mpvex.utils.media.OpenDocumentTreeContract
-import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import me.zhanghai.compose.preference.ListPreference
 import me.zhanghai.compose.preference.Preference
@@ -129,13 +108,23 @@ import me.zhanghai.compose.preference.SwitchPreference
 import org.koin.compose.koinInject
 import kotlin.math.roundToInt
 
+@Composable
+internal fun PreferencesContent(modifier: Modifier = Modifier, showBack: Boolean = true) {
+  PreferencesScreen.RenderContent(modifier, showBack)
+}
+
 @Serializable
 object PreferencesScreen : Screen {
+  @Composable
+  override fun Content() { PreferencesContent() }
+
   @OptIn(ExperimentalMaterial3Api::class)
   @Composable
-  override fun Content() {
+  internal fun RenderContent(modifier: Modifier, showBack: Boolean) {
     val backstack = LocalBackStack.current
+    val bottomInset = if (showBack) 0.dp else LocalNavigationBarHeight.current
     Scaffold(
+      modifier = modifier,
       topBar = {
         TopAppBar(
           title = { 
@@ -147,7 +136,7 @@ object PreferencesScreen : Screen {
             )
           },
           navigationIcon = {
-            IconButton(onClick = backstack::removeLastOrNull) {
+            if (showBack) IconButton(onClick = backstack::removeLastOrNull) {
               Icon(
                 Icons.AutoMirrored.Outlined.ArrowBack, 
                 contentDescription = null,
@@ -163,6 +152,7 @@ object PreferencesScreen : Screen {
         SettingsSpotlightReveal(listState, PreferencesScreen)
         LazyColumn(
           state = listState,
+          contentPadding = PaddingValues(bottom = bottomInset),
           modifier =
             Modifier
               .fillMaxSize()
@@ -200,6 +190,50 @@ object PreferencesScreen : Screen {
             }
           }
           
+          item {
+            PreferenceCard {
+              Preference(
+                modifier = Modifier.settingsAnchor(R.string.postgres_settings_title),
+                title = { Text(stringResource(R.string.postgres_settings_title)) },
+                summary = {
+                  Text(
+                    stringResource(R.string.postgres_settings_summary),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+                icon = {
+                  Icon(
+                    Icons.Outlined.Link,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                  )
+                },
+                onClick = { backstack.add(PostgresPreferencesScreen) },
+              )
+
+              PreferenceDivider()
+
+              Preference(
+                modifier = Modifier.settingsAnchor("共享配置（只读）"),
+                title = { Text("共享配置（只读）") },
+                summary = {
+                  Text(
+                    "查看 Android 生效配置、服务器线路和反向代理；请在 loemby 桌面端修改",
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+                icon = {
+                  Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                  )
+                },
+                onClick = { backstack.add(SharedConfigurationPreferencesScreen) },
+              )
+            }
+          }
+
           // UI & Appearance Section
           item {
             PreferenceSectionHeader(title = "外观")
@@ -257,27 +291,6 @@ object PreferencesScreen : Screen {
               )
 
               PreferenceDivider()
-
-              Preference(
-                modifier = Modifier.settingsAnchor(R.string.pref_layout_title),
-                title = { Text(text = stringResource(id = R.string.pref_layout_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = { 
-                  Text(
-                    text = stringResource(id = R.string.pref_layout_summary),
-                    color = MaterialTheme.colorScheme.outline
-                  ) 
-                },
-                icon = { 
-                  Icon(
-                    Icons.AutoMirrored.Outlined.ViewQuilt, 
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                  ) 
-                },
-                onClick = { backstack.add(PlayerControlsPreferencesScreen) },
-              )
-              
-              PreferenceDivider()
               
               Preference(
 
@@ -329,78 +342,6 @@ object PreferencesScreen : Screen {
 
               PreferenceDivider()
 
-              // GSY 播放器是**独立的一套播放页**（内核 / 渲染 / 手势都跟 mpv 不共用），
-              // 所以它的配置单开一页：这一页改什么都不影响 mpv，反之亦然。
-              Preference(
-                modifier = Modifier.settingsAnchor(R.string.pref_gsy_player),
-                title = { Text(text = stringResource(id = R.string.pref_gsy_player), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = stringResource(id = R.string.pref_gsy_player_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                icon = {
-                  Icon(
-                    Icons.Outlined.PlayCircle,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                onClick = { backstack.add(GsyPreferencesScreen) },
-              )
-
-              // 「标记为不喜欢」的三个开关 + 管理页入口。
-              // 播放器按钮那个开关与 mpv 的布局编辑器是**双向同步**的
-              // （关开关会清掉控件簇里的按钮、开开关会加回原簇），
-              // 细节见 DislikeLayoutSync。
-              Preference(
-                modifier = Modifier.settingsAnchor(R.string.pref_dislike_title),
-                title = { Text(text = stringResource(id = R.string.pref_dislike_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = stringResource(id = R.string.pref_dislike_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                icon = {
-                  Icon(
-                    Icons.Outlined.ThumbDown,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                onClick = { backstack.add(DislikePreferencesScreen) },
-              )
-            }
-          }
-          
-          // File Management Section
-          item {
-            PreferenceSectionHeader(title = "本地媒体库")
-          }
-          
-          item {
-            PreferenceCard {
-              Preference(
-
-                modifier = Modifier.settingsAnchor(R.string.pref_folders_title),
-                title = { Text(text = stringResource(id = R.string.pref_folders_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = { 
-                  Text(
-                    text = stringResource(id = R.string.pref_folders_summary),
-                    color = MaterialTheme.colorScheme.outline
-                  ) 
-                },
-                icon = { 
-                  Icon(
-                    Icons.Outlined.Folder, 
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                  ) 
-                },
-                onClick = { backstack.add(FoldersPreferencesScreen) },
-              )
             }
           }
           
@@ -506,54 +447,6 @@ object PreferencesScreen : Screen {
                     color = MaterialTheme.colorScheme.outline,
                   )
                 },
-              )
-
-              PreferenceDivider()
-
-              // ── 聚合库（配置入口）────────────────────────────────────
-              // 把多个同类型媒体库合并成一个本地视图。新建 / 编辑 / 删除都在独立页，
-              // 这里只做入口 —— 与播放列表、合集同一套分工：设置里给门，内容在专门页面管。
-              // 多服务器 / 多用户：管理页按「当前服务器」分桶，标题下会显示在管哪台。
-              Preference(
-                modifier = Modifier.settingsAnchor("聚合库"),
-                title = { Text(text = "聚合库", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = "把多个同类型媒体库合并成一个视图；只在本 App 内生效，不修改服务器",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                icon = {
-                  Icon(
-                    Icons.Outlined.Layers,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                onClick = { backstack.add(EmbyAggregateLibraryManageScreen()) },
-              )
-
-              PreferenceDivider()
-
-              // 演职员合并：同一个演员因为名字写法不同会裂成多条 Person（作品页缺片、演职员表重复）。
-              // 这是唯一会写服务器元数据的工具，单独一个页面承载，这里只放入口。
-              Preference(
-                modifier = Modifier.settingsAnchor("演职员合并"),
-                title = { Text(text = "演职员合并", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = "把重复的演员条目归并成一条（写入服务器，所有客户端生效，可撤销）· 需要管理员",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                icon = {
-                  Icon(
-                    Icons.Outlined.People,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                onClick = { backstack.add(PersonMergeScreen()) },
               )
             }
           }
@@ -750,15 +643,14 @@ object PreferencesScreen : Screen {
             }
           }
 
-          // ── Emby 播放与数据同步 ────────────────────────────────────
+          // ── Emby 播放 ────────────────────────────────────
           item {
-            PreferenceSectionHeader(title = "Emby 播放与数据同步")
+            PreferenceSectionHeader(title = "Emby 播放")
           }
 
           item {
             val browserPreferences = koinInject<BrowserPreferences>()
             val resolveDirectLink by browserPreferences.embyResolveDirectLink.collectAsState()
-            val clearProgressOnDownload by browserPreferences.embyClearProgressOnDownload.collectAsState()
             PreferenceCard {
               // ── 以下两项原在「Emby 服务器维护」页，现移到这里 ──────────
               // 移过来的理由：这两项**与具体哪台服务器无关**，是全局播放偏好。
@@ -782,29 +674,6 @@ object PreferencesScreen : Screen {
                   Text(
                     text = "播放前先取出跳转后的真实地址。用于网盘 / STRM 这类带 302 跳转、" +
                       "直链有有效期的源；解析失败会自动回退，不影响正常播放。",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-
-              PreferenceDivider()
-
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Delete,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = clearProgressOnDownload,
-                onValueChange = { browserPreferences.embyClearProgressOnDownload.set(it) },
-                modifier = Modifier.settingsAnchor("下载后清除播放进度"),
-                title = { Text(text = "下载后清除播放进度", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = "下载完一条就把服务器上这条的续播位置清零，「继续观看」不再挂着它。" +
-                      "只清进度，不动「已看」标记。",
                     color = MaterialTheme.colorScheme.outline,
                   )
                 },
@@ -844,9 +713,9 @@ object PreferencesScreen : Screen {
             }
           }
 
-          // ── Emby 照片浏览与保存 ────────────────────────────────────
+          // ── Emby 照片浏览 ────────────────────────────────────
           item {
-            PreferenceSectionHeader(title = "Emby 照片浏览与保存")
+            PreferenceSectionHeader(title = "Emby 照片浏览")
           }
 
           item {
@@ -944,8 +813,6 @@ object PreferencesScreen : Screen {
               // ── 底部胶片条 ────────────────────────────────────────────
               // 照片浏览器底部那条缩略图。默认**关**：它要吃掉约 56dp 的画面高度，
               // 而照片浏览器最值钱的就是画面面积；想要快速跳图的人自己打开。
-              // ⚠️ 这一个开关**同时管两个照片浏览器**（Emby 媒体库 / 网络位置），
-              //    别在两个入口各做一个 —— 同一个用户对「底部要不要缩略图」的偏好不会分两套。
               val photoFilmstrip by browserPreferences.photoFilmstrip.collectAsState()
               SwitchPreference(
                 icon = {
@@ -963,7 +830,7 @@ object PreferencesScreen : Screen {
                   Text(
                     text = if (photoFilmstrip) {
                       "底部显示一排缩略图，点一下跳到那张" +
-                        "（Emby 媒体库与网络位置的照片都生效，会占一点画面高度）"
+                        "（会占一点画面高度）"
                     } else {
                       "整屏只显示当前这张，画面最大"
                     },
@@ -971,85 +838,6 @@ object PreferencesScreen : Screen {
                   )
                 },
               )
-
-              PreferenceDivider()
-
-              // ── 照片保存位置 ──────────────────────────────────────────
-              // 照片浏览器里「长按 → 保存原图 / 另存为 JPEG」落到哪里。默认进系统相册的
-              // `Pictures/CineIsle`；想放自己的目录就点进来选一次。
-              // v1.5.4 起弹的是 **App 自己的文件夹选择器**（FolderPickerDialog），
-              //    不再是系统的 SAF `ACTION_OPEN_DOCUMENT_TREE` —— 系统那张界面是
-              //    系统风格，跟本 App 的整体 UI 完全不搭。
-              //    自研选择器给的是**绝对路径**（`/storage/emulated/0/DCIM/xxx`），
-              //    落盘走 java.io.File（依赖「所有文件访问权限」，本 App 作为本地
-              //    播放器本来就要这个权限；没授权时保存会给出明确的失败原因）。
-              // ⚠️ 选完把老版本的 SAF URI 一起清空：两个位置并存时优先级会打架，
-              //    用户会困惑「我到底存到哪了」。
-              val context = LocalContext.current
-              val saveDirPath by browserPreferences.photoSaveDirPath.collectAsState()
-              var showFolderPicker by remember { mutableStateOf(false) }
-              Preference(
-                modifier = Modifier.settingsAnchor("照片保存位置"),
-                title = { Text(text = "照片保存位置", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = EmbyPhotoSaver.displayPathLabel(saveDirPath)
-                      ?: "系统相册（Pictures/CineIsle）· 点击更改",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                icon = {
-                  Icon(
-                    Icons.Outlined.Folder,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                onClick = { showFolderPicker = true },
-              )
-
-              // 自研文件夹选择器：存储卷切换 / 返回上级 / 新建文件夹都在里面。
-              // ⚠️ currentPath 传空串 —— 它是「与当前路径相同就禁用确定」的判据
-              // （给移动/复制用的），选保存位置时没有「源目录」，不能让它生效。
-              FolderPickerDialog(
-                isOpen = showFolderPicker,
-                currentPath = "",
-                onDismiss = { showFolderPicker = false },
-                onFolderSelected = { path ->
-                  showFolderPicker = false
-                  browserPreferences.photoSaveDirPath.set(path)
-                  browserPreferences.photoSaveDirUri.set("")
-                  Toast.makeText(context, "已设为照片保存位置", Toast.LENGTH_SHORT).show()
-                },
-              )
-
-              // 只有选过自定义目录才给「恢复默认」—— 默认状态下这一项没有意义，
-              // 常驻只会让人以为「默认」是个需要主动设置的东西。
-              if (saveDirPath.isNotBlank()) {
-                PreferenceDivider()
-                Preference(
-                  icon = {
-                    Icon(
-                      Icons.Outlined.Restore,
-                      contentDescription = null,
-                      tint = MaterialTheme.colorScheme.primary,
-                    )
-                  },
-                  modifier = Modifier.settingsAnchor("恢复默认保存位置"),
-                  title = { Text(text = "恢复默认保存位置", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                  summary = {
-                    Text(
-                      text = "改回系统相册的 Pictures/CineIsle",
-                      color = MaterialTheme.colorScheme.outline,
-                    )
-                  },
-                  onClick = {
-                    browserPreferences.photoSaveDirPath.set("")
-                    browserPreferences.photoSaveDirUri.set("")
-                    Toast.makeText(context, "已恢复默认", Toast.LENGTH_SHORT).show()
-                  },
-                )
-                }
             }
           }
 
@@ -1065,30 +853,7 @@ object PreferencesScreen : Screen {
             val showCardBadges by browserPreferences.embyShowCardBadges.collectAsState()
             val folderIconBlue by browserPreferences.embyFolderIconBlue.collectAsState()
             val folderRandomCover by browserPreferences.embyFolderRandomCover.collectAsState()
-            val quickFavorite by browserPreferences.embyQuickFavorite.collectAsState()
             PreferenceCard {
-              // 卡片右上角心形快捷收藏：点一下即可收藏 / 取消收藏
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.FavoriteBorder,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = quickFavorite,
-                onValueChange = { browserPreferences.embyQuickFavorite.set(it) },
-                modifier = Modifier.settingsAnchor("卡片快捷收藏"),
-                title = { Text(text = "卡片快捷收藏", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = "媒体库卡片右上角显示可点的收藏心形；关闭后只作「已收藏」只读角标",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-              PreferenceDivider()
-
               SliderPreference(
                 icon = {
                   Icon(
@@ -1480,133 +1245,6 @@ object PreferencesScreen : Screen {
                     color = MaterialTheme.colorScheme.outline,
                   )
                 },
-              )
-            }
-          }
-
-          // ── 网络浏览（SMB / WebDAV / FTP） ──────────────────────────
-          // 这里放「网络」模块自己的观感项：文件夹封面是这一轮新增的大功能
-          // （懒加载 + 两级缓存，关掉后零额外请求），标题行数是网格信息密度。
-          // 排序维度 / 升降序不进设置 —— 那两个是「当前目录怎么看」的即时操作，
-          // 放在浏览页内容区的排序控件里更顺手，且切换不发请求。
-          item {
-            PreferenceSectionHeader(title = "网络浏览")
-          }
-
-          item {
-            // 与其它板块一致：整组偏好行包进 PreferenceCard（surfaceContainer 深灰底色）。
-            PreferenceCard {
-              val browserPreferences = koinInject<BrowserPreferences>()
-              // 文件夹封面：文件夹卡用目录里第一张图片当封面。
-              // 关掉的场景：服务器目录结构深、图片多，不想让浏览产生额外列目录请求；
-              // 或者就喜欢朴素的名字列表。
-              val folderCoverEnabled by browserPreferences.folderCoverEnabled.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.FolderOpen,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = folderCoverEnabled,
-                onValueChange = { browserPreferences.folderCoverEnabled.set(it) },
-                modifier = Modifier.settingsAnchor("文件夹封面"),
-                title = { Text(text = "文件夹封面", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = if (folderCoverEnabled) {
-                      "文件夹卡片显示封面：优先取目录内有海报的视频，否则取第一张图片；" +
-                        "只在滚动到可见时加载，同一目录再次进入不再重复请求"
-                    } else {
-                      "文件夹卡片只显示名称；关闭后浏览过程不产生任何额外请求"
-                    },
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-
-              PreferenceDivider()
-
-              // 网格标题行数：一行最整齐（信息密度低），两行折中，全显适合长片名库。
-              val gridTitleLines by browserPreferences.networkGridTitleLines.collectAsState()
-              ListPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Title,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = gridTitleLines,
-                onValueChange = { browserPreferences.networkGridTitleLines.set(it) },
-                values = GridTitleLines.entries,
-                valueToText = { AnnotatedString(it.label) },
-                modifier = Modifier.settingsAnchor("网格标题行数"),
-                title = { Text(text = "网格标题行数", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = "网络浏览网格视图下，文件夹 / 图片 / 视频卡片标题最多显示" +
-                      "${gridTitleLines.label}，超出部分省略",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-            }
-          }
-
-          // Data & Cache Section
-          item {
-            PreferenceSectionHeader(title = "数据与缓存")
-          }
-
-          item {
-            // 图片缓存：Emby 封面 / 播放列表缩略图的磁盘缓存。
-            // 7 天有效期、256MB 上限（EmbyImageLoader 里维护），这里只管查看占用与清除。
-            val context = LocalContext.current
-            val scope = rememberCoroutineScope()
-            var cacheBytes by remember { mutableStateOf(0L) }
-            var showClearConfirm by remember { mutableStateOf(false) }
-            LaunchedEffect(Unit) {
-              cacheBytes = EmbyImageLoader.diskCacheSizeBytes()
-            }
-            PreferenceCard {
-              Preference(
-                modifier = Modifier.settingsAnchor("图片缓存"),
-                title = { Text(text = "图片缓存", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = "封面等图片的离线缓存（7 天有效）· 当前占用 " +
-                      formatCacheBytes(cacheBytes) +
-                      "，点击清除后将从服务器重新拉取",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                icon = {
-                  Icon(
-                    Icons.Outlined.PhotoLibrary,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                onClick = { showClearConfirm = true },
-              )
-            }
-            if (showClearConfirm) {
-              ConfirmDialog(
-                title = "清除图片缓存",
-                subtitle = "将删除 ${formatCacheBytes(cacheBytes)} 的缓存图片，浏览时会在需要时重新下载。继续吗？",
-                onConfirm = {
-                  showClearConfirm = false
-                  scope.launch {
-                    val freed = EmbyImageLoader.clearDiskCache()
-                    cacheBytes = EmbyImageLoader.diskCacheSizeBytes()
-                    android.widget.Toast
-                      .makeText(context, "已清除 ${formatCacheBytes(freed)}", android.widget.Toast.LENGTH_SHORT)
-                      .show()
-                  }
-                },
-                onCancel = { showClearConfirm = false },
               )
             }
           }

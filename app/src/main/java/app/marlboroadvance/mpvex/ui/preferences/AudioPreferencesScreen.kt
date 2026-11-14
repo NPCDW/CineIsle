@@ -181,6 +181,7 @@ object AudioPreferencesScreen : Screen {
           if (volumeNormalization) {
             PreferenceDivider()
             val normalizationStrength by preferences.normalizationStrength.collectAsState()
+            val normalizationStrengthText = stringResource(normalizationStrength.title)
             ListPreference(
               icon = {
                 Icon(
@@ -197,7 +198,7 @@ object AudioPreferencesScreen : Screen {
               title = { Text(text = stringResource(id = R.string.pref_audio_normalization_strength), maxLines = 1, overflow = TextOverflow.Ellipsis) },
               summary = {
                 Text(
-                  text = context.getString(normalizationStrength.title),
+                  text = normalizationStrengthText,
                   color = MaterialTheme.colorScheme.outline,
                 )
               },
@@ -222,6 +223,7 @@ object AudioPreferencesScreen : Screen {
           
           PreferenceDivider()
           val audioChannel by preferences.audioChannels.collectAsState()
+          val audioChannelText = stringResource(audioChannel.title)
           ListPreference(
             icon = {
               Icon(
@@ -238,7 +240,7 @@ object AudioPreferencesScreen : Screen {
             title = { Text(text = stringResource(id = R.string.pref_audio_channels), maxLines = 1, overflow = TextOverflow.Ellipsis) },
             summary = { 
               Text(
-                text = context.getString(audioChannel.title),
+                text = audioChannelText,
                 color = MaterialTheme.colorScheme.outline,
               ) 
             },

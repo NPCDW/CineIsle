@@ -1,9 +1,6 @@
 package app.marlboroadvance.mpvex.ui.preferences
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -17,23 +14,18 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material.icons.outlined.Animation
 import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.Autorenew
-import androidx.compose.material.icons.outlined.BatteryFull
 import androidx.compose.material.icons.outlined.BrightnessMedium
 import androidx.compose.material.icons.outlined.Crop
-import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ExitToApp
 import androidx.compose.material.icons.outlined.FastForward
 import androidx.compose.material.icons.outlined.Gesture
-import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Save
-import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.SdCard
 import androidx.compose.material.icons.outlined.SkipNext
@@ -41,10 +33,8 @@ import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.Subtitles
-import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.Swipe
 import androidx.compose.material.icons.outlined.Timer
-import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VolumeUp
@@ -66,15 +56,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.marlboroadvance.mpvex.R
 import app.marlboroadvance.mpvex.preferences.PlayerPreferences
-import app.marlboroadvance.mpvex.preferences.SEEK_STEP_RANGE
-import app.marlboroadvance.mpvex.preferences.coerceSeekStepSeconds
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
 import app.marlboroadvance.mpvex.presentation.components.ConfirmDialog
 import app.marlboroadvance.mpvex.ui.player.MpvDiskCache
-import app.marlboroadvance.mpvex.ui.player.PlayerOrientation
 import app.marlboroadvance.mpvex.ui.player.controls.components.sheets.toFixed
-import app.marlboroadvance.mpvex.ui.preferences.components.TickedSlider
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -137,31 +123,6 @@ object PlayerPreferencesScreen : Screen {
           
           item {
             PreferenceCard {
-              val orientation by preferences.orientation.collectAsState()
-              ListPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.ScreenRotation,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = orientation,
-                onValueChange = preferences.orientation::set,
-                values = PlayerOrientation.entries,
-                valueToText = { value -> AnnotatedString(stringResource(value.titleRes)) },
-                modifier = Modifier.settingsAnchor(R.string.pref_player_orientation),
-                title = { Text(text = stringResource(id = R.string.pref_player_orientation), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = { 
-                  Text(
-                    text = stringResource(id = orientation.titleRes),
-                    color = MaterialTheme.colorScheme.outline,
-                  ) 
-                },
-              )
-              
-              PreferenceDivider()
-              
               val savePositionOnQuit by preferences.savePositionOnQuit.collectAsState()
               SwitchPreference(
                 icon = {
@@ -220,6 +181,33 @@ object PlayerPreferencesScreen : Screen {
                 },
               )
               
+              PreferenceDivider()
+
+              val hideDelay by preferences.playerTimeToDisappear.collectAsState()
+              val hideDelayValues = listOf(500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500, 4_000, 4_500, 5_000)
+              ListPreference(
+                icon = {
+                  Icon(
+                    Icons.Outlined.Timer,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                  )
+                },
+                value = hideDelay.takeIf(hideDelayValues::contains) ?: 4_000,
+                onValueChange = preferences.playerTimeToDisappear::set,
+                values = hideDelayValues,
+                valueToText = { AnnotatedString("$it ms") },
+                modifier = Modifier.settingsAnchor(R.string.pref_player_display_hide_player_control_time),
+                title = {
+                  Text(
+                    text = stringResource(R.string.pref_player_display_hide_player_control_time),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                },
+                summary = { Text("$hideDelay ms") },
+              )
+
               PreferenceDivider()
 
               // 自动连播倒计时：0 = 播完直接切下一集（原来的行为）
@@ -312,34 +300,6 @@ object PlayerPreferencesScreen : Screen {
                   },
                 )
               }
-
-              PreferenceDivider()
-
-              // 下一集衔接预取：只打一次小流量 Range 预热连接，不动 mpv 的缓冲策略。
-              val prefetchNext by preferences.prefetchNextEpisode.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Speed,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = prefetchNext,
-                onValueChange = preferences.prefetchNextEpisode::set,
-                modifier = Modifier.settingsAnchor("提前预热下一集"),
-                title = { Text("提前预热下一集", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = if (prefetchNext) {
-                      "片尾前 ${preferences.prefetchNextEpisodeSeconds.get()} 秒预热下一集连接，切集更快；不额外占用带宽"
-                    } else {
-                      "关闭：切集时才建立连接"
-                    },
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
 
               PreferenceDivider()
 
@@ -501,56 +461,6 @@ object PlayerPreferencesScreen : Screen {
 
               PreferenceDivider()
 
-              // ── 播放内核 / GSY 全部配置 ──
-              // 这一整块（默认内核、长按反选、GSY 的解码内核、渲染方式、显示比例、手势…）
-              // 已经整块搬到「设置 → GSY 播放器」（GsyPreferencesScreen）。
-              // 原因：GSY 现在是**独立的一套播放页**（GsyPlayerActivity），
-              // 它的配置和 mpv 播放页的配置必须各管各的，混在一起改一边会误伤另一边。
-              Preference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Tune,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                modifier = Modifier.settingsAnchor("GSY 播放器"),
-                title = { Text("GSY 播放器", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = "内核 / 渲染方式 / 显示比例 / 手势 / 全屏与旋转，以及「长按用哪个内核播放」——" +
-                      "全部在 GSY 播放器自己的设置页里，与 mpv 的配置互不影响",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                onClick = { backstack.add(GsyPreferencesScreen) },
-              )
-
-              PreferenceDivider()
-
-              val preloadNextVideo by preferences.preloadNextVideo.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Download,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = preloadNextVideo,
-                onValueChange = preferences.preloadNextVideo::set,
-                modifier = Modifier.settingsAnchor(R.string.i18n_preload_next_video),
-                title = { Text(text = stringResource(R.string.i18n_preload_next_video), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = stringResource(R.string.i18n_preload_next_video_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-
-              PreferenceDivider()
-
               // ── 落盘播放缓存（清单 #18）──
               // 开关 + 上限 + 清除三件套。上限滑杆在开关关着时也照样能调：
               // 用户往往是先调好上限、回头再打开开关，硬禁用会让人以为设置坏了。
@@ -659,32 +569,6 @@ object PlayerPreferencesScreen : Screen {
 
               PreferenceDivider()
 
-              val playlistMode by preferences.playlistMode.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Gesture,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = playlistMode,
-                onValueChange = preferences.playlistMode::set,
-                modifier = Modifier.settingsAnchor(R.string.i18n_enable_nav),
-                title = { Text(text = stringResource(R.string.i18n_enable_nav), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = if (playlistMode)
-                      "Show next/previous buttons for all videos in folder"
-                    else
-                      "Play videos individually (select multiple for playlist)",
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-              
-              PreferenceDivider()
-
               val rememberBrightness by preferences.rememberBrightness.collectAsState()
               SwitchPreference(
                 icon = {
@@ -782,40 +666,6 @@ object PlayerPreferencesScreen : Screen {
           
           item {
             PreferenceCard {
-              val showDoubleTapOvals by preferences.showDoubleTapOvals.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.TouchApp,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = showDoubleTapOvals,
-                onValueChange = preferences.showDoubleTapOvals::set,
-                modifier = Modifier.settingsAnchor(R.string.show_splash_ovals_on_double_tap_to_seek),
-                title = { Text(stringResource(R.string.show_splash_ovals_on_double_tap_to_seek), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-              )
-              
-              PreferenceDivider()
-              
-              val showSeekTimeWhileSeeking by preferences.showSeekTimeWhileSeeking.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Schedule,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = showSeekTimeWhileSeeking,
-                onValueChange = preferences.showSeekTimeWhileSeeking::set,
-                modifier = Modifier.settingsAnchor(R.string.show_time_on_double_tap_to_seek),
-                title = { Text(stringResource(R.string.show_time_on_double_tap_to_seek), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-              )
-              
-              PreferenceDivider()
-              
               val usePreciseSeeking by preferences.usePreciseSeeking.collectAsState()
               SwitchPreference(
                 icon = {
@@ -856,117 +706,6 @@ object PlayerPreferencesScreen : Screen {
                 },
                 onSliderValueChange = { preferences.customSkipDuration.set(it.roundToInt()) },
                 sliderValue = customSkipDuration.toFloat(),
-              )
-
-              PreferenceDivider()
-
-              // 快进/快退时长：带刻度的滑块（见 TickedSlider）。
-              // 用自绘滑块而不是 SliderPreference，是因为 Material 那个没有刻度 ——
-              // 1~300 秒这个跨度，用户需要一眼看出自己大概在哪个量级。
-              val seekForward by preferences.seekForwardSeconds.collectAsState()
-              val seekBackward by preferences.seekBackwardSeconds.collectAsState()
-              Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                TickedSlider(
-                  value = coerceSeekStepSeconds(seekForward),
-                  onValueChange = { preferences.seekForwardSeconds.set(it) },
-                  valueRange = SEEK_STEP_RANGE,
-                  modifier = Modifier.settingsAnchor(R.string.pref_seek_step_title),
-                  title = stringResource(R.string.pref_seek_step_title),
-                  supportingText =
-                    stringResource(R.string.pref_seek_forward_title) +
-                      " · " +
-                      stringResource(R.string.pref_seek_seconds, seekForward),
-                  valueLabel = stringResource(R.string.pref_seek_seconds, seekForward),
-                  ticks = listOf(1, 10, 30, 60, 120, 300),
-                  tickLabels = listOf(1, 10, 30, 60, 120, 300),
-                )
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                TickedSlider(
-                  value = coerceSeekStepSeconds(seekBackward),
-                  onValueChange = { preferences.seekBackwardSeconds.set(it) },
-                  valueRange = SEEK_STEP_RANGE,
-                  supportingText =
-                    stringResource(R.string.pref_seek_backward_title) +
-                      " · " +
-                      stringResource(R.string.pref_seek_seconds, seekBackward),
-                  valueLabel = stringResource(R.string.pref_seek_seconds, seekBackward),
-                  ticks = listOf(1, 10, 30, 60, 120, 300),
-                  tickLabels = listOf(1, 10, 30, 60, 120, 300),
-                )
-              }
-
-              PreferenceDivider()
-
-              // 控制栏信息：时钟 / 电量两个独立开关。
-              val showClock by preferences.showPlayerClock.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Schedule,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = showClock,
-                onValueChange = preferences.showPlayerClock::set,
-                modifier = Modifier.settingsAnchor(R.string.pref_show_player_clock_title),
-                title = { Text(stringResource(R.string.pref_show_player_clock_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    stringResource(R.string.pref_show_player_clock_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-
-              PreferenceDivider()
-
-              val showBattery by preferences.showPlayerBattery.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.BatteryFull,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = showBattery,
-                onValueChange = preferences.showPlayerBattery::set,
-                modifier = Modifier.settingsAnchor(R.string.pref_show_player_battery_title),
-                title = { Text(stringResource(R.string.pref_show_player_battery_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    stringResource(R.string.pref_show_player_battery_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-              )
-
-              PreferenceDivider()
-
-              // 第三个状态项：网速。紧跟在时钟 / 电量后面 —— 三者在屏幕上就是同一条状态行，
-              // 设置里也放在一起，用户调的时候不用来回找。
-              val showNetSpeed by preferences.showPlayerNetSpeed.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Speed,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = showNetSpeed,
-                onValueChange = preferences.showPlayerNetSpeed::set,
-                modifier = Modifier.settingsAnchor(R.string.pref_show_player_net_speed_title),
-                title = { Text(stringResource(R.string.pref_show_player_net_speed_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    stringResource(R.string.pref_show_player_net_speed_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
               )
             }
           }
@@ -1178,23 +917,6 @@ object PlayerPreferencesScreen : Screen {
               
               PreferenceDivider()
               
-              val swapVolumeAndBrightness by preferences.swapVolumeAndBrightness.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.SwapVert,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = swapVolumeAndBrightness,
-                onValueChange = preferences.swapVolumeAndBrightness::set,
-                modifier = Modifier.settingsAnchor(R.string.swap_the_volume_and_brightness_slider),
-                title = { Text(stringResource(R.string.swap_the_volume_and_brightness_slider), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-              )
-              
-              PreferenceDivider()
-              
               val showLoadingCircle by preferences.showLoadingCircle.collectAsState()
               SwitchPreference(
                 icon = {
@@ -1208,25 +930,6 @@ object PlayerPreferencesScreen : Screen {
                 onValueChange = preferences.showLoadingCircle::set,
                 modifier = Modifier.settingsAnchor(R.string.pref_player_controls_show_loading_circle),
                 title = { Text(stringResource(R.string.pref_player_controls_show_loading_circle), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-              )
-
-              PreferenceDivider()
-
-              // 左下角悬浮的上一条/下一条切换按钮（mpv 播放页）
-              val showFloatingPlaylistSwitcher by preferences.showFloatingPlaylistSwitcher.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Layers,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = showFloatingPlaylistSwitcher,
-                onValueChange = preferences.showFloatingPlaylistSwitcher::set,
-                modifier = Modifier.settingsAnchor("左下角悬浮切换按钮"),
-                title = { Text("左下角悬浮切换按钮", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = { Text("上一条 / 下一条视频的快捷切换；控制条显示时自动隐藏，打开播放队列时也会收起") },
               )
             }
           }
@@ -1271,23 +974,6 @@ object PlayerPreferencesScreen : Screen {
               
               PreferenceDivider()
               
-              val reduceMotion by preferences.reduceMotion.collectAsState()
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.Animation,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = reduceMotion,
-                onValueChange = preferences.reduceMotion::set,
-                modifier = Modifier.settingsAnchor(R.string.pref_player_display_reduce_player_animation),
-                title = { Text(stringResource(R.string.pref_player_display_reduce_player_animation), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-              )
-
-              PreferenceDivider()
-
               // 自动裁黑边（cropdetect）：mpv 专属，探测有几百毫秒开销 + 可能误裁，
               // 所以默认关闭、放在这里由用户自己决定
               val autoCropBlackBars by preferences.autoCropBlackBars.collectAsState()

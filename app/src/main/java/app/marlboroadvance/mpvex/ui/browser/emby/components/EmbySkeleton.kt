@@ -169,68 +169,6 @@ fun EmbySkeletonHome(
 }
 
 /**
- * 播放历史骨架：一排「继续观看」宽卡 + 几条历史列表行。
- * 与 `EmbyHistoryScreen` 的真实结构一一对应（宽卡 16:9 + ListItem 行）。
- */
-@Composable
-fun EmbySkeletonHistory(modifier: Modifier = Modifier) {
-  val shimmer = rememberShimmer()
-  Column(
-    modifier = modifier
-      .fillMaxSize()
-      .verticalScroll(rememberScrollState())
-      .padding(vertical = 10.dp),
-  ) {
-    SkeletonSectionTitle(shimmer)
-    Spacer(modifier = Modifier.height(10.dp))
-    Row(
-      modifier = Modifier.padding(horizontal = 16.dp),
-      horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-      repeat(3) {
-        Column(modifier = Modifier.weight(1f)) {
-          Box(
-            modifier = Modifier
-              .fillMaxWidth()
-              .aspectRatio(16f / 9f)
-              .clip(RoundedCornerShape(LocalEmbyAppearance.current.corner))
-              .shimmer(shimmer),
-          )
-          Spacer(modifier = Modifier.height(6.dp))
-          SkeletonLine(shimmer = shimmer, widthFraction = 0.85f)
-        }
-      }
-    }
-
-    Spacer(modifier = Modifier.height(20.dp))
-    SkeletonSectionTitle(shimmer)
-    Spacer(modifier = Modifier.height(6.dp))
-    repeat(6) {
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Box(
-          modifier = Modifier
-            .width(56.dp)
-            .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(6.dp))
-            .shimmer(shimmer),
-        )
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-          SkeletonLine(shimmer = shimmer, widthFraction = 0.6f)
-          Spacer(modifier = Modifier.height(6.dp))
-          SkeletonLine(shimmer = shimmer, widthFraction = 0.35f, height = 9.dp)
-        }
-      }
-    }
-  }
-}
-
-/**
  * 详情页骨架：顶部大图 + 标题/副标题 + 一排按钮 + 简介几行 + 一排推荐卡。
  *
  * 详情页原来是整屏居中的一圈转圈：条目越大、网络越慢，白屏时间越长。

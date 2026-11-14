@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="emby_search_screen_title">搜索</string>
+    <string name="emby_search_aggregate_title">聚合检索</string>
+    <string name="emby_search_query_hint">搜索媒体名称或演员</string>
+    <string name="emby_search_back">返回</string>
+    <string name="emby_search_clear_query">清空搜索词</string>
+    <string name="emby_search_history_hint">输入媒体名称或演员，在当前服务器搜索</string>
+    <string name="emby_search_idle">待搜索</string>
+    <string name="emby_search_queued">等待中</string>
+    <string name="emby_search_loading">搜索中</string>
+    <string name="emby_search_success">%1$d 条结果</string>
+    <string name="emby_search_empty">无匹配结果</string>
+    <string name="emby_search_partial">部分结果</string>
+    <string name="emby_search_failed">搜索失败</string>
+    <string name="emby_search_type_query">输入关键词开始搜索</string>
+    <string name="emby_search_category_empty">当前分类无匹配结果</string>
+    <string name="emby_search_bounded">仅显示有界首批结果，可细化关键词或筛选条件</string>
+    <string name="emby_search_source_loading">正在加载服务器配置</string>
+    <string name="emby_search_source_failed">服务器配置刷新失败，已获取的结果仍保留。</string>
+    <string name="emby_search_no_enabled">没有启用的服务器</string>
+    <string name="emby_search_no_current">请先进入服务器再搜索</string>
+    <string name="emby_search_reason_auth">认证失败，请在桌面端检查账号配置。</string>
+    <string name="emby_search_reason_timeout">请求超时。</string>
+    <string name="emby_search_reason_network">无法连接服务器。</string>
+    <string name="emby_search_reason_server">服务器返回错误。</string>
+    <string name="emby_search_reason_configuration">服务器连接配置无效。</string>
+    <string name="emby_search_reason_source">数据源配置已变化，请重新搜索。</string>
+    <string name="emby_search_reason_unknown">搜索请求失败。</string>
+    <string name="emby_search_retry">重新搜索</string>
+    <string name="emby_search_refresh_sources">刷新服务器</string>
+</resources>

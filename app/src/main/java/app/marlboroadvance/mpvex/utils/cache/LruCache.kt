@@ -4,7 +4,7 @@ package app.marlboroadvance.mpvex.utils.cache
  * 容量受限的 LRU 缓存，**纯 Kotlin、无Android 依赖**（清单 #20）。
  *
  * 抽出来有两个理由：
- *  1. **可单测**。原来的 [app.marlboroadvance.mpvex.ui.player.controls.components.sheets.LRUBitmapCache]
+ *  1. **可单测**。早期的缩略图缓存
  *     直接持有 `android.graphics.Bitmap`，本地 JVM 单测里 Bitmap 的方法体是 `Stub!`（直接抛），
  *     所以「淘汰顺序对不对」「替换同key 要不要回收旧值」这些只能靠手点验证 ——
  *     而它们恰恰是**最容易写错**的部分。

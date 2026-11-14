@@ -194,7 +194,7 @@ data class EmbyPhotoGridScreen(
         val cached = PhotoRandomQueue.get(parentId())
         if (cached != null) {
           items = cached.items
-          consumed = cached.items.size
+          consumed = cached.consumedCount
           totalCount = cached.totalCount
           loading = false
           loadingMore = false
@@ -208,11 +208,23 @@ data class EmbyPhotoGridScreen(
         try {
           val result = runCatching {
             withContext(Dispatchers.IO) {
-              if (album == null) {
-                vm.loadPhotoAlbums(current, parentId(), sortBy, sortOrder, startIndex = startIndex)
-              } else {
-                vm.loadPhotos(current, parentId(), sortBy, sortOrder, startIndex = startIndex)
-              }
+              var skipped = 0
+              var page: app.marlboroadvance.mpvex.domain.emby.EmbyItemsResult
+              do {
+                page = if (album == null) {
+                  vm.loadPhotoAlbums(current, parentId(), sortBy, sortOrder, startIndex = startIndex + skipped)
+                } else {
+                  vm.loadPhotos(current, parentId(), sortBy, sortOrder, startIndex = startIndex + skipped)
+                }
+                if (page.Items.isNotEmpty() || page.consumedCount == 0) break
+                skipped += page.consumedCount
+                if (page.TotalRecordCount > 0 && startIndex + skipped >= page.TotalRecordCount) {
+                  page = page.copy(consumedCount = 0)
+                  break
+                }
+                if (skipped >= 5_000) throw IllegalStateException("过滤条目过多，请重试以继续加载。")
+              } while (true)
+              page.copy(consumedCount = skipped + page.consumedCount)
             }
           }
           // 代际已前进：这次结果属于上一个层级 / 排序，整批丢弃（收尾交给新那次）
@@ -221,8 +233,8 @@ data class EmbyPhotoGridScreen(
             val random = sortBy == "Random"
             if (reset) {
               items = res.Items
-              consumed = res.Items.size
-              if (random) PhotoRandomQueue.put(parentId(), res.Items, res.TotalRecordCount)
+              consumed = res.consumedCount
+              if (random) PhotoRandomQueue.put(parentId(), res.Items, res.TotalRecordCount, consumed)
             } else {
               // 翻页边界可能重复（同一 StartIndex 被服务端重算），按 Id 去重再追加
               val seen = items.mapNotNull { it.Id }.toHashSet()
@@ -230,13 +242,12 @@ data class EmbyPhotoGridScreen(
               items = items + fresh
               // ⚠️ consumed 按「服务端吐了多少」推进，不是按追加了多少 ——
               //    否则去重掉的几条会让下一页 StartIndex 回退、同一页反复拉
-              consumed += res.Items.size
-              if (res.Items.isEmpty()) totalCount = consumed // 兜底：没数据就停，别死循环
+              consumed += res.consumedCount
             }
-            totalCount = res.TotalRecordCount
+            totalCount = if (res.consumedCount == 0) consumed else res.TotalRecordCount
             // 随机排序下续页拿到的同样是新洗的一批，追加进缓存即可 ——
             // 已经看过的那部分顺序不动，只是队尾多了一批（比「整副牌重洗」温和得多）
-            if (random) PhotoRandomQueue.put(parentId(), items, totalCount)
+            if (random) PhotoRandomQueue.put(parentId(), items, totalCount, consumed)
             // 换排序 / 重洗后的归位：新数据已经落位，此刻滚才真正生效（见 pendingScrollTop 说明）
             // ⚠️ 必须 scrollToTop()（内部 requestScrollToItem）：scrollToItem(0) 会被
             //    LazyGrid 的 key 锚定抵掉，随机排序后停在中间 —— 见 ui/utils/ScrollToTop.kt
@@ -412,6 +423,7 @@ data class EmbyPhotoGridScreen(
                   backStack.add(
                     EmbyPhotoBrowserScreen(
                       initialPhotos = photos,
+                      initialConsumedCount = res.consumedCount,
                       initialIndex = 0,
                       parentId = parentId(),
                       title = album?.Name ?: title,
@@ -536,6 +548,7 @@ data class EmbyPhotoGridScreen(
             )
 
             else -> PhotoGrid(
+              server = server,
               columnCount = columnCount,
               gridState = gridState,
               items = items,
@@ -553,6 +566,7 @@ data class EmbyPhotoGridScreen(
                   backStack.add(
                     EmbyPhotoBrowserScreen(
                       initialPhotos = items,
+                      initialConsumedCount = consumed,
                       initialIndex = index,
                       parentId = parentId(),
                       title = album?.Name ?: title,
@@ -591,12 +605,11 @@ data class EmbyPhotoGridScreen(
  * ⚠️ 两层上限（百万张相册的教训）：
  *    · MAX_ITEMS —— 续页后 put 的是**全量 items**，不封顶的话一个百万张的相册
  *      翻到底就能把 Entry 撑爆（OOM）。只保前 2000 张「同一副牌」；
- *      totalCount 保留真实值，命中缓存后 consumed=2000 < totalCount 会自然
- *      续页从 2000 继续拉服务端，行为是「前 2000 张稳定 + 后面新洗」，比 OOM 好。
+ *      仅缓存完整的游标快照，超过上限不缓存，避免重进时跳过未展示条目。
  *    · MAX_PARENTS —— 逛相册是进进出出的，只保最近几个 parent，淘汰最老的。
  */
 object PhotoRandomQueue {
-  class Entry(val items: List<EmbyItem>, val totalCount: Int)
+  class Entry(val items: List<EmbyItem>, val totalCount: Int, val consumedCount: Int)
 
   /** 单个 parent 最多缓存多少条随机牌 */
   private const val MAX_ITEMS = 2_000
@@ -608,14 +621,19 @@ object PhotoRandomQueue {
 
   fun get(parentId: String): Entry? = cache[parentId]
 
-  fun put(parentId: String, items: List<EmbyItem>, totalCount: Int) {
-    val capped = if (items.size > MAX_ITEMS) items.take(MAX_ITEMS) else items
+  fun put(parentId: String, items: List<EmbyItem>, totalCount: Int, consumedCount: Int = items.size) {
+    // 截断后的快照没有完整的游标对应关系，不缓存以免重进时跳过未展示的照片。
+    if (items.size > MAX_ITEMS) {
+      invalidate(parentId)
+      return
+    }
+    val capped = items
     synchronized(cache) {
       // 先摘掉自己再塞：mutableMapOf 是 LinkedHashMap，已存在的 key 重复 put
       // **不会刷新顺序** —— 不先摘的话，频繁重进的那个相册会一直排在
       // 最老位置，下一秒就被误淘汰，缓存等于白建
       cache.remove(parentId)
-      cache[parentId] = Entry(capped, totalCount)
+      cache[parentId] = Entry(capped, totalCount, consumedCount)
       // 淘汰最老的；⚠️ synchronizedMap 的迭代器不支持 remove，
       // 必须 keys.toList() 快照之后再删（本仓 ConcurrentHashMap 同款教训）
       while (cache.size > MAX_PARENTS) {
@@ -657,6 +675,7 @@ private fun PhotoGrid(
   displayUrl: (EmbyItem, Int) -> String?,
   fallbackUrl: (EmbyItem, Int) -> String?,
   onCardClick: (EmbyItem) -> Unit,
+  server: app.marlboroadvance.mpvex.domain.emby.EmbyServer?,
 ) {
   LazyVerticalGrid(
     columns = GridCells.Fixed(columnCount),
@@ -676,6 +695,7 @@ private fun PhotoGrid(
   ) {
     items(items, key = { it.Id ?: it.Name ?: "" }) { item ->
       EmbyPhotoCard(
+        server = server,
         item = item,
         displayUrl = displayUrl(item, 720),
         fallbackUrl = fallbackUrl(item, 720),

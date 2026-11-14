@@ -7,6 +7,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.staticCompositionLocalOf
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -22,6 +24,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 
+val LocalEmbyImageServer = staticCompositionLocalOf<EmbyServer?> { null }
+
 /**
  * Emby 封面图。
  *
@@ -35,6 +39,7 @@ import androidx.compose.ui.unit.dp
  *                 （服务端缩放失败时会回退取原图，原图可能是 2000px 级别）。
  *                 需要全尺寸的场合（如详情页大图）显式传 0。
  * @param placeholder 占位图标（海报用电影图标、剧集用电视图标等）
+ * @param placeholderContent 自定义加载中/失败内容；提供时立即显示，并替代延迟出现的占位图标
  */
 @Composable
 fun EmbyImage(
@@ -45,18 +50,20 @@ fun EmbyImage(
   placeholder: ImageVector = Icons.Default.BrokenImage,
   maxWidth: Int = 720,
   fallbackUrl: String? = null,
+  server: EmbyServer? = LocalEmbyImageServer.current,
+  placeholderContent: (@Composable () -> Unit)? = null,
 ) {
   // ⚠️ 起始值**先同步看一眼内存缓存**，不要一律从 null 开始。
   // 原来 `initialValue = null` ⇒ 卡片第一次组合（列表筛选 / 搜索后重新出现、滚动复用槽位）
   // 时第一帧一定是占位图标，要等协程调度到 IO 线程再回来才上图，看着就是「封面闪一下」
   // —— 哪怕这张图内存里就有。命中缓存时这里直接拿到 Bitmap，第一帧就是成品图。
   // 用 remember 包一层：缓存查询不该在每次重组时重复做（LruCache.get 带锁）。
-  val cached = remember(url) { EmbyImageLoader.peek(url) }
+  val cached = remember(url, server) { server?.let { EmbyImageLoader.peek(it, url) } }
   val bitmap by produceState<android.graphics.Bitmap?>(
     initialValue = cached,
     key1 = url,
     key2 = fallbackUrl,
-    key3 = maxWidth,
+    key3 = maxWidth to server,
   ) {
     // ⚠️ key 变化（= 换了一张图）时**必须先把上一张图清掉**。
     // produceState 的 state 是 `remember` 住的，不会因为 key 变化而重建；留着旧值的话，
@@ -65,7 +72,13 @@ fun EmbyImage(
     // 这里立刻换成「新 url 的缓存快照」：命中就第一帧直接上图，没命中就回到占位，
     // 绝不停留在别人的封面上。
     value = cached
-    value = loadWithFallback(url, fallbackUrl, maxWidth)
+    value = if (server == null) null else try {
+      loadWithFallback(server, url, fallbackUrl, maxWidth)
+    } catch (error: kotlinx.coroutines.CancellationException) {
+      throw error
+    } catch (_: Exception) {
+      null
+    }
   }
 
   // 占位图标**延迟一会儿再露脸**：缓存命中 / 磁盘命中通常几十毫秒内就上图，
@@ -92,7 +105,9 @@ fun EmbyImage(
       modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
       contentAlignment = Alignment.Center,
     ) {
-      if (placeholderReady) {
+      if (placeholderContent != null) {
+        placeholderContent()
+      } else if (placeholderReady) {
         Icon(
           imageVector = placeholder,
           contentDescription = contentDescription,
@@ -113,16 +128,17 @@ private const val PLACEHOLDER_GRACE_MS = 100L
 
 /** 先试主地址，失败再试备用地址；两者都失败返回 null。 */
 private suspend fun loadWithFallback(
+  server: EmbyServer,
   url: String?,
   fallbackUrl: String?,
   maxWidth: Int,
 ): android.graphics.Bitmap? {
   if (!url.isNullOrBlank()) {
-    val primary = EmbyImageLoader.load(url, maxWidth)
+    val primary = EmbyImageLoader.load(server, url, maxWidth)
     if (primary != null) return primary
   }
   if (!fallbackUrl.isNullOrBlank() && fallbackUrl != url) {
-    return EmbyImageLoader.load(fallbackUrl, maxWidth)
+    return EmbyImageLoader.load(server, fallbackUrl, maxWidth)
   }
   return null
 }
@@ -134,10 +150,12 @@ private suspend fun loadWithFallback(
 fun EmbyBackdrop(
   url: String?,
   modifier: Modifier = Modifier,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   Box(modifier = modifier) {
     EmbyImage(
       url = url,
+      server = server,
       contentDescription = null,
       modifier = Modifier.fillMaxSize(),
       contentScale = ContentScale.Crop,

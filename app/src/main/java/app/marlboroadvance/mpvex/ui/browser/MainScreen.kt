@@ -1,27 +1,12 @@
 package app.marlboroadvance.mpvex.ui.browser
 
-import android.annotation.SuppressLint
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -29,253 +14,107 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import app.marlboroadvance.mpvex.R
+import app.marlboroadvance.mpvex.domain.emby.EmbyItemPolicy
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.preferences.AppearancePreferences
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
-import app.marlboroadvance.mpvex.ui.browser.folderlist.FolderListScreen
-import app.marlboroadvance.mpvex.ui.browser.networkstreaming.NetworkStreamingScreen
-import app.marlboroadvance.mpvex.ui.browser.playlist.PlaylistScreen
-import app.marlboroadvance.mpvex.ui.browser.recentlyplayed.RecentlyPlayedScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbySearchScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyDetailScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyFavoritesScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyHomeScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyLibraryScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyPersonScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.collection.EmbyCollectionScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.discover.EmbyDiscoverScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.photo.EmbyPhotoGridScreen
 import app.marlboroadvance.mpvex.ui.cine.CineRoot
 import app.marlboroadvance.mpvex.ui.cine.CineTheme
 import app.marlboroadvance.mpvex.ui.cine.LocalUiStyle
 import app.marlboroadvance.mpvex.ui.cine.UiStyle
-import androidx.compose.runtime.collectAsState
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import app.marlboroadvance.mpvex.ui.preferences.PreferencesScreen
+import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
 import kotlinx.serialization.Serializable
 import org.koin.compose.koinInject
 
 @Serializable
 object MainScreen : Screen {
-  // Use a companion object to store state more persistently
-  private var persistentSelectedTab: Int = 0
-
-  // Reactive shared state that can be updated by FileSystemBrowserScreen / selection handlers
-  private val _isInSelectionMode = MutableStateFlow(false)
-  val isInSelectionMode: StateFlow<Boolean> = _isInSelectionMode.asStateFlow()
-
-  private val _shouldHideNavigationBar = MutableStateFlow(false)
-  val shouldHideNavigationBar: StateFlow<Boolean> = _shouldHideNavigationBar.asStateFlow()
-
-  private val _sharedVideoSelectionManager = MutableStateFlow<Any?>(null)
-  val sharedVideoSelectionManager: StateFlow<Any?> = _sharedVideoSelectionManager.asStateFlow()
-
-  private val _isPermissionDenied = MutableStateFlow(false)
-
-  /**
-   * Update selection state and navigation bar visibility
-   * This method should be called whenever selection changes
-   */
-  fun updateSelectionState(
-    isInSelectionMode: Boolean,
-    isOnlyVideosSelected: Boolean,
-    selectionManager: Any?
-  ) {
-    _isInSelectionMode.value = isInSelectionMode
-    _sharedVideoSelectionManager.value = selectionManager
-    // Only hide navigation bar when videos are selected AND in selection mode
-    _shouldHideNavigationBar.value = isInSelectionMode && isOnlyVideosSelected
-  }
-
-  /**
-   * Update permission state to control FAB visibility
-   */
-  fun updatePermissionState(isDenied: Boolean) {
-    _isPermissionDenied.value = isDenied
-  }
-
-  /**
-   * Get current permission denied state
-   */
-  fun getPermissionDeniedState(): Boolean = _isPermissionDenied.value
-
-  /**
-   * Update bottom navigation bar visibility based on floating bottom bar state
-   */
-  fun updateBottomBarVisibility(shouldShow: Boolean) {
-    _shouldHideNavigationBar.value = !shouldShow
-  }
-
   @Composable
-  @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
   override fun Content() {
-    // ── 界面风格分流（新老 UI 共存的**唯一**入口） ──
-    // Cine 有自己的根容器（Dock/Rail + 首页 + 搜索/网格覆盖层），
-    // 老界面完全没有进来 —— 不是「在老界面里藏几块」，所以不存在错位风险。
-    // ⚠️ 切换是响应式的、不需要重启：用户在外观设置里改完返回时，本页面会重新组合
-    //    （nav3 只组合栈顶 entry ⇒ 在设置页时这里根本没在跑，返回即重新走一遍）。
-    if (LocalUiStyle.current == UiStyle.Cine) {
-      CineTheme { CineRoot() }
-      return
+    AppLayerRoot(AppLayer.Outer)
+  }
+}
+
+@Composable
+internal fun AppLayerRoot(layer: AppLayer) {
+  // Save above the style branch so returning from Appearance keeps the same destination.
+  var tabIndex by rememberSaveable(layer) { mutableIntStateOf(0) }
+  if (LocalUiStyle.current == UiStyle.Cine) {
+    CineTheme {
+      CineRoot(tabIndex = tabIndex, onTabSelected = { tabIndex = it }, serverHome = layer == AppLayer.Server)
     }
+  } else {
+    ClassicNavigationShell(layer, tabIndex, onTabSelected = { tabIndex = it })
+  }
+}
 
-    var selectedTab by remember {
-      mutableIntStateOf(persistentSelectedTab)
-    }
+@Composable
+private fun ClassicNavigationShell(layer: AppLayer, tabIndex: Int, onTabSelected: (Int) -> Unit) {
+  val selectedTab = layer.tabAt(tabIndex)
+  val backStack = LocalBackStack.current
+  val appearancePreferences = koinInject<AppearancePreferences>()
+  val hideNavLabels by appearancePreferences.hideNavigationBarLabels.collectAsState()
+  val onBackToServers = { backStack.removeLastOrNull(); Unit }
+  // Keep only the selected tab composed, but retain its saveable Lazy/List state after disposal.
+  val tabStateHolder = rememberSaveableStateHolder()
 
-    val context = LocalContext.current
-    val density = LocalDensity.current
+  // Inner tabs never consume Back as a Home selection: leaving the server pops its route.
+  BackHandler(enabled = layer == AppLayer.Outer && selectedTab != layer.defaultTab) {
+    onTabSelected(0)
+  }
 
-    val hideNavigationBar by _shouldHideNavigationBar.collectAsState()
-
-    // 设置 → 外观 →「隐藏导航栏标题」：只留图标。
-    // 标签为 null 时 Material3 会把图标挪到正中，导航条高度不变。
-    val appearancePreferences = koinInject<AppearancePreferences>()
-    val hideNavLabels by appearancePreferences.hideNavigationBarLabels.collectAsState()
-
-    // Update persistent state whenever tab changes
-    LaunchedEffect(selectedTab) {
-      persistentSelectedTab = selectedTab
-    }
-
-    // Scaffold with bottom navigation bar
-    Scaffold(
-      modifier = Modifier.fillMaxSize(),
-      bottomBar = {
-        // Animated bottom navigation bar with slide animations
-        AnimatedVisibility(
-          visible = !hideNavigationBar,
-          enter = slideInVertically(
-            animationSpec = tween(durationMillis = 300),
-            initialOffsetY = { fullHeight -> fullHeight }
-          ),
-          exit = slideOutVertically(
-            animationSpec = tween(durationMillis = 300),
-            targetOffsetY = { fullHeight -> fullHeight }
+  Scaffold(
+    modifier = Modifier.fillMaxSize(),
+    bottomBar = {
+      NavigationBar(
+        modifier = Modifier.clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)),
+      ) {
+        layer.tabs.forEachIndexed { index, tab ->
+          val label = stringResource(tab.labelRes)
+          NavigationBarItem(
+            icon = { Icon(tab.icon, contentDescription = label) },
+            label = if (hideNavLabels) null else ({ Text(label) }),
+            selected = selectedTab == tab,
+            onClick = { onTabSelected(index) },
           )
-        ) {
-          NavigationBar(
-            modifier = Modifier
-              .clip(
-                RoundedCornerShape(
-                  topStart = 28.dp,
-                  topEnd = 28.dp,
-                  bottomStart = 0.dp,
-                  bottomEnd = 0.dp
-                )
-              )
-          ) {
-            NavigationBarItem(
-              icon = { Icon(Icons.Filled.Home, contentDescription = "首页") },
-              label = if (hideNavLabels) null else ({ Text("首页") }),
-              selected = selectedTab == 0,
-              onClick = { selectedTab = 0 }
-            )
-            NavigationBarItem(
-              icon = { Icon(Icons.Filled.Favorite, contentDescription = "收藏") },
-              label = if (hideNavLabels) null else ({ Text("收藏") }),
-              selected = selectedTab == 1,
-              onClick = { selectedTab = 1 }
-            )
-            NavigationBarItem(
-              icon = { Icon(Icons.Filled.History, contentDescription = "历史") },
-              label = if (hideNavLabels) null else ({ Text("历史") }),
-              selected = selectedTab == 2,
-              onClick = { selectedTab = 2 }
-            )
-            NavigationBarItem(
-              icon = { Icon(Icons.Filled.Folder, contentDescription = "本地") },
-              label = if (hideNavLabels) null else ({ Text("本地") }),
-              selected = selectedTab == 3,
-              onClick = { selectedTab = 3 }
-            )
-            NavigationBarItem(
-              icon = { Icon(Icons.Filled.Language, contentDescription = "网络") },
-              label = if (hideNavLabels) null else ({ Text("网络") }),
-              selected = selectedTab == 4,
-              onClick = { selectedTab = 4 }
-            )
-          }
         }
       }
-    ) { paddingValues ->
-      Box(modifier = Modifier.fillMaxSize()) {
-        // Always use 80dp bottom padding regardless of navigation bar visibility
-        val fabBottomPadding = 80.dp
-
-        AnimatedContent(
-          targetState = selectedTab,
-          transitionSpec = {
-            // Material 3 Expressive slide-in-fade animation (like Google Phone app)
-            val slideDistance = with(density) { 48.dp.roundToPx() }
-            val animationDuration = 250
-            
-            if (targetState > initialState) {
-              // Moving forward: slide in from right with fade
-              (slideInHorizontally(
-                animationSpec = tween(
-                  durationMillis = animationDuration,
-                  easing = FastOutSlowInEasing
-                ),
-                initialOffsetX = { slideDistance }
-              ) + fadeIn(
-                animationSpec = tween(
-                  durationMillis = animationDuration,
-                  easing = FastOutSlowInEasing
-                )
-              )) togetherWith (slideOutHorizontally(
-                animationSpec = tween(
-                  durationMillis = animationDuration,
-                  easing = FastOutSlowInEasing
-                ),
-                targetOffsetX = { -slideDistance }
-              ) + fadeOut(
-                animationSpec = tween(
-                  durationMillis = animationDuration / 2,
-                  easing = FastOutSlowInEasing
-                )
-              ))
-            } else {
-              // Moving backward: slide in from left with fade
-              (slideInHorizontally(
-                animationSpec = tween(
-                  durationMillis = animationDuration,
-                  easing = FastOutSlowInEasing
-                ),
-                initialOffsetX = { -slideDistance }
-              ) + fadeIn(
-                animationSpec = tween(
-                  durationMillis = animationDuration,
-                  easing = FastOutSlowInEasing
-                )
-              )) togetherWith (slideOutHorizontally(
-                animationSpec = tween(
-                  durationMillis = animationDuration,
-                  easing = FastOutSlowInEasing
-                ),
-                targetOffsetX = { slideDistance }
-              ) + fadeOut(
-                animationSpec = tween(
-                  durationMillis = animationDuration / 2,
-                  easing = FastOutSlowInEasing
-                )
-              ))
-            }
-          },
-          label = "tab_animation"
-        ) { targetTab ->
-          CompositionLocalProvider(
-            LocalNavigationBarHeight provides fabBottomPadding
-          ) {
-            when (targetTab) {
-              0 -> EmbyHomeRoute()
-              1 -> app.marlboroadvance.mpvex.ui.browser.emby.EmbyFavoritesScreen()
-              2 -> app.marlboroadvance.mpvex.ui.browser.emby.EmbyHistoryScreen()
-              3 -> FolderListScreen.Content()
-              4 -> NetworkStreamingScreen.Content()
+    },
+  ) { padding ->
+    // The Scaffold reserves the real bar + system inset; child lists need no second bar inset.
+    CompositionLocalProvider(LocalNavigationBarHeight provides 0.dp) {
+      val bottomPadding = PaddingValues(bottom = padding.calculateBottomPadding())
+      Box(Modifier.fillMaxSize().padding(bottomPadding).consumeWindowInsets(bottomPadding)) {
+        tabStateHolder.SaveableStateProvider(selectedTab) {
+          if (layer == AppLayer.Outer) {
+            OuterTabContent(selectedTab, onOpenSettings = { onTabSelected(layer.tabs.indexOf(AppTab.Settings)) })
+          } else {
+            when (selectedTab) {
+              AppTab.Home -> ClassicServerHome(onBackToServers)
+              AppTab.Favorites -> EmbyFavoritesScreen(onBackToServers = onBackToServers)
+              AppTab.Search -> EmbySearchScreen(onBack = onBackToServers)
+              else -> error("Not a server destination: $selectedTab")
             }
           }
         }
@@ -284,85 +123,36 @@ object MainScreen : Screen {
   }
 }
 
-/**
- * Emby 首页路由。
- *
- * 首页是 Emby 媒体库入口；媒体库、详情、服务器管理都通过导航栈 push 打开。
- */
+/** Existing Classic media-home navigation, hosted by the selected-server route. */
 @Composable
-private fun EmbyHomeRoute() {
-  val backStack = app.marlboroadvance.mpvex.ui.utils.LocalBackStack.current
-  app.marlboroadvance.mpvex.ui.browser.emby.EmbyHomeScreen(
+internal fun ClassicServerHome(onBackToServers: () -> Unit) {
+  val backStack = LocalBackStack.current
+  EmbyHomeScreen(
     onOpenLibrary = { library ->
+      if (!EmbyItemPolicy.isSupported(library)) return@EmbyHomeScreen
       val libraryId = library.Id ?: return@EmbyHomeScreen
-      // 纯照片库（collectionType = photos）直接进照片网格页（相册宫格），
-      // 不进视频媒体库页 —— 那边的查询口径 / 工具行 / 卡片全是视频语义。
-      // 混合库仍进媒体库页，用「仅媒体 / 全部 / 仅照片」三态开关自己选。
+      // 纯照片库直接进入照片网格；混合库仍使用媒体库页。
       if (library.CollectionType?.equals("photos", ignoreCase = true) == true) {
-        backStack.add(
-          app.marlboroadvance.mpvex.ui.browser.emby.photo.EmbyPhotoGridScreen(
-            libraryId = libraryId,
-            title = library.Name ?: "",
-          ),
-        )
+        backStack.add(EmbyPhotoGridScreen(libraryId = libraryId, title = library.Name ?: ""))
       } else {
-        backStack.add(
-          app.marlboroadvance.mpvex.ui.browser.emby.EmbyLibraryScreen(
-            libraryId = libraryId,
-            title = library.Name ?: "",
-            collectionType = library.CollectionType,
-          ),
-        )
+        backStack.add(EmbyLibraryScreen(libraryId = libraryId, title = library.Name ?: "", collectionType = library.CollectionType))
       }
     },
     onOpenDetail = { item ->
+      if (!EmbyItemPolicy.isSupported(item)) return@EmbyHomeScreen
       val id = item.Id ?: return@EmbyHomeScreen
-      // 「演员」筛选搜出来的是 Person，没有「媒体详情」可看 —— 点进去应该看 TA 的作品列表
       if (item.Type == "Person") {
-        backStack.add(
-          app.marlboroadvance.mpvex.ui.browser.emby.EmbyPersonScreen(
-            personId = id,
-            personName = item.Name ?: "",
-            personImageTag = item.ImageTags["Primary"],
-          ),
-        )
+        backStack.add(EmbyPersonScreen(personId = id, personName = item.Name ?: "", personImageTag = item.ImageTags["Primary"]))
       } else {
-        backStack.add(
-          app.marlboroadvance.mpvex.ui.browser.emby.EmbyDetailScreen(
-            itemId = id,
-            title = item.Name ?: "",
-          ),
-        )
+        backStack.add(EmbyDetailScreen(itemId = id, title = item.displayTitle()))
       }
     },
-    onManageServers = { backStack.add(app.marlboroadvance.mpvex.ui.browser.emby.EmbyServerManageScreen) },
-    onOpenSettings = { backStack.add(app.marlboroadvance.mpvex.ui.preferences.PreferencesScreen) },
-    // 服务端播放列表（清单 #12）。Navigation3 不用注册：定义 Screen 类即可 push。
-    onOpenPlaylists = {
-      backStack.add(app.marlboroadvance.mpvex.ui.browser.emby.playlist.EmbyPlaylistScreen)
-    },
-    // 「猜你喜欢 / 即混」（清单 #14）
-    onOpenDiscover = {
-      backStack.add(app.marlboroadvance.mpvex.ui.browser.emby.discover.EmbyDiscoverScreen)
-    },
-    // 「合集」管理（清单 #15）
-    onOpenCollections = {
-      backStack.add(app.marlboroadvance.mpvex.ui.browser.emby.collection.EmbyCollectionScreen)
-    },
-    // 「直播电视」频道列表（/LiveTv/Channels；只有列表 + 播放，无 EPG/录制）
-    onOpenLiveTv = {
-      backStack.add(app.marlboroadvance.mpvex.ui.browser.emby.EmbyLiveTvScreen)
-    },
-    // 「聚合库」卡片：进多库合并视图（数据源与归属都在 entity.serverId 上）
-    onOpenAggregate = { entity ->
-      backStack.add(
-        app.marlboroadvance.mpvex.ui.browser.emby.aggregate.EmbyAggregateLibraryScreen(
-          aggregateId = entity.id,
-        ),
-      )
-    },
+    onManageServers = onBackToServers,
+    onBackToServers = onBackToServers,
+    onOpenSettings = { backStack.add(PreferencesScreen) },
+    onOpenDiscover = { backStack.add(EmbyDiscoverScreen) },
+    onOpenCollections = { backStack.add(EmbyCollectionScreen) },
   )
 }
 
-// CompositionLocal for navigation bar height
 val LocalNavigationBarHeight = compositionLocalOf { 0.dp }

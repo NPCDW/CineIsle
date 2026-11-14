@@ -17,6 +17,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
 import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyAppearance
 import app.marlboroadvance.mpvex.ui.utils.pressDownScale
 
@@ -49,6 +51,7 @@ fun EmbyPhotoCard(
   subtitle: String? = photoSubtitle(item),
   /** 卡片图区的宽高比；默认 1:1。所有照片卡都用同一个值才叫「统一」。 */
   aspectRatio: Float = 1f,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   Column(modifier = modifier.fillMaxWidth()) {
     Card(
@@ -72,6 +75,7 @@ fun EmbyPhotoCard(
           contentDescription = item.Name,
           modifier = Modifier.fillMaxSize(),
           contentScale = ContentScale.Crop,
+          server = server,
         )
       }
     }

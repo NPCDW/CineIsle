@@ -27,7 +27,8 @@ class PlayerObserver(
     if (activity.player.isExiting) return
     // ⚠️ guard 必须在 runOnUiThread **里面**：投递出去的 lambda 才是在主线程上跑，
     // 在外面包一层只能兜住「投递」本身，兜不住真正的处理逻辑。
-    activity.runOnUiThread { guard("props:$property") { activity.onObserverEvent(property) } }
+    val generation = activity.playbackEventGeneration
+    activity.runOnUiThread { if (generation == activity.playbackEventGeneration) guard("props:$property") { activity.onObserverEvent(property) } }
   }
 
   override fun eventProperty(
@@ -35,7 +36,8 @@ class PlayerObserver(
     value: Long,
   ) {
     if (activity.player.isExiting) return
-    activity.runOnUiThread { guard("props:$property") { activity.onObserverEvent(property, value) } }
+    val generation = activity.playbackEventGeneration
+    activity.runOnUiThread { if (generation == activity.playbackEventGeneration) guard("props:$property") { activity.onObserverEvent(property, value) } }
   }
 
   override fun eventProperty(
@@ -43,7 +45,8 @@ class PlayerObserver(
     value: Boolean,
   ) {
     if (activity.player.isExiting) return
-    activity.runOnUiThread { guard("props:$property") { activity.onObserverEvent(property, value) } }
+    val generation = activity.playbackEventGeneration
+    activity.runOnUiThread { if (generation == activity.playbackEventGeneration) guard("props:$property") { activity.onObserverEvent(property, value) } }
   }
 
   override fun eventProperty(
@@ -51,7 +54,8 @@ class PlayerObserver(
     value: String,
   ) {
     if (activity.player.isExiting) return
-    activity.runOnUiThread { guard("props:$property") { activity.onObserverEvent(property, value) } }
+    val generation = activity.playbackEventGeneration
+    activity.runOnUiThread { if (generation == activity.playbackEventGeneration) guard("props:$property") { activity.onObserverEvent(property, value) } }
   }
 
   override fun eventProperty(
@@ -59,7 +63,8 @@ class PlayerObserver(
     value: Double,
   ) {
     if (activity.player.isExiting) return
-    activity.runOnUiThread { guard("props:$property") { activity.onObserverEvent(property, value) } }
+    val generation = activity.playbackEventGeneration
+    activity.runOnUiThread { if (generation == activity.playbackEventGeneration) guard("props:$property") { activity.onObserverEvent(property, value) } }
   }
 
   override fun eventProperty(
@@ -67,20 +72,22 @@ class PlayerObserver(
     value: MPVNode,
   ) {
     if (activity.player.isExiting) return
-    activity.runOnUiThread { guard("props:$property") { activity.onObserverEvent(property, value) } }
+    val generation = activity.playbackEventGeneration
+    activity.runOnUiThread { if (generation == activity.playbackEventGeneration) guard("props:$property") { activity.onObserverEvent(property, value) } }
   }
 
   override fun event(eventId: Int, data: MPVNode) {
     if (activity.player.isExiting) return
     // `data` 一路带下去：`MPV_EVENT_END_FILE` 的失败原因就在里面（损坏文件靠它判死）。
-    activity.runOnUiThread { guard("event:$eventId") { activity.event(eventId, data) } }
+    val generation = activity.playbackEventGeneration
+    activity.runOnUiThread { if (generation == activity.playbackEventGeneration) guard("event:$eventId") { activity.event(eventId, data) } }
   }
 
   private inline fun guard(
     what: String,
     block: () -> Unit,
   ) {
-    runCatching(block).onFailure { Log.w(TAG, "mpv 回调异常（已忽略）: $what", it) }
+    if (!activity.player.isExiting) runCatching(block).onFailure { Log.w(TAG, "mpv 回调异常（已忽略）: $what", it) }
   }
 
   private companion object {

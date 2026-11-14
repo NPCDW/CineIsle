@@ -7,7 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -19,8 +19,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideIn
 import androidx.compose.animation.slideOut
 import androidx.compose.animation.togetherWith
@@ -39,18 +37,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -60,26 +59,43 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.runtime.rememberNavBackStack
+import androidx.navigation3.runtime.rememberDecoratedNavEntries
+import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyServerGateway
+import app.marlboroadvance.mpvex.ui.browser.emby.ServerBoundEntry
+import app.marlboroadvance.mpvex.ui.browser.emby.embyNavigationContentKey
+import app.marlboroadvance.mpvex.ui.browser.emby.nearestEmbyServerGateway
+import app.marlboroadvance.mpvex.ui.browser.emby.rememberServerNavigationStores
+import app.marlboroadvance.mpvex.ui.browser.emby.rememberCompatibilityHomeGateway
 import androidx.navigation3.ui.NavDisplay
+import app.marlboroadvance.mpvex.database.repository.EmbyServerRepository
+import app.marlboroadvance.mpvex.domain.postgres.PostgresConfigStorage
+import app.marlboroadvance.mpvex.domain.postgres.PostgresConnectionChecker
 import app.marlboroadvance.mpvex.preferences.AppearancePreferences
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
-import app.marlboroadvance.mpvex.repository.NetworkRepository
 import app.marlboroadvance.mpvex.utils.update.UpdateDialog
 import app.marlboroadvance.mpvex.utils.update.UpdateViewModel
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyServerHomeScreen
 import app.marlboroadvance.mpvex.ui.browser.MainScreen
 import app.marlboroadvance.mpvex.ui.cine.CineRoute
 import app.marlboroadvance.mpvex.ui.cine.LocalUiStyle
 import app.marlboroadvance.mpvex.ui.cine.UiStyle
 import app.marlboroadvance.mpvex.ui.lock.AppLockGate
+import app.marlboroadvance.mpvex.ui.postgres.PostgresSetupForm
+import app.marlboroadvance.mpvex.ui.postgres.PostgresSetupViewModel
 import app.marlboroadvance.mpvex.ui.theme.DarkMode
 import app.marlboroadvance.mpvex.ui.theme.MpvexTheme
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
-import app.marlboroadvance.mpvex.utils.permission.PermissionUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -108,23 +124,29 @@ private const val BUNDLABLE_REGISTRY_KEY = "androidx.lifecycle.BundlableSavedSta
 /** Compose `DisposableSaveableStateRegistry` 注册到上者时用的 key 前缀。 */
 private const val SAVEABLE_KEY_PREFIX = "SaveableStateRegistry:"
 
+private const val NAV_TRANSITION_MS = 220
+
+/** Shared by ordinary and predictive back so both gestures have identical spatial semantics. */
+internal fun navigationSlideFadeTransform(forward: Boolean): ContentTransform {
+  val direction = if (forward) 1 else -1
+  return (
+    fadeIn(animationSpec = tween(NAV_TRANSITION_MS)) +
+      slideIn(animationSpec = tween(NAV_TRANSITION_MS)) { IntOffset(direction * it.width / 2, 0) }
+    ) togetherWith (
+      fadeOut(animationSpec = tween(NAV_TRANSITION_MS)) +
+        slideOut(animationSpec = tween(NAV_TRANSITION_MS)) { IntOffset(-direction * it.width / 2, 0) }
+      )
+}
+
 /**
  * Main entry point for the application
  */
 class MainActivity : ComponentActivity() {
   private val appearancePreferences by inject<AppearancePreferences>()
-  private val networkRepository by inject<NetworkRepository>()
+  private val postgresConfigStorage by inject<PostgresConfigStorage>()
+  private val postgresConnectionChecker by inject<PostgresConnectionChecker>()
+  private val embyServerRepository by inject<EmbyServerRepository>()
   
-  // Create a coroutine scope tied to the activity lifecycle
-  private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-
-  // Register the ActivityResultLauncher at class level
-  private val mediaAccessLauncher = registerForActivityResult(
-    ActivityResultContracts.StartIntentSenderForResult()
-  ) { result ->
-    PermissionUtils.handleMediaAccessResult(result.resultCode)
-  }
-
   /**
    * 保存实例状态前的**体积闸门**。
    *
@@ -182,11 +204,6 @@ class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     
-    PermissionUtils.setMediaAccessLauncher(mediaAccessLauncher)
-
-    // Register proxy lifecycle observer for network streaming
-    lifecycle.addObserver(app.marlboroadvance.mpvex.ui.browser.networkstreaming.proxy.ProxyLifecycleObserver())
-
     setContent {
       // Set up theme and edge-to-edge display
       val dark by appearancePreferences.darkMode.collectAsState()
@@ -199,22 +216,45 @@ class MainActivity : ComponentActivity() {
         ) { isDarkMode },
       )
 
-      // Auto-connect to saved network connections
-      LaunchedEffect(Unit) {
-        autoConnectToNetworks()
-      }
-
       MpvexTheme {
         Surface {
-          // 启动页盖在主界面之上：背后 Navigator 已经完成首帧布局，
-          // 淡出后直接是可用界面，避免「先白屏、再跳一下」的观感。
+          // 启动动画只覆盖当前关卡；数据库验证前不组合首页，避免闪现或提前加载。
           var showSplash by remember { mutableStateOf(true) }
 
-          // 应用锁（b7）：锁着时 Navigator 和启动页整块不组合，只显示解锁页；
-          // 未设 PIN 或没开锁时等于不存在，内容原样渲染。
           AppLockGate {
+            val postgresViewModel: PostgresSetupViewModel = viewModel(
+              viewModelStoreOwner = this@MainActivity,
+              key = "postgres-startup-gate",
+              factory = viewModelFactory {
+                initializer {
+                  PostgresSetupViewModel(postgresConfigStorage, postgresConnectionChecker)
+                }
+              },
+            )
+            val postgresState by postgresViewModel.uiState.collectAsState()
+
             Box(modifier = Modifier.fillMaxSize()) {
-              Navigator()
+              if (postgresState.passed) {
+                DisposableEffect(Unit) {
+                  val processLifecycle = ProcessLifecycleOwner.get().lifecycle
+                  val observer = LifecycleEventObserver { _, event ->
+                    when (event) {
+                      Lifecycle.Event.ON_START -> embyServerRepository.setForeground(true)
+                      Lifecycle.Event.ON_STOP -> embyServerRepository.setForeground(false)
+                      else -> Unit
+                    }
+                  }
+                  processLifecycle.addObserver(observer)
+                  embyServerRepository.setForeground(processLifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+                  onDispose {
+                    processLifecycle.removeObserver(observer)
+                    embyServerRepository.setForeground(false)
+                  }
+                }
+                Navigator()
+              } else {
+                PostgresSetupForm(postgresViewModel, onSuccess = {})
+              }
 
               if (showSplash) {
                 AppSplashScreen(onFinished = { showSplash = false })
@@ -231,46 +271,17 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  override fun onResume() {
+    super.onResume()
+    // Playback owns its landscape window; every return to browsing/settings restores portrait.
+    requestedOrientation = app.marlboroadvance.mpvex.ui.player.AppOrientationPolicy.APP
+  }
+
   override fun onDestroy() {
     try {
       super.onDestroy()
     } catch (e: Exception) {
       Log.e("MainActivity", "Error during onDestroy", e)
-    }
-  }
-
-  /**
-   * Auto-connect to network connections that are marked for auto-connection
-   */
-  private suspend fun autoConnectToNetworks() {
-    // Delay auto-connect to let UI settle first
-    kotlinx.coroutines.delay(500)
-    
-    // Use coroutineScope for properly structured concurrency
-    withContext(Dispatchers.IO) {
-      try {
-        val autoConnectConnections = networkRepository.getAutoConnectConnections()
-        autoConnectConnections.forEach { connection ->
-          withContext(Dispatchers.Main) {
-            Log.d("MainActivity", "Auto-connecting to: ${connection.name}")
-          }
-          networkRepository.connect(connection)
-            .onSuccess {
-              withContext(Dispatchers.Main) {
-                Log.d("MainActivity", "Auto-connected successfully: ${connection.name}")
-              }
-            }
-            .onFailure { e ->
-              withContext(Dispatchers.Main) {
-                Log.e("MainActivity", "Auto-connect failed for ${connection.name}: ${e.message}")
-              }
-            }
-        }
-      } catch (e: Exception) {
-        withContext(Dispatchers.Main) {
-          Log.e("MainActivity", "Error during auto-connect", e)
-        }
-      }
     }
   }
 
@@ -290,7 +301,6 @@ class MainActivity : ComponentActivity() {
   @Composable
   private fun AppSplashScreen(onFinished: () -> Unit) {
     val appName = stringResource(id = R.string.app_name)
-    val appNameEn = stringResource(id = R.string.i18n_project_name_en)
     val colors = MaterialTheme.colorScheme
 
     // 阶段：进入 → 停留 → 揭幕退出
@@ -452,14 +462,6 @@ class MainActivity : ComponentActivity() {
             fontWeight = FontWeight.Bold,
             color = colors.onSurface,
           )
-
-          Spacer(Modifier.height(4.dp))
-
-          Text(
-            text = appNameEn,
-            style = MaterialTheme.typography.titleMedium,
-            color = colors.onSurfaceVariant,
-          )
         }
       }
     }
@@ -470,6 +472,15 @@ class MainActivity : ComponentActivity() {
    */
   @Composable
   fun Navigator() {
+    // 两层导航使用新保存域，避免旧底栏和内层路由恢复到错误的入口。
+    val navigationState = rememberSaveableStateHolder()
+    navigationState.SaveableStateProvider("media-navigation-v3") {
+      MediaNavigator()
+    }
+  }
+
+  @Composable
+  private fun MediaNavigator() {
     val backstack = rememberNavBackStack(MainScreen)
 
     @Suppress("UNCHECKED_CAST")
@@ -498,55 +509,43 @@ class MainActivity : ComponentActivity() {
       LocalBackStack provides typedBackstack,
       LocalUiStyle provides uiStyle,
     ) {
-      NavDisplay(
-        backStack = typedBackstack,
-        onBack = { typedBackstack.removeLastOrNull() },
-        // 渲染分流：Cine 只接管登记过的路由（见 `CineRoute`），其余原样走老实现 ——
-        // 这样「新界面」可以分期上线，任何一条没重做的路由都不会变成空白页。
-        entryProvider = { route ->
-          NavEntry(route) {
-            if (uiStyle == UiStyle.Cine) {
-              CineRoute(route) { route.Content() }
-            } else {
-              route.Content()
+      val compatibilityHome = rememberCompatibilityHomeGateway(typedBackstack)
+      val serverStores = rememberServerNavigationStores(typedBackstack, compatibilityHome)
+      // Position-aware entries avoid borrowing the last equal item route from another server.
+      val entries = typedBackstack.mapIndexed { index, route ->
+        val gateway = nearestEmbyServerGateway(typedBackstack, index)
+          ?: compatibilityHome?.takeIf { index >= typedBackstack.indexOf(EmbyServerHomeScreen) }
+        val destination = (route as? EmbyServerGateway)?.destination ?: route
+        NavEntry(route, contentKey = embyNavigationContentKey(route, gateway, index)) {
+          if (gateway != null) {
+            ServerBoundEntry(gateway, destination, serverStores) {
+              if (destination == EmbyServerHomeScreen) {
+                destination.Content()
+              } else if (uiStyle == UiStyle.Cine) {
+                CineRoute(destination) { destination.Content() }
+              } else {
+                destination.Content()
+              }
             }
+          } else if (route == MainScreen || route == EmbyServerHomeScreen) {
+            // Keep layer-root Content at a fixed callsite across Classic/Cine switches.
+            route.Content()
+          } else if (uiStyle == UiStyle.Cine) {
+            CineRoute(route) { route.Content() }
+          } else {
+            route.Content()
           }
-        },
-        popTransitionSpec = {
-          (
-            fadeIn(animationSpec = tween(220)) +
-              slideIn(animationSpec = tween(220)) { IntOffset(-it.width / 2, 0) }
-          ) togetherWith (
-              fadeOut(animationSpec = tween(220)) +
-                slideOut(animationSpec = tween(220)) { IntOffset(it.width / 2, 0) }
-          )
-        },
-        transitionSpec = {
-          (
-            fadeIn(animationSpec = tween(220)) +
-              slideIn(animationSpec = tween(220)) { IntOffset(it.width / 2, 0) }
-          ) togetherWith (
-              fadeOut(animationSpec = tween(220)) +
-                slideOut(animationSpec = tween(220)) { IntOffset(-it.width / 2, 0) }
-          )
-        },
-        predictivePopTransitionSpec = {
-          (
-            fadeIn(animationSpec = tween(220)) +
-              scaleIn(
-                animationSpec = tween(220, delayMillis = 30),
-                initialScale = .9f,
-                TransformOrigin(-1f, .5f),
-              )
-          ) togetherWith (
-              fadeOut(animationSpec = tween(220)) +
-                scaleOut(
-                  animationSpec = tween(220, delayMillis = 30),
-                  targetScale = .9f,
-                  TransformOrigin(-1f, .5f),
-                )
-          )
-        },
+        }
+      }
+      val decoratedEntries = rememberDecoratedNavEntries(
+        entries, listOf(rememberSaveableStateHolderNavEntryDecorator<Screen>()),
+      )
+      NavDisplay(
+        entries = decoratedEntries,
+        onBack = { typedBackstack.removeLastOrNull() },
+        popTransitionSpec = { navigationSlideFadeTransform(forward = false) },
+        transitionSpec = { navigationSlideFadeTransform(forward = true) },
+        predictivePopTransitionSpec = { navigationSlideFadeTransform(forward = false) },
       )
 
       // Display Update Dialog when appropriate (only if update feature is enabled)

@@ -11,7 +11,7 @@ import org.junit.Test
  *
  * ## 为什么值得单独测
  *
- * 这个类是被刻意抽出来的：它的调用方 [LRUBitmapCache] 持有 `android.graphics.Bitmap`，
+ * 这个类是被刻意抽出来的：早期的缩略图缓存持有 `android.graphics.Bitmap`，
  * 而本地 JVM 单测拿到的 `android.jar` 只有方法签名、方法体一律抛 `Stub!` ——
  * 也就是说 `Bitmap.recycle()` / `isRecycled` 在单测里**根本调不动**，
  * 「淘汰有没有真的回收」只能靠真机手点。

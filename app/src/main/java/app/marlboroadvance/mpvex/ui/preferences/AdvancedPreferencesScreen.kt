@@ -6,69 +6,50 @@ import android.os.Environment
 import android.widget.Toast
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.outlined.FileDownload
-import androidx.compose.material.icons.outlined.FileUpload
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Cached
-import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Code
-import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastJoinToString
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import app.marlboroadvance.mpvex.R
-import app.marlboroadvance.mpvex.database.MpvExDatabase
-import app.marlboroadvance.mpvex.domain.thumbnail.ThumbnailRepository
 import app.marlboroadvance.mpvex.preferences.AdvancedPreferences
-import app.marlboroadvance.mpvex.preferences.SettingsManager
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
-import app.marlboroadvance.mpvex.presentation.components.ConfirmDialog
 import app.marlboroadvance.mpvex.presentation.crash.CrashActivity
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
-import app.marlboroadvance.mpvex.utils.media.OpenDocumentTreeContract
-import app.marlboroadvance.mpvex.utils.history.RecentlyPlayedOps
+import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -91,130 +72,7 @@ object AdvancedPreferencesScreen : Screen {
     val context = LocalContext.current
     val backStack = LocalBackStack.current
     val preferences = koinInject<AdvancedPreferences>()
-    val settingsManager = koinInject<SettingsManager>()
     val scope = rememberCoroutineScope()
-    var showImportDialog by remember { mutableStateOf(false) }
-    var showExportDialog by remember { mutableStateOf(false) }
-    var importStats by remember { mutableStateOf<SettingsManager.ImportStats?>(null) }
-    var exportStats by remember { mutableStateOf<SettingsManager.ExportStats?>(null) }
-
-    // Export settings launcher
-    val exportLauncher =
-      rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("text/xml"),
-      ) { uri ->
-        uri?.let {
-          scope.launch {
-            settingsManager.exportSettings(it).fold(
-              onSuccess = { stats ->
-                exportStats = stats
-                showExportDialog = true
-              },
-              onFailure = { error ->
-                Toast.makeText(
-                  context,
-                  "导出失败：${error.message}",
-                  Toast.LENGTH_LONG,
-                ).show()
-              },
-            )
-          }
-        }
-      }
-
-    // Import settings launcher
-    val importLauncher =
-      rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-      ) { uri ->
-        uri?.let {
-          scope.launch {
-            settingsManager.importSettings(it).fold(
-              onSuccess = { stats ->
-                importStats = stats
-                showImportDialog = true
-              },
-              onFailure = { error ->
-                Toast.makeText(
-                  context,
-                  "导入失败：${error.message}",
-                  Toast.LENGTH_LONG,
-                ).show()
-              },
-            )
-          }
-        }
-      }
-
-    // Export results dialog
-    if (showExportDialog && exportStats != null) {
-      AlertDialog(
-        onDismissRequest = { showExportDialog = false },
-        title = { Text("导出完成", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        text = {
-          Column(
-            modifier = Modifier
-              .fillMaxWidth()
-              .verticalScroll(rememberScrollState()),
-          ) {
-            Text(
-              "已导出 ${exportStats?.totalExported} 项设置。"
-            )
-            val dropped = exportStats?.passwordDroppedFor.orEmpty()
-            if (dropped.isNotEmpty()) {
-              Spacer(modifier = Modifier.height(8.dp))
-              Text(
-                text =
-                  "出于安全考虑，以下连接的密码没有写入备份文件：\n" +
-                    dropped.joinToString("、") +
-                    "\n\n导入后请重新输入这些连接的密码。",
-                color = MaterialTheme.colorScheme.error,
-              )
-            }
-          }
-        },
-        confirmButton = {
-          TextButton(onClick = { showExportDialog = false }) {
-            Text("好")
-          }
-        },
-      )
-    }
-
-    // Import results dialog
-    if (showImportDialog && importStats != null) {
-      AlertDialog(
-        onDismissRequest = { showImportDialog = false },
-        title = { Text("导入完成", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        text = {
-          Column(
-            modifier = Modifier
-              .fillMaxWidth()
-              .verticalScroll(rememberScrollState()),
-          ) {
-            Text(
-              "成功导入：${importStats?.imported}\n" +
-                "失败：${importStats?.failed}\n" +
-                "备份版本：${importStats?.version}\n\n" +
-                "请重启应用使全部改动生效。",
-            )
-            val notices = importStats?.notices.orEmpty()
-            if (notices.isNotEmpty()) {
-              Spacer(modifier = Modifier.height(8.dp))
-              Text(
-                text = notices.joinToString("\n"),
-                color = MaterialTheme.colorScheme.error,
-              )
-            }
-          }
-        },
-        confirmButton = {
-          TextButton(onClick = { showImportDialog = false }) {
-            Text("好")
-          }
-        },
-      )
-    }
 
     Scaffold(
       topBar = {
@@ -239,10 +97,11 @@ object AdvancedPreferencesScreen : Screen {
         )
       },
     ) { padding ->
+      val fontsClearedText = stringResource(R.string.pref_advanced_cleared_fonts_cache)
       ProvidePreferenceLocals {
         val locationPicker =
           rememberLauncherForActivityResult(
-            OpenDocumentTreeContract(),
+            ActivityResultContracts.OpenDocumentTree(),
           ) { uri ->
             if (uri == null) return@rememberLauncherForActivityResult
 
@@ -289,59 +148,6 @@ object AdvancedPreferencesScreen : Screen {
             .fillMaxSize()
             .padding(padding),
         ) {
-          // Backup & Restore Section
-          item {
-            PreferenceSectionHeader(title = "备份与恢复")
-          }
-          
-          item {
-            PreferenceCard {
-              Preference(
-                modifier = Modifier.settingsAnchor(R.string.i18n_export_settings),
-                title = { Text(text = stringResource(R.string.i18n_export_settings), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = { 
-                  Text(
-                    text = stringResource(R.string.i18n_export_settings_hint),
-                    color = MaterialTheme.colorScheme.outline,
-                  ) 
-                },
-                icon = { 
-                  Icon(
-                    Icons.Outlined.FileUpload, 
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                  ) 
-                },
-                onClick = {
-                  exportLauncher.launch(settingsManager.getDefaultExportFilename())
-                },
-              )
-              
-              PreferenceDivider()
-              
-              Preference(
-                modifier = Modifier.settingsAnchor(R.string.i18n_import_settings),
-                title = { Text(text = stringResource(R.string.i18n_import_settings), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = { 
-                  Text(
-                    text = stringResource(R.string.i18n_import_settings_hint),
-                    color = MaterialTheme.colorScheme.outline,
-                  ) 
-                },
-                icon = { 
-                  Icon(
-                    Icons.Outlined.FileDownload, 
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                  ) 
-                },
-                onClick = {
-                  importLauncher.launch(arrayOf("text/xml", "application/xml", "*/*"))
-                },
-              )
-            }
-          }
-          
           // MPV Configuration Section
           item {
             PreferenceSectionHeader(title = "MPV 配置")
@@ -502,91 +308,6 @@ object AdvancedPreferencesScreen : Screen {
             }
           }
           
-          // Scripts Section
-          // History Section
-          item {
-            PreferenceSectionHeader(title = "历史")
-          }
-          
-          item {
-            PreferenceCard {
-              var isConfirmDialogShown by remember { mutableStateOf(false) }
-              val mpvexDatabase = koinInject<MpvExDatabase>()
-              val enableRecentlyPlayed by preferences.enableRecentlyPlayed.collectAsState()
-              
-              SwitchPreference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.History,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                value = enableRecentlyPlayed,
-                onValueChange = preferences.enableRecentlyPlayed::set,
-                modifier = Modifier.settingsAnchor(R.string.pref_advanced_enable_recently_played_title),
-                title = { Text(stringResource(R.string.pref_advanced_enable_recently_played_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = { 
-                  Text(
-                    stringResource(R.string.pref_advanced_enable_recently_played_summary),
-                    color = MaterialTheme.colorScheme.outline,
-                  ) 
-                },
-              )
-              
-              PreferenceDivider()
-              
-              Preference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.DeleteSweep,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                modifier = Modifier.settingsAnchor(R.string.pref_advanced_clear_playback_history),
-                title = { Text(stringResource(R.string.pref_advanced_clear_playback_history), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                onClick = { isConfirmDialogShown = true },
-              )
-              
-              if (isConfirmDialogShown) {
-                ConfirmDialog(
-                  stringResource(R.string.pref_advanced_clear_playback_history_confirm_title),
-                  stringResource(R.string.pref_advanced_clear_playback_history_confirm_subtitle),
-                  onConfirm = {
-                    scope.launch(Dispatchers.IO) {
-                      runCatching {
-                        mpvexDatabase.videoDataDao().clearAllPlaybackStates()
-                        RecentlyPlayedOps.clearAll()
-                      }.onSuccess {
-                        withContext(Dispatchers.Main) {
-                          isConfirmDialogShown = false
-                          Toast
-                            .makeText(
-                              context,
-                              context.getString(R.string.pref_advanced_cleared_playback_history),
-                              Toast.LENGTH_SHORT,
-                            ).show()
-                        }
-                      }.onFailure { error ->
-                        withContext(Dispatchers.Main) {
-                          isConfirmDialogShown = false
-                          Toast
-                            .makeText(
-                              context,
-                              "清理失败：${error.message}",
-                              Toast.LENGTH_LONG,
-                            ).show()
-                        }
-                      }
-                    }
-                  },
-                  onCancel = { isConfirmDialogShown = false },
-                )
-              }
-            }
-          }
-          
           // Cache Section
           item {
             PreferenceSectionHeader(title = "缓存")
@@ -595,8 +316,6 @@ object AdvancedPreferencesScreen : Screen {
           item {
             PreferenceCard {
               var mpvConf by remember { mutableStateOf(preferences.mpvConf.get()) }
-              var isClearThumbsConfirmShown by remember { mutableStateOf(false) }
-              val thumbnailRepository = koinInject<ThumbnailRepository>()
               
               Preference(
                 icon = {
@@ -632,53 +351,6 @@ object AdvancedPreferencesScreen : Screen {
                   }
                 },
               )
-              
-              PreferenceDivider()
-
-              Preference(
-                icon = {
-                  Icon(
-                    Icons.Outlined.CleaningServices,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                },
-                modifier = Modifier.settingsAnchor(R.string.i18n_clear_thumb_cache),
-                title = { Text(text = stringResource(R.string.i18n_clear_thumb_cache), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                summary = {
-                  Text(
-                    text = stringResource(R.string.i18n_clear_thumb_cache_hint),
-                    color = MaterialTheme.colorScheme.outline,
-                  )
-                },
-                onClick = { isClearThumbsConfirmShown = true },
-              )
-
-              if (isClearThumbsConfirmShown) {
-                ConfirmDialog(
-                  title = "清除缩略图缓存？",
-                  subtitle = "这将删除存储与内存中已缓存的缩略图。",
-                  onConfirm = {
-                    scope.launch(Dispatchers.IO) {
-                      runCatching {
-                        thumbnailRepository.clearThumbnailCache()
-                      }.onSuccess {
-                        withContext(Dispatchers.Main) {
-                          isClearThumbsConfirmShown = false
-                          Toast.makeText(context, "缩略图缓存已清理", Toast.LENGTH_SHORT).show()
-                        }
-                      }.onFailure { error ->
-                        withContext(Dispatchers.Main) {
-                          isClearThumbsConfirmShown = false
-                          Toast.makeText(context, "清理失败：${error.message}", Toast.LENGTH_LONG).show()
-                        }
-                      }
-                    }
-                  },
-                  onCancel = { isClearThumbsConfirmShown = false },
-                )
-              }
-              
               PreferenceDivider()
               
               Preference(
@@ -716,7 +388,7 @@ object AdvancedPreferencesScreen : Screen {
                       Toast
                         .makeText(
                           context,
-                          context.getString(R.string.pref_advanced_cleared_fonts_cache),
+                          fontsClearedText,
                           Toast.LENGTH_SHORT,
                         ).show()
                     }

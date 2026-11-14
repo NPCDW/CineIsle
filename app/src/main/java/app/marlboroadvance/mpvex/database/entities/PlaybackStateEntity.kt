@@ -8,7 +8,6 @@ data class PlaybackStateEntity(
   @PrimaryKey val mediaTitle: String,
   val lastPosition: Int, // in seconds
   val playbackSpeed: Double,
-  val videoZoom: Float = 0f,
   val sid: Int,
   val secondarySid: Int = -1, // Secondary subtitle track ID (-1 means disabled)
   val subDelay: Int,

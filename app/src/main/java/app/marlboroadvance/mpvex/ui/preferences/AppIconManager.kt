@@ -26,7 +26,7 @@ import app.marlboroadvance.mpvex.MainActivity
  *
  * ## ⚠️ 组件名必须用**相对名**（`.MainActivityAliasXxx`），不能写全限定名
  *
- * 本项目 `applicationId`（`app.cineisle.player`，装到手机上的包名）与 `namespace`
+ * 本项目 `applicationId`（`com.github.npcdw.loembya`，装到手机上的正式包名）与 `namespace`
  * （`app.marlboroadvance.mpvex`，代码/R 类的包名）**故意不同**。
  * 而 `AndroidManifest` 里组件名的包前缀由 **namespace** 补全 ——
  * 实际打进 APK 的是 `app.marlboroadvance.mpvex.MainActivityAlias*`，

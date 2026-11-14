@@ -2,7 +2,6 @@ package app.marlboroadvance.mpvex.preferences
 
 import app.marlboroadvance.mpvex.domain.emby.ChineseSubtitleMarks
 import app.marlboroadvance.mpvex.domain.emby.EmbyLibraryFilterState
-import app.marlboroadvance.mpvex.domain.emby.PersonMergeRule
 import app.marlboroadvance.mpvex.preferences.preference.Preference
 import app.marlboroadvance.mpvex.preferences.preference.PreferenceStore
 import app.marlboroadvance.mpvex.preferences.preference.getEnum
@@ -10,16 +9,12 @@ import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyGachaStyle
 import app.marlboroadvance.mpvex.ui.browser.emby.discover.SimilarAlgorithm
 
 /**
- * Preferences for the video browser (folder and video lists)
+ * Local presentation preferences for the read-only Emby browser and player.
  */
 class BrowserPreferences(
   private val preferenceStore: PreferenceStore,
-  context: android.content.Context,
+  @Suppress("UNUSED_PARAMETER") context: android.content.Context,
 ) {
-  // Folder sorting preferences
-  val folderSortType = preferenceStore.getEnum("folder_sort_type", FolderSortType.Title)
-  val folderSortOrder = preferenceStore.getEnum("folder_sort_order", SortOrder.Ascending)
-
   /**
    * 随机播放取多少条。**所有随机入口统一读这里**：
    * 媒体库工具行上的「随机播放 / 随机播放收藏」、以及视界流（仿抖音竖屏连播）。
@@ -74,177 +69,8 @@ class BrowserPreferences(
    */
   val embyGachaStyle = preferenceStore.getEnum("emby_gacha_style", EmbyGachaStyle.CLASSIC)
 
-  // Video sorting preferences
-  val videoSortType = preferenceStore.getEnum("video_sort_type", VideoSortType.Title)
-  val videoSortOrder = preferenceStore.getEnum("video_sort_order", SortOrder.Ascending)
-
-  val folderViewMode = preferenceStore.getEnum("folder_view_mode", FolderViewMode.AlbumView)
-
-  private val isTablet = context.resources.configuration.smallestScreenWidthDp >= 600
-  val folderGridColumnsPortrait = preferenceStore.getInt("folder_grid_columns_portrait", if (isTablet) 4 else 3)
-  val folderGridColumnsLandscape = preferenceStore.getInt("folder_grid_columns_landscape", 5)
-
-  val videoGridColumnsPortrait = preferenceStore.getInt("video_grid_columns_portrait", if (isTablet) 4 else 2)
-  val videoGridColumnsLandscape = preferenceStore.getInt("video_grid_columns_landscape", 4)
-
   /**
-   * 网络浏览的文件夹卡片是否显示封面。
-   *
-   * 封面口径（AList）：**有服务端海报（`thumb`）的视频优先**，其次目录内第一张图片；
-   * 本级都没有时，纯结构目录（只有子文件夹）会向下穿透取一层封面
-   * （见 `NetworkBrowserViewModel.scanFolderCover`）。其余协议没有服务端封面，
-   * 等价于「目录内第一张图片」。
-   *
-   * 默认开：相册类共享目录一眼能认出内容。**懒加载 + 预热**：卡片滚到可见时必然加载，
-   * 进入目录时还会提前为前若干个子文件夹预热（见 `preloadCovers`），结果进三级缓存，
-   * 滑回去不重列；关掉后不产生任何额外请求，文件夹回到默认图标。
-   */
-  val folderCoverEnabled = preferenceStore.getBoolean("folder_cover_enabled", true)
-
-  /**
-   * 已落盘的封面缓存是按**哪个算法口径**算出来的。
-   *
-   * 与 [app.marlboroadvance.mpvex.domain.network.FOLDER_COVER_CACHE_VERSION] 不一致时，
-   * App 启动会把 `folder_cover_cache` 整表清空一次并写回当前值 —— 理由是封面结果
-   * 有 30 天 TTL，改了选择规则却留着旧结果，用户会以为改动没生效。
-   */
-  val folderCoverCacheVersion = preferenceStore.getInt("folder_cover_cache_version", 0)
-
-  /**
-   * 「网络位置」页（连接列表）**上一次的搜索词**，空串 = 没有。
-   *
-   * 只记词、不记结果：结果本来就是连接列表的纯字符串过滤（见 `NetworkStreamingScreen`），
-   * 词一恢复结果自然一致；存一份结果快照反而会出现「列表里显示着已经删掉的连接」。
-   *
-   * 写入口径：输入即落盘（SharedPreferences 是内存写 + 异步刷盘，逐字符写无负担），
-   * **用户显式关掉搜索 / 清空输入时写空串** —— 那是「我不要这个词了」，下次进来
-   * 不该又自动进搜索态。
-   */
-  val networkConnectionSearchQuery =
-    preferenceStore.getString("network_connection_search_query", "")
-
-  /**
-   * 网络浏览**网格视图**卡片标题行数（一行 / 两行 / 全显）。
-   *
-   * 只管网络网格卡（[app.marlboroadvance.mpvex.ui.browser.cards.NetworkMediaCard]）：
-   * 列表卡与本地/Emby 卡的行数走各自既有偏好（如 AppearancePreferences
-   * 的 unlimitedNameLines），不混用。
-   */
-  val networkGridTitleLines = preferenceStore.getEnum("network_grid_title_lines", GridTitleLines.One)
-
-  /**
-   * 网络浏览（SMB/WebDAV/FTP）目录内**排序方式**（名称 / 日期 / 大小）。
-   *
-   * 与本地文件夹排序（[folderSortType]）分开存：那边的「视频数」在网络目录里
-   * 要额外统计、没有意义；网络这边就三个够用的维度。
-   * 排序在 ViewModel 里应用（目录是一次性拉全量的，本地重排不发请求）。
-   */
-  val networkSortType = preferenceStore.getEnum("network_sort_type", NetworkSortType.Name)
-
-  /**
-   * 网络浏览排序方向。**换排序项时会自动切到该项的自然方向**
-   * （名称=升序、日期/大小=降序），见 [NetworkSortType.naturalAscending] ——
-   * 与 Emby 媒体库「空串跟随自然方向」同一思想，省得用户每换一项还要再点一次箭头。
-   */
-  val networkSortOrder = preferenceStore.getEnum("network_sort_order", SortOrder.Ascending)
-
-  /**
-   * 网络浏览的**时间分组**方式（不分组 / 按年份 / 按年月）。
-   *
-   * 与排序是两件正交的事：分组决定「分几堆、堆的先后」，排序决定「堆内谁在前」。
-   * 默认 [NetworkGroupMode.None] —— 保持老用户看到的平铺列表，改观感必须是用户显式选的。
-   *
-   * ⚠️ 存的是**枚举名**（`getEnum`），常量名 `None` / `Year` / `YearMonth` 发布后不可改。
-   */
-  val networkGroupMode = preferenceStore.getEnum("network_group_mode", NetworkGroupMode.None)
-
-  /**
-   * **按文件类型强制分组**（仅网络浏览）。
-   *
-   * 开启后：文件夹恒在最顶层，其后依次 视频 → 图片 → 其他文件；每一类内部仍按
-   * 当前排序维度与方向各自排序（类型之间互不影响）。关闭则恢复原有行为 ——
-   * 网格里照片与视频按排序键混排，列表仍是 图片 → 视频 → 其他 的段序。
-   *
-   * 默认 false：这是改变列表结构的强约束，必须是用户显式选的。
-   * 与时间分组（[networkGroupMode]）叠加时，**类型在外、时间桶在内**。
-   */
-  val networkTypeGrouping = preferenceStore.getBoolean("network_type_grouping", false)
-
-  /**
-   * 网络目录里「随机播放视频 / 视界流播放」是否**穿透子文件夹**。
-   *
-   * 默认 false：这两颗按钮长期以来的语义就是「只播这一层」，改成递归会悄悄改变
-   * 老用户的预期。勾上后从当前目录逐层下钻累积（见 `NetworkFeedLauncher.collectVideos`），
-   * 连接卡上的视界流入口则恒为递归 —— 存储根目录通常一个视频都没有，
-   * 不递归等于入口摆着点不动。
-   */
-  val networkRandomDrillDown = preferenceStore.getBoolean("network_random_drill_down", false)
-
-  /**
-   * 「从系统相册/文件管理器分享进来上传」的**上次目标**：连接 id（-1 = 还没传过）。
-   *
-   * 与 [shareUploadDir] 成对使用、**必须一起读**：目录是某台服务器上的路径，
-   * 换一台服务器之后同一个路径可能根本不存在（甚至指向别的目录），
-   * 所以只在「连接 id 与记忆一致」时才恢复目录，否则回落到根目录。
-   *
-   * 为什么要落盘而不是只放内存：分享上传是**冷启动入口**（从相册直接分享，
-   * App 可能是被杀掉的状态），进程内记忆永远是空的 —— 每次都要重新选连接、
-   * 再点进目标目录，两步操作把「分享上传」的便利抵消掉了。
-   */
-  val shareUploadConnectionId = preferenceStore.getLong("share_upload_connection_id", -1L)
-
-  /** 「从系统分享上传」上次的目标目录（相对连接根，空串 = 根目录），见 [shareUploadConnectionId] */
-  val shareUploadDir = preferenceStore.getString("share_upload_dir", "")
-
-  /**
-   * 分享上传**全部成功**后是否自动退回原来的 App（默认开）。
-   *
-   * 分享是「在相册里顺手传一下」的动作，传完停在结果页等于把人扣在这里 ——
-   * 用户手上还在相册里挑下一批。只在**没有失败、没有取消**时自动回：
-   * 有失败项的时候，结果页正是他要看的东西。
-   */
-  val shareUploadAutoBack = preferenceStore.getBoolean("share_upload_auto_back", true)
-
-  /**
-   * 预览器里视频 / 音频**播完自动翻到下一条**（默认开）。
-   *
-   * 连着看十几段剪辑时不用手点；但只想反复看同一段的人（对时间点、看细节）
-   * 会被自动跳走，所以给开关，并在预览器底部直接可切。
-   */
-  val previewAutoAdvance = preferenceStore.getBoolean("preview_auto_advance", true)
-
-  /**
-   * 网络浏览在**宽屏**（≥720dp）下是否启用双栏：左栏列上一级的文件夹，右栏是当前目录。
-   *
-   * 默认 true —— 平板上「进 A 看一眼 → 退回 → 进 B」是最常见的动作，双栏省一半点击。
-   * 但固定双栏会吃掉主内容 240dp，小尺寸平板横屏时有人就是嫌挤，所以给一个开关
-   * （⋮ 菜单里，且只在宽屏出现）。窄屏无论如何都不生效 —— 那是布局层自己判的。
-   */
-  val networkDualPane = preferenceStore.getBoolean("network_dual_pane", true)
-
-  // Visibility preferences for video card chips
-  val showVideoThumbnails = preferenceStore.getBoolean("show_video_thumbnails", true)
-  val showSizeChip = preferenceStore.getBoolean("show_size_chip", true)
-  // Metadata-dependent chips (disabled by default for better performance)
-  val showResolutionChip = preferenceStore.getBoolean("show_resolution_chip", false)
-  val showFramerateInResolution = preferenceStore.getBoolean("show_framerate_in_resolution", false)
-  val showSubtitleIndicator = preferenceStore.getBoolean("show_subtitle_indicator", false)
-  val showProgressBar = preferenceStore.getBoolean("show_progress_bar", true)
-  val mediaLayoutMode = preferenceStore.getEnum("media_layout_mode", MediaLayoutMode. LIST)
-
-  // Visibility preferences for folder card chips
-  val showTotalVideosChip = preferenceStore.getBoolean("show_total_videos_chip", true)
-  // Metadata-dependent chips (disabled by default for better performance)
-  val showTotalDurationChip = preferenceStore.getBoolean("show_total_duration_chip", false)
-  val showTotalSizeChip = preferenceStore.getBoolean("show_total_size_chip", true)
-  val showDateChip = preferenceStore.getBoolean("show_date_chip", false)
-  val showFolderPath = preferenceStore.getBoolean("show_folder_path", true)
-
-  // Auto-scroll to last played media preference (like MX Player)
-  val autoScrollToLastPlayed = preferenceStore.getBoolean("auto_scroll_to_last_played", false)
-
-  /**
-   * 侧边可拖动滚动条的总开关（网络浏览 / Emby 媒体库等长列表右侧那根）。
+   * 侧边可拖动滚动条的总开关（Emby 媒体库等长列表右侧那根）。
    *
    * **全局唯一入口**：「设置 → 外观 → 侧边滚动条」。所有长列表要显示滚动条，
    * 统一套 [app.marlboroadvance.mpvex.ui.utils.LazyGridSideScrollbar] /
@@ -387,15 +213,6 @@ class BrowserPreferences(
   val embyChineseSubtitleMarks = preferenceStore.getString("emby_chinese_subtitle_marks", "")
 
   /**
-   * 「用外部播放器打开」记住的播放器，存 `包名/Activity名`（空串 = 还没用过）。
-   *
-   * 只用来在选择弹窗里标出「上次使用」那一项，**不改变列表顺序** ——
-   * 顺序仍由 [KNOWN_EXTERNAL_PLAYERS] 的推荐位次决定，免得点了一次
-   * 某个播放器之后列表就整个重排、下次找不到别的。
-   */
-  val embyExternalPlayer = preferenceStore.getString("emby_external_player", "")
-
-  /**
    * 收藏页选中的内容类型（影片 / 演员，存枚举名，空串 = 影片）。
    *
    * **为什么落盘**：从收藏页点进某位演员的作品页再返回时，这一屏的
@@ -536,18 +353,6 @@ class BrowserPreferences(
   val embyFolderCoverLastSynthAt =
     preferenceStore.getLong("emby_folder_cover_last_synth_at", 0L)
 
-  /**
-   * 「下载完成后清除服务端播放进度」开关。
-   *
-   * 打开后，一条媒体下载完成时会顺手把 Emby 服务器上这条的**播放位置**清零 ——
-   * 片子已经在本地了，「继续观看」再挂着「上次看到 42 分钟」就是噪音。
-   *
-   * 默认**关闭**：这是会改动服务器数据的行为，未必人人想要（有人本地留一份、
-   * 服务器上也继续追进度）。只清播放位置，不动「已看」标记。
-   */
-  val embyClearProgressOnDownload =
-    preferenceStore.getBoolean("emby_clear_progress_on_download", false)
-
   // ── Emby 卡片外观（统一项）──
   //
   // 这三项是「把散落的视觉常量收口成设置」：圆角原来写死在 EMBY_CARD_CORNER，
@@ -558,7 +363,6 @@ class BrowserPreferences(
   val embyCardCorner = preferenceStore.getInt("emby_card_corner", 12)
 
   /** 卡片间距（dp），网格与紧凑列表共用，范围 2~24，默认 8 */
-  val embyCardSpacing = preferenceStore.getInt("emby_card_spacing", 8)
 
   /**
    * 是否显示封面角标（播放进度条 / 作品数）。
@@ -582,16 +386,7 @@ class BrowserPreferences(
   // ── Emby 浏览交互开关 ──
 
   /**
-   * 卡片右上角「快捷收藏」心形开关。
-   *
-   * 打开时媒体库卡片右上角的心形是**可点按钮**（点一下收藏 / 取消收藏）；
-   * 关闭后退回原来的只读角标 —— 只在已收藏时显示一颗实心红心，避免误触。
-   * 默认**开**：快捷收藏是这一批需求里的核心交互。
-   */
-  val embyQuickFavorite = preferenceStore.getBoolean("emby_quick_favorite", true)
-
-  /**
-   * **预测性懒加载**总开关（媒体库 / 聚合库 / 收藏 / 历史 / 标签结果 / 播放列表 /
+   * **预测性懒加载**总开关（媒体库 / 收藏 / 历史 / 标签结果 /
    * 照片网格 / 照片浏览器等所有分页列表通用）。
    *
    * 开（默认）= 距列表末尾约一屏（`PagedList.PREFETCH_DISTANCE`，3 列网格约 4 行）
@@ -651,19 +446,6 @@ class BrowserPreferences(
   val embyMixGridColumns = preferenceStore.getInt("emby_mix_grid_columns", 3)
 
   /**
-   * 「合并完成后自动清理孤立演员」开关。
-   *
-   * 打开后，每次合并成功会顺手触发服务端的「刷新人员」任务，把**已经没有任何作品**的
-   * 演员条目回收掉（合并剩下的空壳变体）。
-   *
-   * 默认**关闭**，和「合并」本身同一个口径：它虽然风险低（只是让服务端回收没用的条目、
-   * 幂等、不会删任何影片），但**它会静默触发一个服务端任务** ——
-   * 万一那个任务顺带扫了正在刮削中的条目，排查起来很麻烦。
-   * 所以要开自己开，不替用户决定。
-   */
-  val embyAutoCleanOrphans = preferenceStore.getBoolean("emby_auto_clean_orphans", false)
-
-  /**
    * 搜索联想词列表是否**收起**。
    *
    * 联想只是「顺手补全」的参考，不是主角 —— 下面才是真正的搜索结果。展开时最多占
@@ -672,14 +454,6 @@ class BrowserPreferences(
    * （默认值 false = 展开，与改之前的表现一致）。
    */
   val embySearchSuggestCollapsed = preferenceStore.getBoolean("emby_search_suggest_collapsed", false)
-
-  /**
-   * 演职员合并的**判重规则**（[PersonMergeRule]），默认 [PersonMergeRule.STRICT]。
-   *
-   * 只影响「自动合并」会碰哪些组；扫描结果全量展示、手动合并始终可用。
-   * 存的是枚举名，取不到（旧值 / 手改坏了）时 `getEnum` 会退回默认值。
-   */
-  val embyPersonMergeRule = preferenceStore.getEnum("emby_person_merge_rule", PersonMergeRule.STRICT)
 
   /**
    * 「相似推荐 / 即混」用哪套算法（[SimilarAlgorithm]），默认 [SimilarAlgorithm.EMBY]。
@@ -707,7 +481,7 @@ class BrowserPreferences(
    * 照片浏览器「幻灯片播放」的翻页间隔，默认 [PhotoSlideshowInterval.FIVE_SECONDS]。
    *
    * **全局一份、不按库分**：这是「看照片的习惯」，不是某个媒体库的属性。
-   * 设置入口在「设置 → Emby 照片浏览与保存 → 幻灯片间隔」。
+   * 设置入口在「设置 → Emby 照片浏览 → 幻灯片间隔」。
    *
    * 为什么是固定三档而不是滑块：幻灯片是「放手让照片自己走」的场景，
    * 常用就 3 秒（快览）/ 5 秒（默认）/ 10 秒（细看），滑块拖出来的 4.7 秒
@@ -743,7 +517,7 @@ class BrowserPreferences(
    * 关 = 进浏览器停在第一张，用户自己滑 / 自己点播放键；
    * 开 = 进浏览器就按 [photoSlideshowInterval] 自动翻页，适合「当相框用」。
    * 全局一份、不按库分 —— 这是看照片的习惯，不是媒体库的属性。
-   * 设置入口在「设置 → Emby 照片浏览与保存 → 幻灯片间隔」下方。
+   * 设置入口在「设置 → Emby 照片浏览 → 幻灯片间隔」下方。
    */
   val photoAutoSlideshow = preferenceStore.getBoolean("photo_auto_slideshow", false)
 
@@ -759,34 +533,6 @@ class BrowserPreferences(
    * 等于「预取了个寂寞」还多花了流量。3 张已经是收益递减的拐点。
    */
   val photoPreloadCount = preferenceStore.getInt("photo_preload_count", 1)
-
-  /**
-   * 照片保存目录（SAF 树 URI 字符串）。**空字符串 = 系统相册**（`Pictures/CineIsle`）。
-   *
-   * ⚠️ **已下线**：设置页不再弹系统 SAF 选择器，改用自研的
-   * [photoSaveDirPath]。这一项只保留**读**——老用户以前选过的目录仍然继续生效，
-   * 不至于升级后保存位置被悄悄重置。新选择一律写 [photoSaveDirPath]。
-   *
-   * ⚠️ 偏好键 `photo_save_dir_uri` 发布后不能改（改了等于重置所有用户的选择）。
-   */
-  val photoSaveDirUri = preferenceStore.getString("photo_save_dir_uri", "")
-
-  /**
-   * 照片保存目录（**绝对路径**，自研文件夹选择器选出）。**空 = 系统相册**。
-   *
-   * 「设置 → Emby 照片浏览与保存 → 照片保存位置」弹的是 App 自己的
-   * [app.marlboroadvance.mpvex.ui.browser.dialogs.FolderPickerDialog]，
-   * 拿到的是 `/storage/emulated/0/DCIM/xxx` 这样的真实路径，不再是
-   * `content://…` 树 URI —— 系统那个 SAF 选择器界面跟 App 的整体风格完全不搭。
-   *
-   * ⚠️ 写文件走 `java.io.File`，依赖**所有文件访问权限**（`MANAGE_EXTERNAL_STORAGE`，
-   * 本 App 作为本地播放器本来就要这个权限）。没授权时 `EmbyPhotoSaver` 会返回
-   * 明确的失败原因，而不是静默失败。
-   *
-   * 与 [photoSaveDirUri] 的优先级：路径 > 老 SAF URI > 系统相册。
-   * 设置页选了新目录后**同时清空**老 URI，避免两个位置打架。
-   */
-  val photoSaveDirPath = preferenceStore.getString("photo_save_dir_path", "")
 
   /**
    * 照片浏览器**底部缩略图胶片条**开关，默认**关**。
@@ -821,253 +567,6 @@ class BrowserPreferences(
   fun photoLastOffset(parentId: String) =
     preferenceStore.getInt("photo_last_offset_$parentId", 0)
 
-  // ── 显示偏好服务端同步（清单 #16）──
-  //
-  // 这三项是给 [app.marlboroadvance.mpvex.ui.browser.emby.displayprefs.EmbyDisplayPrefsSync]
-  // 用的。⚠️ 同步的粒度是**每个媒体库一份**、写操作是**整体覆盖**，
-  // 且 `Client` 分区键固定为 `mpvex-android`（不与 Emby Web 互通，理由见 EmbyClient 5.8 节）。
-
-  /**
-   * 「打开 App 时自动从服务端拉显示偏好」开关，默认**关**。
-   *
-   * 打开后每次进入 Emby 模块都会读一次服务端，把网格密度 / 卡片外观 / 排序拉回本地。
-   * 前提是用户**至少手动上传过一次**（见 [embyDisplayPrefsPushed]）——
-   * 否则新装的 App 会用默认值把服务端那份顶掉。
-   */
-  val embyDisplayPrefsAutoSync = preferenceStore.getBoolean("emby_display_prefs_auto_sync", false)
-
-  /**
-   * 「是否曾经把本地显示偏好上传到过服务端」标记，默认 false。
-   *
-   * 它是「首启不覆盖」那条规则的开关：没上传过就说明服务端那份是别人的
-   * （或根本是空的），这时候自动拉取只会把用户本机的设置冲掉。
-   *
-   * 只在**上传成功**时置 true；上传失败绝不能置 —— 否则用户会以为已经同步了，
-   * 下次启动自动拉取时把本地覆盖成服务端那份（其实还是空的/旧的）。
-   */
-  val embyDisplayPrefsPushed = preferenceStore.getBoolean("emby_display_prefs_pushed", false)
-
-  // ── 「标记为不喜欢」显示开关 ──
-  //
-  // 三处入口各自独立开关：藏在播放器里的按钮与详情页菜单项是**不同的打扰程度**，
-  // 有人不介意在详情页用（那里本来就有收藏/已播放），但不想在播放器里被提醒。
-  // 分开给开关比一个总开关有用。默认**开** —— 标记本身要用户主动点，
-  // 不会自己跳出来，只是不显示入口而已。
-
-  /** 媒体详情页「更多」菜单里的「标记为不喜欢」项。 */
-  val dislikeShowInDetailMenu =
-    preferenceStore.getBoolean("dislike_show_in_detail_menu", true)
-
-  /** mpv / GSY 播放器控制栏上的「不喜欢」按钮。 */
-  val dislikeShowInPlayerControls =
-    preferenceStore.getBoolean("dislike_show_in_player_controls", true)
-
-  /** 视界流（竖屏连播）右侧工具栏上的「不喜欢」按钮。 */
-  val dislikeShowInFeed =
-    preferenceStore.getBoolean("dislike_show_in_feed", true)
-
-  /**
-   * 「不喜欢」按钮当前在**哪个控件簇**（存 [app.marlboroadvance.mpvex.ui.preferences.DislikeLayoutSync.CONTROL_KEYS]
-   * 里的 key）。
-   *
-   * 存在偏好里而不是每次现查，是因为双向同步需要**还原到原处**：
-   * 用户可能把按钮从顶栏挪到了左下簇，关开关再打开时不该被 App 猜回顶栏。
-   *
-   * 空串 = 从没在编辑器里放过 ⇒ 加回时用默认簇（见设置页）。
-   */
-  val dislikeLayoutCluster = preferenceStore.getString("dislike_layout_cluster", "")
-
-  /**
-   * 出厂播种的**版本号**：0 = 从没播过。
-   *
-   * ## 为什么非得有这个标记
-   *
-   * 本功能的开关语义是「关开关 ⇒ 从布局里清掉；开开关 ⇒ 只置开关、不主动加回」。
-   * 这个语义成立的前提是**出厂时按钮已经在布局里**，所以 App 启动时要播种一次。
-   * 但播种不能每次启动都做：用户如果**故意**把按钮从所有控件簇里删掉（他有权这么干），
-   * 每次启动又给塞回去，等于用户的布局决定被反复撤销。
-   *
-   * ## 为什么是版本号而不是布尔
-   *
-   * 播种的**目标簇会变**（v1 只播了横屏，v2 补上竖屏 —— 横竖屏是两套独立的簇，
-   * 漏一个就等于那个方向没有入口）。布尔量只能表达「播过/没播过」，
-   * 已经播过 v1 的用户会被永久跳过，竖屏那个洞永远补不上。
-   * 用版本号就能表达「播到哪一版了」，升级时再补一次。
-   *
-   * 见 [app.marlboroadvance.mpvex.ui.preferences.DislikeLayoutSync.planSeed]。
-   */
-  val dislikeLayoutSeedVersion = preferenceStore.getInt("dislike_layout_seed_version", 0)
-}
-
-/**
- * Sort order options
- */
-enum class SortOrder {
-  Ascending,
-  Descending,
-  ;
-
-  val isAscending: Boolean
-    get() = this == Ascending
-}
-
-/**
- * Folder sorting options
- */
-enum class FolderSortType {
-  Title,
-  Date,
-  Size,
-  VideoCount,
-  ;
-
-  /** 持久化用的稳定键（英文），**不要改动** —— 改了老用户的排序偏好会失效 */
-  val displayName: String
-    get() =
-      when (this) {
-        Title -> "Title"
-        Date -> "Date"
-        Size -> "Size"
-        VideoCount -> "Count"
-      }
-
-  /** 界面上显示的中文名 */
-  val label: String
-    get() =
-      when (this) {
-        Title -> "标题"
-        Date -> "日期"
-        Size -> "大小"
-        VideoCount -> "视频数"
-      }
-}
-
-/**
- * Video sorting options
- */
-enum class VideoSortType {
-  Title,
-  Duration,
-  Date,
-  Size,
-  ;
-
-  /** 持久化用的稳定键（英文），**不要改动** —— 改了老用户的排序偏好会失效 */
-  val displayName: String
-    get() =
-      when (this) {
-        Title -> "Title"
-        Duration -> "Duration"
-        Date -> "Date"
-        Size -> "Size"
-      }
-
-  /** 界面上显示的中文名 */
-  val label: String
-    get() =
-      when (this) {
-        Title -> "标题"
-        Duration -> "时长"
-        Date -> "日期"
-        Size -> "大小"
-      }
-}
-
-/**
- * Folder view mode options
- */
-enum class FolderViewMode {
-  AlbumView,
-  FileManager,
-  ;
-
-  val displayName: String
-    get() =
-      when (this) {
-        AlbumView -> "Folder View"
-        FileManager -> "Tree View"
-      }
-}
-
-enum class MediaLayoutMode {
-  LIST,
-  GRID,
-  ;
-
-  val displayName:  String
-    get() = when (this) {
-      LIST -> "List"
-      GRID -> "Grid"
-    }
-}
-
-/**
- * 网络浏览网格卡片标题行数。
- *
- * ⚠️ 存的是**枚举名**（`getEnum`），常量名发布后不能改 —— 改了老用户的偏好会失效。
- */
-enum class GridTitleLines(
-  /** 直接喂给 `Text(maxLines =)`；全显用 [Int.MAX_VALUE] */
-  val maxLines: Int,
-  /** 设置项里的展示名 */
-  val label: String,
-) {
-  One(1, "一行"),
-  Two(2, "两行"),
-  Full(Int.MAX_VALUE, "全显"),
-}
-
-/**
- * 网络浏览目录内的排序维度。
- *
- * ⚠️ 存的是**枚举名**（`getEnum`），常量名发布后不能改 —— 改了老用户的排序偏好会失效。
- * `displayName` 同时是排序弹窗与持久化共用的稳定键，同样不能动。
- *
- * 「类型」一档把照片 / 视频 / 其他分开排（顺序与列表视图的 section 一致：
- * 图片在前、视频在后）—— 混合目录里「先看照片再看视频」是常见诉求。
- * 「随机」没有方向意义，UI 上不显示升降序箭头。
- */
-enum class NetworkSortType(
-  /** 持久化 / 排序弹窗共用的稳定键（英文），**不要改动** */
-  val displayName: String,
-  /** 界面上显示的中文名 */
-  val label: String,
-  /** 切到这一项时的自然方向：true = 升序（A-Z / 最旧 / 最小） */
-  val naturalAscending: Boolean,
-) {
-  Name("Name", "名称", true),
-  Date("Date", "时间", false),
-  Size("Size", "大小", false),
-  Type("Type", "类型", true),
-  Random("Random", "随机", true),
-  ;
-
-  companion object {
-    fun fromDisplayName(name: String): NetworkSortType? =
-      entries.find { it.displayName == name }
-  }
-}
-
-/**
- * 网络浏览的**时间分组**粒度。
- *
- * 分组与排序正交：分组只管「按年/月切堆 + 堆的先后」，堆内顺序仍由
- * [NetworkSortType] + [SortOrder] 决定（见 `groupNetworkFilesByPeriod`）。
- *
- * ⚠️ 常量名就是持久化的值（`getEnum` 用 `enum.name`），**发布后不可改**。
- */
-enum class NetworkGroupMode(
-  /** 设置项里的展示名 */
-  val label: String,
-) {
-  None("不分组"),
-  Year("按年份"),
-  YearMonth("按年月"),
-  ;
-
-  /** 是否真的要分组（调用点省一次 `!= None` 判断） */
-  val isActive: Boolean
-    get() = this != None
 }
 
 /**

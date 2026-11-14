@@ -1,5 +1,9 @@
 package app.marlboroadvance.mpvex.ui.cine
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -68,6 +72,7 @@ import app.marlboroadvance.mpvex.preferences.BrowserPreferences
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.components.pullrefresh.PullRefreshBox
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyViewModel
+import app.marlboroadvance.mpvex.ui.browser.emby.openEmbyMediaCard
 import app.marlboroadvance.mpvex.ui.browser.emby.discover.SimilarRecommendationViewModel
 import app.marlboroadvance.mpvex.ui.cine.actions.CineActionSheetHost
 import app.marlboroadvance.mpvex.ui.cine.actions.rememberCineActionSheetState
@@ -109,12 +114,13 @@ import org.koin.compose.koinInject
 fun CineHomeScreen(
   onOpenDetail: (EmbyItem) -> Unit,
   onOpenLibrary: (EmbyItem) -> Unit,
-  onOpenSearch: () -> Unit,
   onOpenDrawer: () -> Unit,
   onOpenServerManage: () -> Unit,
   onOpenAll: (String, List<CineMediaUi>) -> Unit,
   onDockHiddenChange: (Boolean) -> Unit,
+  onPageScrollInProgressChange: (Boolean) -> Unit,
   modifier: Modifier = Modifier,
+  onBackToServers: (() -> Unit)? = null,
 ) {
   val context = LocalContext.current
   val app = context.applicationContext as Application
@@ -124,6 +130,9 @@ fun CineHomeScreen(
   )
 
   val server by viewModel.currentServer.collectAsState()
+  CompositionLocalProvider(LocalEmbyImageServer provides server) {
+  LaunchedEffect(viewModel) { viewModel.refreshHome() }
+  val serverConfigState by viewModel.serverLoadState.collectAsState()
   val libraries by viewModel.libraries.collectAsState()
   val resumeItems by viewModel.resumeItems.collectAsState()
   val latestItems by viewModel.latestItems.collectAsState()
@@ -142,11 +151,15 @@ fun CineHomeScreen(
   val scope = rememberCoroutineScope()
 
   // 「首屏真的拉过一次」——用它区分「刚进来还没数据」与「服务器上就是空的」。
-  // isLoading 单独不够：VM 的 init 里才刚 launch，第一帧 isLoading 还是 false。
-  var firstLoadDone by remember { mutableStateOf(false) }
+  // 保留的 VM 若已经有任一首页结果，就直接画真实内容；别让新组合先闪一帧整页骨架。
+  // 空结果仍通过 VM 现有的 awaitHomeLoaded 完成信号确认，不另造持久化状态。
+  val hasRetainedHomeContent = libraries.isNotEmpty() || resumeItems.isNotEmpty() || latestItems.isNotEmpty()
+  var firstLoadDone by remember(viewModel) { mutableStateOf(hasRetainedHomeContent) }
   LaunchedEffect(viewModel) {
-    viewModel.awaitHomeLoaded()
-    firstLoadDone = true
+    if (!firstLoadDone) {
+      viewModel.awaitHomeLoaded()
+      firstLoadDone = true
+    }
   }
 
   // 「随便看看」：排在首页三请求之后（与 Classic 的取舍一致，避免抢服务端）
@@ -159,15 +172,15 @@ fun CineHomeScreen(
   }
 
   // ── 展示模型（唯一映射入口在 CineItemMapper） ──
-  val resumeUi: List<CineMediaUi> = remember(server?.id, resumeItems) {
+  val resumeUi: List<CineMediaUi> = remember(server, resumeItems) {
     val s = server ?: return@remember emptyList()
     resumeItems.map { viewModel.toCineMedia(s, it) }
   }
-  val latestUi: List<CineMediaUi> = remember(server?.id, latestItems) {
+  val latestUi: List<CineMediaUi> = remember(server, latestItems) {
     val s = server ?: return@remember emptyList()
     latestItems.map { viewModel.toCineMedia(s, it) }
   }
-  val mixUi: List<CineMediaUi> = remember(server?.id, mixItems) {
+  val mixUi: List<CineMediaUi> = remember(server, mixItems) {
     val s = server ?: return@remember emptyList()
     mixItems.map { viewModel.toCineMedia(s, it) }
   }
@@ -185,14 +198,6 @@ fun CineHomeScreen(
   //    这时按钮必须写「继续观看」，否则用户会以为自己点的是从头播。
   val resumeIds = remember(resumeUi) { resumeUi.map { it.id }.toSet() }
 
-  // 收藏的本地覆盖：toggle 之后首页数据不会重拉，仅靠 item.UserData 里的旧值，
-  // 图标会「点了没反应」。失败时回滚到服务器真值（toggleFavorite 内部已做回读确认）。
-  // key 用条目 id：轮播换页之后，每一页的收藏态必须各自独立。
-  val favoriteOverrides = remember { mutableStateMapOf<String, Boolean>() }
-  var favoriteBusyId by remember { mutableStateOf<String?>(null) }
-
-  val failureText = stringResource(R.string.cine_favorite_failed)
-
   // 播放统一走 rememberCinePlay（发起 + 失败提示只有一份实现）
   val play = rememberCinePlay()
   // 长按菜单：状态放在页面这一层，Host 就挂在页面根 Box 末尾
@@ -206,30 +211,18 @@ fun CineHomeScreen(
   val titleLatest = stringResource(R.string.cine_section_latest)
   val labelAll = stringResource(R.string.cine_action_all)
 
-  fun toggleFavorite(media: CineMediaUi) {
-    val current = server ?: return
-    // 一次只允许一个请求在飞：连点不同卡片时，后一个的乐观值会把前一个的
-    // 服务器回值覆盖掉（回读是全量的，会把界面写回旧状态）
-    if (favoriteBusyId != null) return
-    val next = !(favoriteOverrides[media.id] ?: media.isFavorite)
-    favoriteOverrides[media.id] = next
-    favoriteBusyId = media.id
-    scope.launch {
-      val result = viewModel.toggleFavorite(current, media.item, next)
-      favoriteBusyId = null
-      val confirmed = result.getOrNull()
-      if (result.isSuccess && confirmed != null) {
-        favoriteOverrides[media.id] = confirmed
-      } else {
-        // 失败：把这一条恢复成「服务器说什么就是什么」，并明确告诉用户没成
-        favoriteOverrides.remove(media.id)
-        Toast.makeText(context, failureText, Toast.LENGTH_SHORT).show()
-      }
-    }
-  }
-
   // ── 滚动：折叠进度 / 视差 / Dock 自动收起 ──
   val listState = rememberLazyListState()
+  // 这里只在滚动开始 / 结束时变更，不读取像素偏移：Hero 的计时器和根级玻璃 gate 因而各只
+  // 重启 / 重组一次。停止后 LaunchedEffect 重新开始，自动轮播会拿到完整的一轮延时。
+  val pageScrolling by remember { derivedStateOf { listState.isScrollInProgress } }
+  val pageScrollCallback by rememberUpdatedState(onPageScrollInProgressChange)
+  LaunchedEffect(pageScrolling) {
+    pageScrollCallback(pageScrolling)
+  }
+  DisposableEffect(Unit) {
+    onDispose { pageScrollCallback(false) }
+  }
   val collapse by remember {
     derivedStateOf {
       if (listState.firstVisibleItemIndex > 0) {
@@ -292,7 +285,7 @@ fun CineHomeScreen(
   }
 
   val isRefreshing = remember { mutableStateOf(false) }
-  val noServer = firstLoadDone && server == null
+  val noServer = firstLoadDone && server == null && error == null
   val hasAnyContent = resumeUi.isNotEmpty() || latestUi.isNotEmpty() || libraries.isNotEmpty()
   val showSkeleton = !firstLoadDone || (isLoading && !hasAnyContent)
 
@@ -317,8 +310,12 @@ fun CineHomeScreen(
         CineStatePanel(
           icon = Icons.Outlined.CloudOff,
           title = stringResource(R.string.cine_state_no_server_title),
-          description = stringResource(R.string.cine_state_no_server_desc),
-          primaryLabel = stringResource(R.string.cine_state_no_server_action),
+          description = if ((serverConfigState as? app.marlboroadvance.mpvex.database.repository.EmbyServerLoadState.Ready)?.servers?.isNotEmpty() == true) {
+            stringResource(R.string.emby_shared_no_usable_server)
+          } else {
+            stringResource(R.string.cine_state_no_server_desc)
+          },
+          primaryLabel = stringResource(R.string.cine_drawer_server_manage),
           onPrimary = onOpenServerManage,
         )
       }
@@ -381,8 +378,8 @@ fun CineHomeScreen(
             //    包一层带 padding 的容器会让偏移与视觉位移对不上。
             item(key = "hero") {
               if (heroList.isNotEmpty()) {
-                // Pager 状态放在 item 里：只有 Hero 这一块持有它。
-                // 提到页面级的话，切 tab 再回来还停在第三张 —— 首页应当回到第一张。
+                // Pager 状态放在 Hero item 里，并由外层 tab 的 SaveableStateProvider 接住：
+                // Hero 暂时离开组合时不常驻渲染，切回来仍能恢复当前页。
                 val pagerState = rememberPagerState(pageCount = { heroList.size })
 
                 // ── 静置自动轮播 ──
@@ -423,8 +420,17 @@ fun CineHomeScreen(
 
                 // 所有开关都作为 key：状态一变 effect 立刻重启、计时器从头给足 6 秒，
                 // 既不会「刚松手 0.2 秒就翻页」，也不会在闭包里读到僵住的旧值。
-                LaunchedEffect(heroResumed, heroVisible, heroHolding, pagerState, heroList.size) {
-                  if (!heroResumed || !heroVisible || heroHolding || heroList.size <= 1) {
+                // 外层纵向列表滚动时同样暂停；fling 停下后 pageScrolling 变回 false，
+                // effect 重建并重新 delay 一整轮，不会拿滚动前剩下的零头立刻翻页。
+                LaunchedEffect(
+                  heroResumed,
+                  heroVisible,
+                  heroHolding,
+                  pageScrolling,
+                  pagerState,
+                  heroList.size,
+                ) {
+                  if (!heroResumed || !heroVisible || heroHolding || pageScrolling || heroList.size <= 1) {
                     return@LaunchedEffect
                   }
                   while (true) {
@@ -444,16 +450,14 @@ fun CineHomeScreen(
                   val media = heroList[page]
                   CineHeroBanner(
                     media = media,
+                    server = media.imageServer,
                     heroHeight = heroHeight,
                     parallaxFraction = parallax,
-                    isFavorite = favoriteOverrides[media.id] ?: media.isFavorite,
-                    favoriteBusy = favoriteBusyId == media.id,
                     primaryLabel = stringResource(
                       if (media.id in resumeIds) R.string.cine_action_resume else R.string.cine_action_play,
                     ),
                     onPlay = { play(media.item, media.resumeSeconds) },
                     onOpenDetail = { onOpenDetail(media.item) },
-                    onToggleFavorite = { toggleFavorite(media) },
                     // 宽屏顶栏在 Hero 之外，不需要顶部压暗
                     topScrimHeight = if (wide) 0.dp else 200.dp,
                     // 宽屏不画指示点（设计稿 03）：宽屏 Hero 矮，四个点会挤到按钮右边
@@ -513,9 +517,8 @@ fun CineHomeScreen(
                   items = resumeUi,
                   cardWidth = wideCardWidth,
                   wide = wide,
-                  // 继续观看：单击就续播 —— 这一行存在的意义就是「接着看」，
-                  // 要详情走长按菜单里的「详情」（与 Classic 首页同一套语义）
-                  onClick = { play(it.item, it.resumeSeconds) },
+                  // 单集先查看详情，其余继续观看卡保留续播行为。
+                  onClick = { media -> openEmbyMediaCard(media.item, onOpenDetail) { play(it, media.resumeSeconds) } },
                   onLongClick = { actionSheet.show(it) },
                 )
               }
@@ -577,7 +580,7 @@ fun CineHomeScreen(
       CineWideHeader(
         title = stringResource(R.string.app_name),
         onOpenDrawer = onOpenDrawer,
-        onSearch = onOpenSearch,
+        onBackToServers = onBackToServers,
         modifier = Modifier.align(Alignment.TopCenter),
       )
     } else {
@@ -586,7 +589,7 @@ fun CineHomeScreen(
         collapse = if (heroUi != null) collapse else 1f,
         title = stringResource(R.string.app_name),
         onOpenDrawer = onOpenDrawer,
-        onSearch = onOpenSearch,
+        onBackToServers = onBackToServers,
         modifier = Modifier.align(Alignment.TopCenter),
       )
     }
@@ -600,9 +603,8 @@ fun CineHomeScreen(
       onOpenDetail = { media -> onOpenDetail(media.item) },
       // 收藏 / 已看 / 元数据改完都重拉首页三份数据：服务端回读才是真值，
       // 靠本地覆盖迟早出现「换了设备又变回去」
-      onChanged = { viewModel.refreshHome() },
-      onDeleted = { viewModel.refreshHome() },
     )
+  }
   }
 }
 

@@ -8,19 +8,25 @@ import android.os.Build
 import android.util.Log
 import android.util.LruCache
 import app.marlboroadvance.mpvex.domain.emby.EmbyHttp
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.domain.emby.EmbyRequestHeaders
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.util.Collections
+import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 
 /**
@@ -29,7 +35,7 @@ import java.util.concurrent.TimeUnit
  * 项目不引入第三方图片库，这里用已有的 OkHttp + BitmapFactory 实现，三层结构：
  *
  *  1. 内存 LRU（进程内，列表滚动不重复解码）；
- *  2. **磁盘缓存**（[diskDir]/<sha256(url)>.img，TTL [DISK_TTL_MS]，容量上限
+ *  2. **磁盘缓存**（[diskDir]/<cache-key>.img，30 天新鲜期，容量上限
  *     [DISK_LIMIT_BYTES]，超限按最旧淘汰）—— 跨启动复用，减少 Emby 服务端的
  *     图片缩放开销（每个封面都是一次服务端缩放 + 网络传输）；
  *  3. 网络（OkHttp，缩放失败自动退回原图重试）。
@@ -62,26 +68,61 @@ object EmbyImageLoader {
   /** 磁盘缓存容量上限 */
   private const val DISK_LIMIT_BYTES = 256L * 1024 * 1024
 
-  /** 缓存失效时间：7 天（以文件修改时间 ≈ 下载时间为准） */
-  private const val DISK_TTL_MS = 7L * 24 * 60 * 60 * 1000
-
   @Volatile
   private var diskDir: File? = null
+
+  private val trimMutex = Mutex()
+  private val trimRequested = AtomicBoolean(false)
+  private val trimRunning = AtomicBoolean(false)
+  private val diskBytesEstimate = AtomicLong(-1L)
+  private val identityFingerprints = Collections.synchronizedMap(WeakHashMap<EmbyServer, String>())
+  private val HEX = "0123456789abcdef".toCharArray()
 
   /** App.onCreate 注入 Context，启用磁盘缓存层 */
   fun init(context: Context) {
     diskDir = File(context.cacheDir, DISK_DIR_NAME)
+    diskBytesEstimate.set(-1L)
   }
 
-  /** URL → 磁盘文件名（sha256，避免 URL 里的非法字符 / 过长路径） */
-  private fun diskKeyOf(url: String): String =
-    MessageDigest.getInstance("SHA-256").digest(url.toByteArray()).joinToString("") {
-      "%02x".format(it)
-    } + ".img"
+  /** Shared by bitmap/Coil caches and in-flight downloads; never identifies a row from a URL. */
+  fun cacheKey(server: EmbyServer, url: String): String = sha256(identityFingerprint(server), url)
+
+  private fun identityFingerprint(server: EmbyServer): String = synchronized(identityFingerprints) {
+    identityFingerprints[server] ?: sha256(
+      server.sourceKey, server.sourceRevision.toString(), server.remoteId, server.id.toString(),
+      server.username, server.password, server.userId, server.apiToken,
+      server.client, server.device, server.deviceId, server.clientVersion, server.userAgent,
+      server.baseUrl, server.reverseProxyId, server.reverseProxyUrl,
+    ).also { identityFingerprints[server] = it }
+  }
+
+  internal fun sha256(vararg parts: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    for (part in parts) {
+      val bytes = part.toByteArray(Charsets.UTF_8)
+      updateLength(digest, bytes.size)
+      digest.update(bytes)
+    }
+    val bytes = digest.digest()
+    return CharArray(bytes.size * 2).also { output ->
+      bytes.forEachIndexed { index, byte ->
+        val value = byte.toInt() and 0xff
+        output[index * 2] = HEX[value ushr 4]
+        output[index * 2 + 1] = HEX[value and 0x0f]
+      }
+    }.concatToString()
+  }
+
+  private fun updateLength(digest: MessageDigest, size: Int) {
+    digest.update((size ushr 24).toByte())
+    digest.update((size ushr 16).toByte())
+    digest.update((size ushr 8).toByte())
+    digest.update(size.toByte())
+  }
 
   /** 磁盘缓存当前占用（字节），设置页展示用 */
   fun diskCacheSizeBytes(): Long =
-    diskDir?.listFiles()?.sumOf { it.length() } ?: 0L
+    diskDir?.listFiles()?.sumOf { it.length() }?.also(diskBytesEstimate::set) ?: 0L
 
   /** 清空磁盘缓存 + 内存缓存，返回清除的字节数 */
   fun clearDiskCache(): Long {
@@ -91,19 +132,38 @@ object EmbyImageLoader {
       runCatching { f.delete() }
     }
     cache.evictAll()
+    NetworkImageCachePolicy.clear()
+    diskBytesEstimate.set(0L)
     return freed
   }
 
-  /** 容量超限时按「最旧优先」淘汰，直到回到上限以内 */
-  private fun trimDisk(dir: File) {
-    val files = dir.listFiles() ?: return
-    var total = files.sumOf { it.length() }
-    if (total <= DISK_LIMIT_BYTES) return
-    files.sortedBy { it.lastModified() }.forEach { f ->
-      if (total <= DISK_LIMIT_BYTES) return
-      val len = f.length()
-      if (f.delete()) total -= len
-    }
+  /** 容量超限时按「最旧优先」淘汰，直到回到上限以内。完整扫描串行且合并重复请求。 */
+  private suspend fun trimDisk(dir: File) {
+    trimRequested.set(true)
+    if (!trimRunning.compareAndSet(false, true)) return
+    do {
+      try {
+        trimMutex.lock()
+        try {
+          while (trimRequested.getAndSet(false)) {
+            val files = dir.listFiles() ?: continue
+            var total = files.sumOf { it.length() }
+            diskBytesEstimate.set(total)
+            if (total <= DISK_LIMIT_BYTES) continue
+            files.sortedBy { it.lastModified() }.forEach { f ->
+              if (total <= DISK_LIMIT_BYTES) return@forEach
+              val len = f.length()
+              if (f.delete()) total -= len
+            }
+            diskBytesEstimate.set(total)
+          }
+        } finally {
+          trimMutex.unlock()
+        }
+      } finally {
+        trimRunning.set(false)
+      }
+    } while (trimRequested.get() && trimRunning.compareAndSet(false, true))
   }
 
   // ── 下载节流 ──
@@ -135,48 +195,82 @@ object EmbyImageLoader {
    *                 即使服务端已按尺寸返回也建议给一个上限，因为「服务端缩放失败→取原图」
    *                 这条兜底路径拿到的可能是很大的原图。
    */
-  suspend fun load(url: String, maxWidth: Int = 0): Bitmap? = withContext(Dispatchers.IO) {
-    cache.get(url)?.let { return@withContext it }
+  suspend fun load(server: EmbyServer, url: String, maxWidth: Int = 0): Bitmap? = withContext(Dispatchers.IO) {
+    val fresh = EmbyHttp.sessionServer(server)
+    loadResolved(fresh, url, maxWidth)
+  }
 
-    val diskKey = diskKeyOf(url)
-    val diskFile = diskDir?.let { File(it, diskKey) }
-    // 磁盘命中且未过期：直接解码（过期/损坏则当未命中，走网络重新下载覆盖）
-    if (diskFile != null && diskFile.isFile &&
-      System.currentTimeMillis() - diskFile.lastModified() <= DISK_TTL_MS
-    ) {
-      val bytes = runCatching { diskFile.readBytes() }.getOrNull()
-      if (bytes != null) {
-        decode(bytes, maxWidth)?.let { bmp ->
-          cache.put(url, bmp)
-          return@withContext bmp
-        }
-      }
+  private suspend fun loadResolved(server: EmbyServer, url: String, maxWidth: Int): Bitmap? {
+    val key = cacheKey(server, url)
+    val now = System.currentTimeMillis()
+    if (NetworkImageCachePolicy.memoryFresh(key, now)) {
+      cache.get(key)?.let { return it }
+    } else {
+      cache.remove(key)
+      NetworkImageCachePolicy.forget(key)
     }
 
-    // 先按带尺寸参数的地址取，失败再退回原图。
-    // 背景：部分 Emby 服务端对「按 maxWidth/maxHeight 缩放」的请求会返回 500
-    //（源图格式特殊 / 缩略图缓存损坏），但直接取原图是正常的。
-    val bytes = downloadBytes(url) ?: return@withContext null
-
-    // 合并下载时，先完成的协程可能已经解码入缓存（同 URL 同尺寸的常见情形）
-    cache.get(url)?.let { return@withContext it }
-
-    // 落盘（失败不影响本次展示）+ 容量维护
-    if (diskFile != null) {
-      runCatching {
-        diskFile.parentFile?.mkdirs()
-        diskFile.writeBytes(bytes)
-        trimDisk(diskFile.parentFile)
+    val diskFile = diskDir?.let { File(it, "$key.img") }
+    if (diskFile != null && diskFile.isFile) {
+      val writtenAt = diskFile.lastModified()
+      val bytes = if (NetworkImageCachePolicy.fresh(writtenAt, now)) {
+        runCatching { diskFile.readBytes() }.getOrNull()
+      } else null
+      val bitmap = bytes?.let { decode(it, maxWidth) }
+      if (bitmap != null) {
+        cache.put(key, bitmap)
+        NetworkImageCachePolicy.record(key, writtenAt)
+        return bitmap
       }
+      deleteDiskEntry(diskFile, key)
+    }
+
+    val bytes = downloadBytesResolved(server, url) ?: return null
+    if (NetworkImageCachePolicy.memoryFresh(key)) {
+      cache.get(key)?.let { return it }
     }
 
     val bitmap = decode(bytes, maxWidth)
     if (bitmap == null) {
-      Log.w(TAG, "封面解码失败（bytes=${bytes.size}）: $url")
-      return@withContext null
+      deleteDiskEntry(diskFile, key)
+      Log.w(TAG, "封面解码失败（bytes=${bytes.size}）")
+      return null
     }
-    cache.put(url, bitmap)
-    bitmap
+
+    val writtenAt = System.currentTimeMillis()
+    if (diskFile != null) {
+      val oldLength = diskFile.length()
+      val written = runCatching {
+        diskFile.parentFile?.mkdirs()
+        diskFile.writeBytes(bytes)
+        if (!diskFile.setLastModified(writtenAt)) throw IllegalStateException("Unable to timestamp image cache")
+        true
+      }.getOrElse {
+        runCatching { diskFile.delete() }
+        false
+      }
+      if (written) {
+        val previous = diskBytesEstimate.get()
+        val total = if (previous < 0) diskFile.parentFile?.listFiles()?.sumOf { it.length() } ?: 0L
+        else diskBytesEstimate.addAndGet(diskFile.length() - oldLength)
+        diskBytesEstimate.set(total)
+        if (total > DISK_LIMIT_BYTES) diskFile.parentFile?.let { trimDisk(it) }
+      }
+    }
+    cache.put(key, bitmap)
+    NetworkImageCachePolicy.record(key, writtenAt)
+    return bitmap
+  }
+
+  private fun deleteDiskEntry(file: File?, key: String) {
+    if (file != null) {
+      val length = file.length()
+      if (runCatching { file.delete() }.getOrDefault(false)) {
+        diskBytesEstimate.updateAndGet { current -> if (current < 0) current else (current - length).coerceAtLeast(0) }
+      }
+    }
+    cache.remove(key)
+    NetworkImageCachePolicy.forget(key)
   }
 
   /**
@@ -190,9 +284,16 @@ object EmbyImageLoader {
    *
    * ⚠️ 只查内存层：磁盘 / 网络都涉及 IO，绝不能在组合阶段同步做。
    */
-  fun peek(url: String?): Bitmap? {
+  fun peek(server: EmbyServer, url: String?): Bitmap? {
     if (url.isNullOrBlank()) return null
-    return runCatching { cache.get(url) }.getOrNull()
+    return runCatching {
+      val key = cacheKey(EmbyHttp.sessionServer(server), url)
+      if (NetworkImageCachePolicy.memoryFresh(key)) cache.get(key) else {
+        cache.remove(key)
+        NetworkImageCachePolicy.forget(key)
+        null
+      }
+    }.getOrNull()
   }
 
   /**
@@ -205,14 +306,18 @@ object EmbyImageLoader {
    * 节流、双鉴权、缩放失败退回原图这套逻辑**只该有一份实现**（红线 58），
    * 所以对外开放而不是在照片那边另写一个下载。
    */
-  suspend fun downloadBytes(url: String): ByteArray? {
-    inFlight[url]?.let { return it.await() }
+  suspend fun downloadBytes(server: EmbyServer, url: String): ByteArray? =
+    downloadBytesResolved(EmbyHttp.sessionServer(server), url)
+
+  private suspend fun downloadBytesResolved(server: EmbyServer, url: String): ByteArray? {
+    val key = cacheKey(server, url)
+    inFlight[key]?.let { return it.await() }
     val deferred = CompletableDeferred<ByteArray?>()
-    val existing = inFlight.putIfAbsent(url, deferred)
+    val existing = inFlight.putIfAbsent(key, deferred)
     if (existing != null) return existing.await()
     try {
       val bytes = downloadGate.withPermit {
-        withContext(Dispatchers.IO) { fetch(url) ?: fetchOriginal(url) }
+        withContext(Dispatchers.IO) { fetch(server, url) ?: fetchOriginal(server, url) }
       }
       deferred.complete(bytes)
       return bytes
@@ -220,23 +325,26 @@ object EmbyImageLoader {
       // 发起方被取消（滑走了）：别让等待者吊死在永不完结的 Deferred 上
       deferred.complete(null)
       throw e
+    } catch (e: Exception) {
+      deferred.complete(null)
+      throw e
     } finally {
-      inFlight.remove(url)
+      inFlight.remove(key, deferred)
     }
   }
 
   /** 发起一次请求取字节；失败返回 null（内部已打日志）。 */
-  private fun fetch(url: String): ByteArray? = runCatching {
-    client.newCall(buildRequest(url)).execute().use { response ->
+  private fun fetch(server: EmbyServer, url: String): ByteArray? = runCatching {
+    client.newCall(EmbyRequestHeaders.request(server, url).build()).execute().use { response ->
       if (!response.isSuccessful) {
         // 400/401/403 多为鉴权问题，404 多为确实没有这张图，5xx 多为服务端处理失败
-        Log.w(TAG, "加载封面失败 HTTP ${response.code}: $url")
+        Log.w(TAG, "加载封面失败 HTTP ${response.code}")
         return@use null
       }
       response.body.bytes()
     }
-  }.onFailure { e ->
-    Log.w(TAG, "加载封面异常: ${e.message} | $url")
+  }.onFailure {
+    Log.w(TAG, "加载封面异常")
   }.getOrNull()
 
   /**
@@ -245,11 +353,11 @@ object EmbyImageLoader {
    * 有些 Emby 服务端只在「需要缩放」时才失败（500），取原图反而是好的；
    * 客户端 [decode] 会做降采样，所以取原图没有额外代价。
    */
-  private fun fetchOriginal(url: String): ByteArray? {
+  private fun fetchOriginal(server: EmbyServer, url: String): ByteArray? {
     val raw = stripResizeParams(url)
     if (raw == url) return null
-    Log.w(TAG, "改用原图重试: $raw")
-    return fetch(raw)
+    Log.w(TAG, "改用原图重试")
+    return fetch(server, raw)
   }
 
   /** 去掉图片缩放相关的 query 参数；没有这些参数时原样返回。 */
@@ -391,34 +499,20 @@ object EmbyImageLoader {
     }.getOrNull() ?: src
   }
 
+  /** Magic bytes accepted by the Android photo decoders used by this loader and Coil. */
+  internal fun hasSupportedImageSignature(bytes: ByteArray): Boolean {
+    fun starts(vararg values: Int): Boolean =
+      bytes.size >= values.size && values.indices.all { (bytes[it].toInt() and 0xff) == values[it] }
+    return isJpeg(bytes) || starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) ||
+      starts(0x47, 0x49, 0x46, 0x38) || starts(0x42, 0x4d) ||
+      (starts(0x52, 0x49, 0x46, 0x46) && bytes.size >= 12 &&
+        bytes.copyOfRange(8, 12).contentEquals("WEBP".toByteArray(Charsets.US_ASCII))) ||
+      sniffModernMime(bytes) != null
+  }
+
   /** Magic bytes 判定是否已是 JPEG（FF D8 FF）；「另存为 JPEG」时省一次转码。 */
   fun isJpeg(bytes: ByteArray): Boolean =
     bytes.size >= 3 &&
       bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()
 
-  /**
-   * 构造图片请求。
-   *
-   * 图片地址形如 `.../Images/Primary?maxWidth=480&quality=90&api_key=xxx`，
-   * 项目里 JSON 接口走的是 `X-Emby-Token` header，而图片/流地址只带 `api_key` query 参数。
-   * 不同 Emby 服务端对两者接受程度不一致，这里把 query 里的 token 再作为 header 发一份，
-   * 两种鉴权方式同时满足，避免「列表能加载、封面全空白」的情况。
-   */
-  private fun buildRequest(url: String): Request {
-    val builder = Request.Builder().url(url)
-    apiKeyOf(url)?.let { builder.header("X-Emby-Token", it) }
-    return builder.build()
-  }
-
-  /** 从 URL 的 query 中取出 api_key（可能经过 URL 编码）。 */
-  private fun apiKeyOf(url: String): String? {
-    val query = url.substringAfter('?', "")
-    if (query.isEmpty()) return null
-    return query
-      .split('&')
-      .firstOrNull { it.startsWith("api_key=") }
-      ?.substringAfter('=')
-      ?.takeIf { it.isNotBlank() }
-      ?.let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it) }
-  }
 }

@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext (HTTP) traffic for all domains -->
-    <!-- This is necessary for WebDAV, FTP, SMB, and other network protocols that may use HTTP -->
+    <!-- Allow user-configured HTTP Emby and reverse-routing endpoints. -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <!-- Trust system certificates -->

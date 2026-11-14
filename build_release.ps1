@@ -1,4 +1,4 @@
-﻿# CineIsle release 出包 + 复制到 F:\apk_release
+﻿# loembyA release 出包 + 复制到 F:\apk_release
 # 用法（PowerShell，管理员非必需）：
 #   .\build_release.ps1                 # 默认 arm64-v8a release
 #   .\build_release.ps1 -Abi x86_64     # 换 ABI
@@ -83,7 +83,7 @@ if (-not $apk -or -not (Test-Path $apk)) {
 # 4) 复制到 F:\apk_release，按项目命名约定带版本/ABI/时间戳，不覆盖旧包
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $stamp = Get-Date -Format "yyyyMMdd-HHmm"
-$dest = Join-Path $OutDir "CineIsle-v${VersionName}_${versionCode}-$Abi-release-$stamp.apk"
+$dest = Join-Path $OutDir "loembyA-v${VersionName}_${versionCode}-$Abi-release-$stamp.apk"
 Copy-Item -LiteralPath $apk -Destination $dest -Force
 
 # 5) 校验签名

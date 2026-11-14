@@ -42,6 +42,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.marlboroadvance.mpvex.R
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImage
 import app.marlboroadvance.mpvex.ui.cine.CineMediaUi
 import app.marlboroadvance.mpvex.ui.cine.CineTheme
@@ -63,12 +65,9 @@ fun CineHeroBanner(
   media: CineMediaUi,
   heroHeight: Dp,
   parallaxFraction: Float,
-  isFavorite: Boolean,
-  favoriteBusy: Boolean,
   primaryLabel: String,
   onPlay: () -> Unit,
   onOpenDetail: () -> Unit,
-  onToggleFavorite: () -> Unit,
   modifier: Modifier = Modifier,
   /**
    * 轮播页数 / 当前页。
@@ -85,6 +84,7 @@ fun CineHeroBanner(
    * 传 `0.dp` 让它彻底不画 —— 否则宽屏 Hero 上半截会莫名其妙比下半截暗。
    */
   topScrimHeight: Dp = 200.dp,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
@@ -137,9 +137,10 @@ fun CineHeroBanner(
         },
     ) {
       EmbyImage(
+        server = media.imageServer ?: server,
         url = imageUrl,
         fallbackUrl = media.posterUrl,
-        contentDescription = media.title,
+        contentDescription = media.item.Name,
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Crop,
         // Hero 是满宽出血，解码上限要给足：默认 720 在 1080p 竖屏上会明显糊
@@ -203,11 +204,6 @@ fun CineHeroBanner(
       ) {
         HeroPrimaryButton(label = primaryLabel, onClick = onPlay)
         HeroTonalButton(label = stringResource(R.string.cine_action_detail), onClick = onOpenDetail)
-        CineFavoriteButton(
-          isFavorite = isFavorite,
-          busy = favoriteBusy,
-          onClick = onToggleFavorite,
-        )
         // 指示点推到最右（设计稿 `.hero-dots{margin-left:auto}`），
         // 用 weight 占掉剩余空间 —— 用固定 spacer 在长标题/大字号下会顶出去
         if (pageCount > 1) {

@@ -21,11 +21,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.outlined.Cast
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -37,7 +33,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -50,6 +45,8 @@ import app.marlboroadvance.mpvex.R
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
 import app.marlboroadvance.mpvex.domain.emby.EmbyPerson
 import app.marlboroadvance.mpvex.domain.emby.EmbyTicks
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImage
 import app.marlboroadvance.mpvex.ui.cine.CineMediaUi
 import app.marlboroadvance.mpvex.ui.cine.CineTheme
@@ -83,17 +80,10 @@ internal fun CineDetailHero(
   wide: Boolean,
   cast: List<EmbyPerson>,
   castAvatarUrl: (EmbyPerson) -> String?,
-  isFavorite: Boolean,
-  isPlayed: Boolean,
-  favoriteBusy: Boolean,
   overviewExpanded: Boolean,
   onPlay: () -> Unit,
-  onToggleFavorite: () -> Unit,
-  onTogglePlayed: () -> Unit,
   onToggleOverview: () -> Unit,
   onOpenPerson: (EmbyPerson) -> Unit,
-  /** 投屏：`null` 表示这条没有可投的播放地址，圆钮不出现 */
-  onCast: (() -> Unit)? = null,
 ) {
   val colors = CineTheme.colors
   val space = CineTheme.space
@@ -116,6 +106,7 @@ internal fun CineDetailHero(
         .background(colors.skeleton),
     ) {
       EmbyImage(
+        server = media?.imageServer,
         url = media?.heroUrl ?: media?.posterUrl,
         fallbackUrl = media?.posterUrl,
         contentDescription = item.Name,
@@ -157,7 +148,8 @@ internal fun CineDetailHero(
           horizontalAlignment = Alignment.CenterHorizontally,
         ) {
           DetailTitleArea(
-            name = item.Name.orEmpty(),
+            server = media?.imageServer,
+            name = media?.title ?: item.displayTitle(),
             logoUrl = media?.logoUrl,
           )
 
@@ -202,37 +194,6 @@ internal fun CineDetailHero(
             progress = progress,
             onClick = onPlay,
           )
-
-          Spacer(Modifier.height(14.dp))
-          Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            CircleAction(
-              icon = Icons.Filled.Check,
-              contentDescription = stringResource(
-                if (isPlayed) R.string.cine_action_unmark_played else R.string.cine_action_mark_played,
-              ),
-              active = isPlayed,
-              onClick = onTogglePlayed,
-            )
-            CircleAction(
-              icon = if (isFavorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-              contentDescription = stringResource(
-                if (isFavorite) R.string.cine_action_unfavorite else R.string.cine_action_favorite,
-              ),
-              active = isFavorite,
-              enabled = !favoriteBusy,
-              onClick = onToggleFavorite,
-            )
-            // 投屏排在最后：前两颗是「这片子我什么状态」，投屏是「换块屏幕看」，
-            // 语义上离主按钮远一格，扫视时不会和播放混淆
-            if (onCast != null) {
-              CircleAction(
-                icon = Icons.Outlined.Cast,
-                contentDescription = stringResource(R.string.cine_cast_title),
-                active = false,
-                onClick = onCast,
-              )
-            }
-          }
 
           // 续播信息：主按钮里的进度条只说明「看到哪」，这里补上「还剩多少」
           if (progress != null && runtimeTicks > 0) {
@@ -303,6 +264,7 @@ internal fun CineDetailHero(
  */
 @Composable
 private fun DetailTitleArea(
+  server: EmbyServer?,
   name: String,
   logoUrl: String?,
 ) {
@@ -317,6 +279,7 @@ private fun DetailTitleArea(
       contentAlignment = Alignment.Center,
     ) {
       EmbyImage(
+        server = server,
         url = logoUrl,
         contentDescription = name,
         modifier = Modifier.fillMaxSize(),
@@ -459,47 +422,6 @@ private fun HeroPlayButton(
         overflow = TextOverflow.Ellipsis,
       )
     }
-  }
-}
-
-/**
- * 次操作圆钮（已看 / 收藏）。
- *
- * 默认是**描边空心**，激活才填主题色：这两个都是「开关」，未激活时用实心色块会和
- * 主按钮抢重量 —— 一屏里出现三个同样重的实心块，用户分不清哪个是「播放」。
- */
-@Composable
-private fun CircleAction(
-  icon: ImageVector,
-  contentDescription: String?,
-  active: Boolean,
-  onClick: () -> Unit,
-  enabled: Boolean = true,
-) {
-  val colors = CineTheme.colors
-
-  Box(
-    modifier = Modifier
-      .size(44.dp)
-      .clip(CircleShape)
-      .background(if (active) colors.progressFill else colors.chipSurface.copy(alpha = 0.55f))
-      .then(
-        if (active) {
-          Modifier
-        } else {
-          Modifier.border(1.dp, colors.chipBorder, CircleShape)
-        },
-      )
-      .pressDownScale()
-      .clickable(enabled = enabled, onClick = onClick),
-    contentAlignment = Alignment.Center,
-  ) {
-    Icon(
-      imageVector = icon,
-      contentDescription = contentDescription,
-      tint = if (active) colors.surface else colors.onSurfaceVariant,
-      modifier = Modifier.size(19.dp),
-    )
   }
 }
 

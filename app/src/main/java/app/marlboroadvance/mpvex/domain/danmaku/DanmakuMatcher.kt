@@ -64,10 +64,6 @@ object DanmakuMatcher {
     return Matched(anime, episode, comments, if (comments.isEmpty()) "这一集没有弹幕" else null)
   }
 
-  /** 手动搜番（用户在弹幕面板里搜片名）。返回**已按 [rankAnimes] 排序**的候选，第一条即推荐项。 */
-  suspend fun search(host: String, keyword: String, credentials: Credentials): List<DandanAnime> =
-    rankAnimes(keyword, DanmakuClient.searchAnime(host, keyword, credentials))
-
   /**
    * 给搜索结果打分并排序（分数高的在前；同分保留服务端原顺序 —— `sortedWith` 是稳定排序）。
    *
@@ -128,18 +124,6 @@ object DanmakuMatcher {
   /** 「不是用户在看的那部正片」的信号词：真人版 / 剧场版 / 电影。 */
   private val LIVE_ACTION_HINTS =
     listOf("真人", "実写", "实写", "剧场版", "劇場版", "电影", "映画", "电视剧版", "ドラマ")
-
-  /** 拿指定集的弹幕（手动匹配用）。 */
-  suspend fun fetchByEpisode(
-    host: String,
-    episodeId: Long,
-    credentials: Credentials,
-    withRelated: Boolean = false,
-  ): List<DanmakuComment> =
-    DanmakuCommentFilter.apply(
-      DanmakuClient.getComments(host, episodeId, credentials, withRelated),
-      emptyList(),
-    )
 
   private suspend fun fetch(
     host: String,
@@ -293,18 +277,6 @@ object DanmakuMatcher {
     return null
   }
 
-  /**
-   * 对**已解析成领域模型**的弹幕套屏蔽词。
-   *
-   * 为什么需要这一步：自动匹配那路在 [DanmakuClient] 之后就已经把 `p` 解好了，
-   * 直接再滤一遍即可，不必回到原始响应重解。
-   */
-  fun applyBlockWords(comments: List<DanmakuComment>, blockWords: List<String>): List<DanmakuComment> {
-    if (comments.isEmpty() || blockWords.isEmpty()) return comments
-    val words = blockWords.map { it.trim() }.filter { it.isNotEmpty() }
-    if (words.isEmpty()) return comments
-    return comments.filter { c -> words.none { c.text.contains(it, ignoreCase = true) } }
-  }
 }
 
 /**

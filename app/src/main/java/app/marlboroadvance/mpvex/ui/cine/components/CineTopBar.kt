@@ -1,7 +1,6 @@
 package app.marlboroadvance.mpvex.ui.cine.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,9 +15,9 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,11 +41,11 @@ import app.marlboroadvance.mpvex.ui.cine.CineTheme
  * 后者在阈值处会「弹」一下，前者是一条连续的过渡。
  *
  * ## 两态各管什么
- * - 展开态（[collapse] = 0）：菜单钮 + 品牌行 + 搜索胶囊，全部透明底，直接压在 Hero 图上；
+ * - 展开态（[collapse] = 0）：菜单钮 + 品牌行，全部透明底，直接压在 Hero 图上；
  * - 折叠态（[collapse] = 1）：52dp 玻璃条 + 下方 1dp 描边，从顶部浮起，Hero 滚出后接手。
  *
  * 左上角的菜单图标弹出侧边抽屉（[CineDrawerOverlay]）—— 老 UI AppBar 里的下载 / 维护 /
- * 直播 / 播放列表等功能全收在那里，顶栏只留「菜单 + 搜索」两个动作。
+ * 直播 / 播放列表等功能全收在那里，顶栏只留「返回 + 菜单」两个动作。
  *
  * `collapse = heroOffset / 120` 并 clamp 0..1（设计稿 05 的标注）：用 120 而不是 Hero 全高，
  * 是因为 Hero 有 500dp 以上，滚到一半才开始折叠的话，用户在 Hero 上滑时顶栏一直处于
@@ -61,14 +60,13 @@ fun CineTopBar(
   collapse: Float,
   title: String,
   onOpenDrawer: () -> Unit,
-  onSearch: () -> Unit,
   modifier: Modifier = Modifier,
+  onBackToServers: (() -> Unit)? = null,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
   val space = CineTheme.space
   val c = collapse.coerceIn(0f, 1f)
-  val pillShape = remember { RoundedCornerShape(50) }
   val barShape = remember { RoundedCornerShape(18.dp) }
 
   Box(modifier = modifier.fillMaxWidth()) {
@@ -94,6 +92,12 @@ fun CineTopBar(
       ) {
         // 折叠态的底是玻璃条（浅色主题下是浅色），图标必须走 onSurfaceVariant；
         // 写死白色时浅色主题下这些按钮会彻底消失 —— 用户从此找不到抽屉和搜索入口。
+        if (onBackToServers != null) TopBarIconButton(
+          icon = Icons.AutoMirrored.Rounded.ArrowBack,
+          label = stringResource(R.string.app_back_to_servers),
+          tint = colors.onSurfaceVariant,
+          onClick = onBackToServers,
+        )
         TopBarIconButton(
           icon = Icons.Default.Menu,
           label = null,
@@ -108,16 +112,10 @@ fun CineTopBar(
           overflow = TextOverflow.Ellipsis,
           modifier = Modifier.weight(1f),
         )
-        TopBarIconButton(
-          icon = Icons.Outlined.Search,
-          label = null,
-          tint = colors.onSurfaceVariant,
-          onClick = onSearch,
-        )
       }
     }
 
-    // ── 展开态：品牌行 + 搜索胶囊（压在图上的透明层） ──
+    // ── 展开态：品牌行（压在图上的透明层） ──
     Column(
       modifier = Modifier
         .fillMaxWidth()
@@ -136,6 +134,12 @@ fun CineTopBar(
         verticalAlignment = Alignment.CenterVertically,
       ) {
         // 展开态压在 Hero 图上 ⇒ 白色图标 + Hero 顶部压暗层，两者配合才可读
+        if (onBackToServers != null) TopBarIconButton(
+          icon = Icons.AutoMirrored.Rounded.ArrowBack,
+          label = stringResource(R.string.app_back_to_servers),
+          tint = colors.onImage,
+          onClick = onBackToServers,
+        )
         TopBarIconButton(
           icon = Icons.Default.Menu,
           label = null,
@@ -158,52 +162,8 @@ fun CineTopBar(
           maxLines = 1,
         )
         Spacer(Modifier.weight(1f))
-        TopBarIconButton(
-          icon = Icons.Outlined.Search,
-          label = null,
-          tint = colors.onImage,
-          onClick = onSearch,
-        )
       }
 
-      Spacer(Modifier.height(8.dp))
-
-      // 搜索胶囊是**入口不是输入框**：点一下进全屏搜索页。
-      // 在首页就地展开输入框会把 Hero 的视觉重心抢走，而且软键盘弹起后 Hero 会被顶掉一半。
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          // 设计稿 .searchpill 是 44dp（v131 做成了 40，比设计稿矮一档，按上去手感偏薄）
-          .height(44.dp)
-          // 压在剧照上的玻璃要换**白色** tint（设计稿 rgba(255,255,255,.14)）：
-          // 用表面色会在深色主题下把剧照压得更暗，看着像块污渍
-          .cineGlass(
-            shape = pillShape,
-            elevation = 0.dp,
-            blurRadius = 16.dp,
-            flatAlpha = 0.18f,
-            tintOverride = colors.badgeGhostSurface,
-            borderColor = colors.badgeGhostBorder,
-          )
-          .clickable(onClick = onSearch)
-          .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp),
-      ) {
-        Icon(
-          imageVector = Icons.Outlined.Search,
-          contentDescription = null,
-          tint = colors.onImageMuted,
-          modifier = Modifier.size(16.dp),
-        )
-        Text(
-          text = stringResource(R.string.cine_search_hint),
-          style = type.meta,
-          color = colors.onImageMuted,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
     }
   }
 }
@@ -236,20 +196,19 @@ private fun TopBarIconButton(
  * 宽屏（≥600dp）的静态顶栏。
  *
  * 宽屏上**不做折叠**：Hero 不再是「满屏出血 + 顶栏压在上面」的结构（内容区两侧有边距、
- * Hero 高度也降到 392dp），顶栏退回到普通的一行 —— 菜单 + 品牌 + 搜索。
+ * Hero 高度也降到 392dp），顶栏退回到普通的一行 —— 返回 + 菜单 + 品牌。
  * 折叠动效在宽屏反而会让一块 88dp 宽的 Rail 上方多出一条会滑动的横条，很乱。
  */
 @Composable
 fun CineWideHeader(
   title: String,
   onOpenDrawer: () -> Unit,
-  onSearch: () -> Unit,
   modifier: Modifier = Modifier,
+  onBackToServers: (() -> Unit)? = null,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
   val space = CineTheme.space
-  val pillShape = remember { RoundedCornerShape(50) }
 
   Row(
     modifier = modifier
@@ -260,7 +219,13 @@ fun CineWideHeader(
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(16.dp),
   ) {
-    // 左上角菜单图标：弹侧边抽屉（下载 / 维护 / 直播 / 设置等功能都收在里面）
+    if (onBackToServers != null) TopBarIconButton(
+      icon = Icons.AutoMirrored.Rounded.ArrowBack,
+      label = stringResource(R.string.app_back_to_servers),
+      tint = colors.onSurfaceVariant,
+      onClick = onBackToServers,
+    )
+    // 左上角菜单图标：打开只读发现、合集和设置入口。
     Box(
       modifier = Modifier
         .size(42.dp)
@@ -294,31 +259,6 @@ fun CineWideHeader(
       )
     }
 
-    Row(
-      modifier = Modifier
-        .weight(1f)
-        .height(42.dp)
-        .clip(pillShape)
-        .background(colors.chipSurface)
-        .border(1.dp, colors.chipBorder, pillShape)
-        .clickable(onClick = onSearch)
-        .padding(horizontal = 14.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(9.dp),
-    ) {
-      Icon(
-        imageVector = Icons.Outlined.Search,
-        contentDescription = null,
-        tint = colors.onSurfaceVariant,
-        modifier = Modifier.size(17.dp),
-      )
-      Text(
-        text = stringResource(R.string.cine_search_hint),
-        style = type.meta,
-        color = colors.onSurfaceVariant,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-    }
+    Spacer(Modifier.weight(1f))
   }
 }

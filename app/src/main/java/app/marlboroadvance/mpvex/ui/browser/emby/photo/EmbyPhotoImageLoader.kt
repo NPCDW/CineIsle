@@ -1,7 +1,9 @@
 package app.marlboroadvance.mpvex.ui.browser.emby.photo
 
 import android.content.Context
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImageLoader
+import app.marlboroadvance.mpvex.ui.browser.emby.components.NetworkImageCachePolicy
 import coil3.ImageLoader
 import coil3.disk.DiskCache
 import coil3.decode.DataSource
@@ -10,11 +12,16 @@ import coil3.fetch.FetchResult
 import coil3.fetch.Fetcher
 import coil3.fetch.SourceFetchResult
 import coil3.memory.MemoryCache
+import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import coil3.request.Options
 import coil3.size.Size
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okio.Buffer
 import okio.FileSystem
+import okio.Path.Companion.toOkioPath
 
 /**
  * 一张 Emby 照片的取图请求（Coil 的 `data`）。
@@ -24,7 +31,9 @@ import okio.FileSystem
  * 也不会在「服务端缩放失败」时退回原图）。套一层壳之后，只有下面这个
  * [EmbyPhotoFetcher.Factory] 会接它。
  */
-data class EmbyPhotoUrl(val url: String)
+data class EmbyPhotoUrl(val url: String, val server: EmbyServer) {
+  override fun toString(): String = "EmbyPhotoUrl([redacted])"
+}
 
 /**
  * 照片链路的图片加载器（Coil 3）。
@@ -49,20 +58,7 @@ object EmbyPhotoImageLoader {
   /** 磁盘缓存上限。照片比封面大得多，但也不该无限涨 */
   private const val DISK_LIMIT_BYTES = 128L * 1024 * 1024
 
-  /**
-   * 磁盘缓存目录名（挂在系统临时目录 [FileSystem.SYSTEM_TEMPORARY_DIRECTORY] 下）。
-   *
-   * ⭐ 这一项是**必需**的：[DiskCache.Builder.build] 里是
-   *    `checkNotNull(directory) { "directory == null" }`，而 `Builder()` 构造时
-   *    **不会**给目录赋默认值（已 javap 核验 coil-core 3.6.3：`<init>` 只设了
-   *    fileSystem / maxSizePercent / minimumMaxSizeBytes / maxSizeBytes，没有 directory）。
-   *
-   *    以前这里写成 `DiskCache.Builder().maxSizeBytes(...).build()` ⇒ 一建缓存就抛
-   *    `IllegalStateException: directory == null`。因为 `ImageLoader` 是懒加载单例，
-   *    异常发生在图片请求协程里、被 Coil 兜成 `ErrorResult` ⇒ 表现为「照片加载不出来、
-   *    点重载也没反应」。网络照片链路（[app.marlboroadvance.mpvex.ui.browser.networkstreaming.photos.NetworkPhotoImageLoader]）
-   *    是同一个坑，一起修了。
-   */
+  /** 磁盘缓存目录名（位于应用 [Context.cacheDir]，随系统缓存语义清理）。 */
   private const val EMBY_IMAGE_CACHE_DIR = "emby_photo_cache"
 
   /**
@@ -86,10 +82,10 @@ object EmbyPhotoImageLoader {
   private fun build(context: Context): ImageLoader =
     ImageLoader.Builder(context)
       .components { add(EmbyPhotoFetcher.Factory(), EmbyPhotoUrl::class) }
-      .memoryCache { MemoryCache.Builder().maxSizePercent(context, MEMORY_PERCENT).build() }
+      .memoryCache { MemoryCache.Builder().maxSizePercent(context, MEMORY_PERCENT).weakReferencesEnabled(false).build() }
       .diskCache {
         DiskCache.Builder()
-          .directory(FileSystem.SYSTEM_TEMPORARY_DIRECTORY.resolve(EMBY_IMAGE_CACHE_DIR))
+          .directory(context.cacheDir.resolve(EMBY_IMAGE_CACHE_DIR).toOkioPath())
           .maxSizeBytes(DISK_LIMIT_BYTES)
           .build()
       }
@@ -98,20 +94,37 @@ object EmbyPhotoImageLoader {
   /**
    * 构造图片请求。
    *
-   * 缓存键**显式给 URL**：`data` 是我们自己的类型，Coil 没有内置的 Keyer 认识它，
+   * 缓存键**显式隔离来源、行身份与 URL**：`data` 是我们自己的类型，Coil 没有内置的 Keyer 认识它，
    * 不给会退化成「每次请求都是一个新键」，缓存等于没有。
    *
    * `size = [Size.ORIGINAL]`：照片要能放大看细节，**不按屏幕尺寸降采样**。
    * 内存靠两道闸兜住：① URL 里已经带 `maxWidth`（服务端先缩放过），
    * ② 上面那个按百分比的内存缓存上限。
    */
-  fun request(context: Context, url: String): ImageRequest =
-    ImageRequest.Builder(context)
-      .data(EmbyPhotoUrl(url))
-      .memoryCacheKey(url)
-      .diskCacheKey(url)
+  fun request(context: Context, url: String, server: EmbyServer): ImageRequest {
+    val key = cacheKey(server, url)
+    return ImageRequest.Builder(context)
+      .data(EmbyPhotoUrl(url, server))
+      .memoryCacheKey(key)
+      .diskCacheKey(key)
+      .memoryCachePolicy(memoryCachePolicy(key))
+      .diskCachePolicy(CachePolicy.DISABLED)
       .size(Size.ORIGINAL)
       .build()
+  }
+
+  internal fun cacheKey(server: EmbyServer, url: String): String = EmbyImageLoader.cacheKey(server, url)
+
+  internal fun memoryCachePolicy(key: String, now: Long = System.currentTimeMillis()): CachePolicy =
+    if (NetworkImageCachePolicy.memoryFresh(key, now)) CachePolicy.ENABLED else CachePolicy.WRITE_ONLY
+
+  fun evict(context: Context, url: String, server: EmbyServer) {
+    val key = cacheKey(server, url)
+    val loader = get(context)
+    loader.memoryCache?.remove(MemoryCache.Key(key))
+    loader.diskCache?.remove(key)
+    NetworkImageCachePolicy.forget(key)
+  }
 
   /**
    * 预取：把图拉进缓存，等真滑到那张时直接命中（不白屏）。
@@ -122,12 +135,18 @@ object EmbyPhotoImageLoader {
    *
    * ⚠️ 必须在 IO 线程调用（内部有网络 + 解码）。
    */
-  suspend fun preload(context: Context, url: String?, fallbackUrl: String? = null) {
+  suspend fun preload(context: Context, url: String?, fallbackUrl: String? = null, server: EmbyServer) {
     if (url.isNullOrBlank()) return
     val loader = get(context)
-    val result = runCatching { loader.execute(request(context, url)) }.getOrNull()
-    if (result is coil3.request.ErrorResult && !fallbackUrl.isNullOrBlank() && fallbackUrl != url) {
-      runCatching { loader.execute(request(context, fallbackUrl)) }
+    try {
+      val result = loader.execute(request(context, url, server))
+      if (result is coil3.request.ErrorResult && !fallbackUrl.isNullOrBlank() && fallbackUrl != url) {
+        loader.execute(request(context, fallbackUrl, server))
+      }
+    } catch (e: CancellationException) {
+      throw e
+    } catch (_: Exception) {
+      // 无效来源或加载失败仅跳过预热，不切换到另一服务器。
     }
   }
 }
@@ -138,16 +157,58 @@ object EmbyPhotoImageLoader {
  * 失败一律抛异常 —— Coil 会把它转成 `AsyncImagePainter.State.Error`，
  * 界面那边据此显示占位图 + 重试（见 EmbyPhotoImage）。
  */
-private class EmbyPhotoFetcher(private val url: String) : Fetcher {
-  override suspend fun fetch(): FetchResult {
-    val bytes = EmbyImageLoader.downloadBytes(url)
-      ?: throw java.io.IOException("照片下载失败: $url")
-    val buffer = Buffer().write(bytes)
-    return SourceFetchResult(
-      source = ImageSource(source = buffer, fileSystem = FileSystem.SYSTEM, metadata = null),
+private class EmbyPhotoFetcher(
+  private val data: EmbyPhotoUrl,
+  private val key: String,
+  private val disk: DiskCache?,
+) : Fetcher {
+  override suspend fun fetch(): FetchResult = withContext(Dispatchers.IO) {
+    val cached = readCache()
+    val bytes = cached?.first ?: EmbyImageLoader.downloadBytes(data.server, data.url)
+      ?.takeIf(EmbyImageLoader::hasSupportedImageSignature)
+      ?: throw java.io.IOException("照片下载失败")
+    val writtenAt = cached?.second ?: System.currentTimeMillis().also {
+      if (!writeCache(bytes, it)) NetworkImageCachePolicy.forget(key)
+    }
+    NetworkImageCachePolicy.record(key, writtenAt)
+    SourceFetchResult(
+      source = ImageSource(source = Buffer().write(bytes), fileSystem = FileSystem.SYSTEM, metadata = null),
       mimeType = null,
-      dataSource = DataSource.NETWORK,
+      dataSource = if (cached != null) DataSource.DISK else DataSource.NETWORK,
     )
+  }
+
+  private fun readCache(): Pair<ByteArray, Long>? {
+    val cache = disk ?: return null
+    val snapshot = runCatching { cache.openSnapshot(key) }.getOrNull() ?: return null
+    val result = snapshot.use {
+      runCatching {
+        val metadata = cache.fileSystem.read(it.metadata) { readUtf8() }
+        val writtenAt = NetworkImageCachePolicy.metadataTimestamp(metadata) ?: return@runCatching null
+        val bytes = cache.fileSystem.read(it.data) { readByteArray() }
+        bytes.takeIf(EmbyImageLoader::hasSupportedImageSignature)?.let { value -> value to writtenAt }
+      }.getOrNull()
+    }
+    if (result == null) {
+      cache.remove(key)
+      NetworkImageCachePolicy.forget(key)
+    }
+    return result
+  }
+
+  private fun writeCache(bytes: ByteArray, writtenAt: Long): Boolean {
+    val cache = disk ?: return false
+    val editor = runCatching { cache.openEditor(key) }.getOrNull() ?: return false
+    return try {
+      cache.fileSystem.write(editor.data) { write(bytes) }
+      cache.fileSystem.write(editor.metadata) { writeUtf8(writtenAt.toString()) }
+      editor.commit()
+      true
+    } catch (_: Exception) {
+      runCatching { editor.abort() }
+      cache.remove(key)
+      false
+    }
   }
 
   class Factory : Fetcher.Factory<EmbyPhotoUrl> {
@@ -155,6 +216,9 @@ private class EmbyPhotoFetcher(private val url: String) : Fetcher {
       data: EmbyPhotoUrl,
       options: Options,
       imageLoader: ImageLoader,
-    ): Fetcher = EmbyPhotoFetcher(data.url)
+    ): Fetcher {
+      val key = options.diskCacheKey ?: EmbyImageLoader.cacheKey(data.server, data.url)
+      return EmbyPhotoFetcher(data, key, imageLoader.diskCache)
+    }
   }
 }

@@ -33,12 +33,12 @@ android {
       ?: if (project.hasProperty("arm64Only")) "arm64-v8a" else null
 
   defaultConfig {
-    // 应用标识（安装包名）：不再沿用上游的 app.marlboroadvance.mpvex，
-    // 改为项目自身的 app.cineisle.player。namespace 保持不动 ——
-    // 它只决定 R / BuildConfig 的生成包名，改名会牵动全量源码，收益为零。
-    applicationId = "app.cineisle.player"
+    // 应用标识（安装包名）：使用 loembyA 自身的 com.github.npcdw.loembya。
+    // namespace 保持不动，它决定源码组件与 R / BuildConfig 的包名。
+    applicationId = "com.github.npcdw.loembya"
     minSdk = 26
     targetSdk = 36
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     // versionCode 决定能否覆盖安装：每发一版都要涨（APK 里的最终值 = versionCode * 10 + ABI 码）
     // versionCode 62（versionName 仍为 1.5.4，功能轮但不涨名）：网络浏览合并照片库能力 ——
     //   ① SMB/WebDAV/FTP 目录按「文件夹 / 图片 / 视频 / 其他」四分法混合展示，
@@ -3014,15 +3014,14 @@ android {
     //  · 原来叫「显示封面图」，容易被理解成「全局图片开关」；它实际只管**文件夹卡**的封面
     //    （图片 / 视频自己的缩略图另一条链路，不受它约束）。
     // ────────────────────────────────────────────────────────────────────────
-    versionCode = 236
-    versionName = "1.6.14"
+    versionCode = 237
+    versionName = "0.1.0"
 
     vectorDrawables {
       useSupportLibrary = true
     }
 
     buildConfigField("String", "GIT_SHA", "\"${getCommitSha()}\"")
-    buildConfigField("int", "GIT_COUNT", getCommitCount())
 
     // ── dandanplay 开放平台凭证（可选，**刻意不硬编码**）──
     // 为什么走 local.properties 而不是写死：
@@ -3042,21 +3041,18 @@ android {
       dimension = "distribution"
       isDefault = true
       buildConfigField("boolean", "ENABLE_UPDATE_FEATURE", "true")
-      buildConfigField("boolean", "SCOPED_STORAGE_ONLY", "false")
     }
 
     create("playstore") {
       dimension = "distribution"
       versionNameSuffix = "-playstore"
       buildConfigField("boolean", "ENABLE_UPDATE_FEATURE", "false")
-      buildConfigField("boolean", "SCOPED_STORAGE_ONLY", "true")
     }
 
     create("fdroid") {
       dimension = "distribution"
       versionNameSuffix = "-fdroid"
       buildConfigField("boolean", "ENABLE_UPDATE_FEATURE", "false")
-      buildConfigField("boolean", "SCOPED_STORAGE_ONLY", "false")
 
       ndk {
         // 与 splits 的 ABI 过滤互斥：单包模式（-Pabi / -Parm64Only）下必须留空，否则 AGP 直接报配置冲突
@@ -3095,11 +3091,15 @@ android {
   }
   val releaseKeystoreFile: File? =
     keystoreProps.getProperty("storeFile")?.trim()?.takeIf { it.isNotEmpty() }?.let { rootProject.file(it) }
-  val hasReleaseKeystore = releaseKeystoreFile?.exists() == true
+  val releaseStorePassword = keystoreProps.getProperty("storePassword")?.takeIf { it.isNotBlank() }
+  val releaseKeyAlias = keystoreProps.getProperty("keyAlias")?.takeIf { it.isNotBlank() }
+  val releaseKeyPassword = keystoreProps.getProperty("keyPassword")?.takeIf { it.isNotBlank() }
+  val hasReleaseKeystore = releaseKeystoreFile?.exists() == true &&
+    releaseStorePassword != null && releaseKeyAlias != null && releaseKeyPassword != null
 
   if (!hasReleaseKeystore) {
     logger.lifecycle(
-      "[CineIsle] 未找到 keystore.properties 或 jks 文件，release 变体将产出未签名 APK。"
+      "[loembyA] 未找到完整 release 签名配置（storeFile/storePassword/keyAlias/keyPassword），将产出未签名 APK。"
     )
   }
 
@@ -3107,9 +3107,9 @@ android {
     if (hasReleaseKeystore) {
       create("release") {
         storeFile = releaseKeystoreFile
-        storePassword = keystoreProps.getProperty("storePassword")
-        keyAlias = keystoreProps.getProperty("keyAlias")
-        keyPassword = keystoreProps.getProperty("keyPassword")
+        storePassword = releaseStorePassword
+        keyAlias = releaseKeyAlias
+        keyPassword = releaseKeyPassword
         // minSdk 26 → V2 已全线支持，无需 V1（省掉 META-INF 里的冗余签名文件）。
         enableV1Signing = false
         enableV2Signing = true
@@ -3159,21 +3159,15 @@ android {
   // ── 测试（清单 1.2）──
   sourceSets {
     getByName("androidTest") {
-      // Room 迁移测试靠 MigrationTestHelper 从 **assets** 里读导出的 schema
-      // （路径固定为 schema/<canonicalName 首字母小写>/<version>.json，
-      //   本项目即 schema/app.marlboroadvance.mpvex.database.mpvExDatabase/12.json）。
-      // 不把 $projectDir/schemas 挂进 androidTest assets 的话，
-      // createDatabase()/runMigrationsAndValidate() 会全部抛
-      //「Unable to find schema file」—— 测试代码写得再对也一条都跑不了。
-      assets.srcDirs("$projectDir/schemas")
+      // Room 2.8 的 MigrationTestHelper 按 databaseClass.canonicalName 原样查找：
+      // app.marlboroadvance.mpvex.database.MpvExDatabase/<version>.json。
+      // 同时保留历史小写目录，供旧测试资产/旧版本 schema 使用。
+      assets.directories.add("$projectDir/schemas")
     }
   }
 
   testOptions {
     unitTests {
-      // Robolectric 需要 android.jar 的全部资源（不只是桩方法），
-      // 不开这个它读不到主题/字符串，纯逻辑测试也会在初始化时炸。
-      isIncludeAndroidResources = true
       isReturnDefaultValues = true
     }
   }
@@ -3187,9 +3181,6 @@ android {
     // 警告不阻断出包，但会写进报告供体检用。
     warningsAsErrors = false
     checkDependencies = false
-    // 项目里大量日志用的是 android.util.Log 而不是封装类，
-    // 这条与本项目现状相悖，直接关掉免得刷屏。
-    disable += "LogDetector"
     // release 变体的 lint 检查很慢（实测 lintVitalAnalyze 要 7 分钟），
     // 日常出包关掉；上线前体检加 -PlintVital=true 跑一次。
     // 与下面那段 tasks.matching { name.startsWith("lintVital") } 开关是同一件事，
@@ -3259,7 +3250,6 @@ kotlin {
     freeCompilerArgs.addAll(
       "-Xcontext-parameters",
       "-Xannotation-default-target=param-property",
-      "-opt-in=com.google.accompanist.permissions.ExperimentalPermissionsApi",
       "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
       // 视界流翻页要用 VerticalPager（来自 androidx.compose.foundation）
       "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi"
@@ -3273,6 +3263,9 @@ composeCompiler {
   // release 打开会给每个 composable 塞额外字符串元数据：Compose 编译器更慢、
   // R8 要处理的代码量更大（R8 占 release 构建 6m31s），产物也更大。
   includeSourceInformation = false
+  // Compose mapping only feeds tooling/obfuscation diagnostics and pulls an extra artifact.
+  // Disable it so offline release builds remain reproducible with the checked dependency cache.
+  includeComposeMappingFile = false
 }
 
 room {
@@ -3284,6 +3277,7 @@ dependencies {
   // 应用锁判「是不是真的退出了 App」用 ProcessLifecycleOwner（进程级生命周期）——
   // 它不在 activity-compose 的传递依赖里，必须显式声明；版本与 lifecycle-runtime 对齐（2.10.0）。
   implementation("androidx.lifecycle:lifecycle-process:2.10.0")
+  implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.ui)
   implementation(libs.androidx.ui.graphics)
@@ -3298,8 +3292,6 @@ dependencies {
   implementation("androidx.preference:preference-ktx:1.2.1")
   implementation("androidx.constraintlayout:constraintlayout:2.2.0")
   implementation(libs.androidx.material3.icons.extended)
-  implementation(libs.androidx.compose.animation.graphics)
-  // 视界流（仿抖音竖屏连播）：ExoPlayer 多实例 + Compose VerticalPager。
   // foundation 显式声明是为了 VerticalPager —— 原来它是靠 ui 传递进来的，
   // 现在翻页是视界流的核心路径，不该依赖传递关系。
   implementation(libs.androidx.compose.foundation)
@@ -3308,12 +3300,6 @@ dependencies {
   // 「透出下面内容并磨砂」的效果只能靠它。
   // ⚠️ 只在 ui/cine/** 里用；Classic 界面零引用，所以对老 UI 的实际影响为 0。
   implementation(libs.haze)
-  implementation(libs.androidx.media3.exoplayer)
-  implementation(libs.androidx.media3.ui)
-  // 视界流的 FFmpeg 软解兜底（音频 DTS/TrueHD/AC3/EAC3 + 视频 H264/HEVC/MPEG-2/VP8/VP9）。
-  // 只在平台解码器不支持/不吐帧时由 ExoPlayer 的扩展渲染器接管；不会抢平台硬解。
-  // ⚠️ 该库为 GPL-3.0（见 libs.versions.toml 注释），发布前要确认分发义务。
-  implementation(libs.nextlib.media3ext)
   implementation(libs.mediasession)
   implementation(libs.androidx.documentfile)
   implementation(libs.saveable)
@@ -3321,19 +3307,21 @@ dependencies {
   implementation(platform(libs.koin.bom))
   implementation(libs.bundles.koin)
 
-  implementation(libs.seeker)
   implementation(libs.compose.prefs)
   implementation(libs.aboutlibraries.compose.m3)
 
-  implementation(libs.accompanist.permissions)
 
   implementation(libs.room.runtime)
   ksp(libs.room.compiler)
-  implementation(libs.room.ktx)
 
   implementation(libs.kotlinx.immutable.collections)
   implementation(libs.kotlinx.serialization.json)
+  implementation(libs.postgresql)
   implementation(libs.okhttp)
+  implementation(libs.ktor.server.cio)
+  implementation(libs.brotli.dec)
+  // Android AAR supplies ABI-specific zstd JNI; the desktop JAR cannot load on Android.
+  implementation("com.github.luben:zstd-jni:${libs.versions.zstd.get()}@aar")
 
   // 弹幕：DanmakuFlameMaster **源码内置**（v115）—— 源码在 app/src/main/java/master/flame/danmaku/
   // （+ tv/cjump/jni/），解析仍走我们自己的 parser（见 domain/danmaku/）。
@@ -3354,47 +3342,15 @@ dependencies {
   // ⚠️ 刻意**没有**引官方的 coil-network-okhttp：那套网络实现不知道 Emby 的鉴权，
   //    引了还要跟我们自己的 Fetcher 抢 String 类型的请求。
   implementation(libs.coil.compose)
-  // Coil 的视频首帧解码器：上传选择器的相册网格要显示视频缩略图。
-  // 没有它，`content://media/external/video/...` 会被当普通图片交给 BitmapFactory，必然失败。
-  implementation(libs.coil.video)
-  // DLNA 投屏：UPnPCast 源码内置在 app/src/main/java/com/yinnho/upnpcast/ 下（同 embyclient 的做法），
-  // 版本为上游 master / v1.3.0。
-  // 为什么不用 Maven Central 的 com.yinnho.upnpcast:upnpcast:1.1.2：
-  //   1.1.2 的 SSDP 有致命缺陷 —— SO_REUSEADDR 在 bind 之后才设置（等于没设）、1900 端口被占就再
-  //   也搜不到设备、去重表跨搜索不清空（第二次搜索起永远返回空列表，必须重启 App）、
-  //   search() 一发现首个设备就返回导致列表不全、location 无端口时拼出 http://host:-1/...、
-  //   本地文件一律用 application/octet-stream（部分电视直接拒收）。
-  //   这些正是 1.2.0 的修复项（upstream CHANGELOG 逐条对应：discovery #1 / MulticastLock /
-  //   Control URL / search() semantics / MIME by extension）。1.3.0 只上了 JitPack，
-  //   Maven Central 仍停留在 1.1.2，所以直接内置源码。
-  // 运行时依赖：kotlinx.coroutines + nanohttpd（均已在本文件声明）。
 
     implementation(libs.truetype.parser)
     implementation(libs.fsaf)
     implementation(libs.mediainfo.lib)
     implementation(libs.mpv.android)
 
-    // GSYVideoPlayer —— 双播放内核中的第二个内核（默认仍是 mpv）
-    // java = 播放器 View + IJK Java 绑定；exo2 = GSY 的 ExoPlayer 内核；
-    // arm64 / armv7a / x86 / x64 = IJK 的原生 so（按 ABI 拆包，缺了 IJK 起不来）。
-    implementation(libs.gsy.java)
-    implementation(libs.gsy.exo2)
-    implementation(libs.gsy.arm64)
-    implementation(libs.gsy.armv7a)
-    implementation(libs.gsy.x86)
-    implementation(libs.gsy.x64)
-
-    // Network protocol libraries
-    implementation(libs.smbj)
-    implementation(libs.commons.net)
-    implementation(libs.sardine.android) {
-        exclude(group = "xpp3", module = "xpp3")
-    }
-    implementation(libs.nanohttpd)
     // v178：侧边滚动条改成自绘（ui/utils/SideScrollbar.kt），不再依赖 LazyColumnScrollbar。
     // 库的拖动实现每帧起协程 + 连做两次 scrollToItem（先回跳到行首、再落到真实位置），
     // 慢拖时画面来回抽搐，且无法从外部关闭该行为 —— 直接去掉依赖，漏改的调用点会编译报错。
-    implementation(libs.reorderable)
 
     // ── Emby Java SDK (OpenAPI 生成) ──
     // 源码 `app/src/main/java/embyclient/` 已从 sourceSet 排除（见上方 android{} 里的说明），
@@ -3414,17 +3370,16 @@ dependencies {
     //   testImplementation  → JVM 单测（分页状态机、错误分类、正则筛选、排序…），秒级
     //   androidTestImplementation → Room 迁移测试（MigrationTestHelper 需要真 SQLite）
     testImplementation(libs.junit)
-    testImplementation(libs.robolectric)
+    // JVM tests use desktop JNI, while production retains the Android-only AAR above.
+    testRuntimeOnly("com.github.luben:zstd-jni:${libs.versions.zstd.get()}")
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.truth)
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
 
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.core)
-    androidTestImplementation(libs.androidx.test.core.ktx)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
-    androidTestImplementation(libs.kotlinx.coroutines.test)
-    androidTestImplementation(libs.truth)
     androidTestImplementation(libs.room.testing)
 }
 
@@ -3453,7 +3408,7 @@ dependencies {
 /**
  * 本机可用的 git 可执行文件（找不到就是 null）。
  *
- * 为什么要先找绝对路径：本机 git **不在 PATH 上**（只有 GitHub Desktop 自带的那份），
+ * 优先使用 GIT_EXE；否则检查 PATH 与 GitHub Desktop 的内置 Git。
  * 直接 exec "git" 必然起不来；而配置期起外部进程失败会让 Gradle 9 判定配置缓存无效
  * （实测报 "failed to compute value with custom source ... starting process 'command 'git''"，
  * 缓存每次被丢弃）。所以只在**确认文件存在**时才真的调用。
@@ -3461,6 +3416,9 @@ dependencies {
 fun findGitExecutable(): String? {
   val candidates = mutableListOf<String>()
   System.getenv("GIT_EXE")?.let(candidates::add)
+  System.getenv("PATH")?.split(File.pathSeparator)?.forEach { directory ->
+    candidates += File(directory, if (System.getProperty("os.name").startsWith("Windows", true)) "git.exe" else "git").absolutePath
+  }
   val ghRoot = System.getenv("LOCALAPPDATA")?.let { File(it, "GitHubDesktop") }
   ghRoot
     ?.listFiles()

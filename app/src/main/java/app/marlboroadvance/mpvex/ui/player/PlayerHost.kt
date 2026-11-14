@@ -20,6 +20,9 @@ interface PlayerHost {
   val hostWindowManager: WindowManager
   val hostContentResolver: ContentResolver
   var hostRequestedOrientation: Int
+
+  /** Player-specific manual rotation; non-Activity hosts may ignore it. */
+  fun rotatePlayerScreen() {}
   
   fun requestAudioFocus(): Boolean
   fun abandonAudioFocus()

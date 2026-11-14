@@ -23,8 +23,6 @@ import androidx.compose.material.icons.outlined.Label
 import androidx.compose.material.icons.outlined.Segment
 import androidx.compose.material.icons.outlined.Subtitles
 import androidx.compose.material.icons.outlined.SwapVert
-import androidx.compose.material.icons.outlined.Title
-import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -35,7 +33,6 @@ import androidx.compose.ui.unit.dp
 import app.marlboroadvance.mpvex.R
 import app.marlboroadvance.mpvex.preferences.AppearancePreferences
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
-import app.marlboroadvance.mpvex.preferences.GesturePreferences
 import app.marlboroadvance.mpvex.preferences.MultiChoiceSegmentedButton
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
@@ -63,7 +60,6 @@ object AppearancePreferencesScreen : Screen {
     override fun Content() {
         val preferences = koinInject<AppearancePreferences>()
         val browserPreferences = koinInject<BrowserPreferences>()
-        val gesturePreferences = koinInject<GesturePreferences>()
         val backstack = LocalBackStack.current
         val systemDarkTheme = isSystemInDarkTheme()
 
@@ -228,121 +224,12 @@ object AppearancePreferencesScreen : Screen {
                     }
 
                     item {
-                        PreferenceSectionHeader(title = stringResource(id = R.string.pref_appearance_category_file_browser))
+                        PreferenceSectionHeader(title = stringResource(id = R.string.pref_appearance_category_emby_browser))
                     }
 
                     item {
                         PreferenceCard {
-                            val unlimitedNameLines by preferences.unlimitedNameLines.collectAsState()
-                            SwitchPreference(
-                                icon = {
-                                  Icon(
-                                    Icons.Outlined.Title,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                  )
-                                },
-                                value = unlimitedNameLines,
-                                onValueChange = { preferences.unlimitedNameLines.set(it) },
-                                modifier = Modifier.settingsAnchor(R.string.pref_appearance_unlimited_name_lines_title),
-                                title = {
-                                    Text(
-                                        text = stringResource(id = R.string.pref_appearance_unlimited_name_lines_title),
-                                    )
-                                },
-                                summary = {
-                                    Text(
-                                        text = stringResource(id = R.string.pref_appearance_unlimited_name_lines_summary),
-                                        color = MaterialTheme.colorScheme.outline,
-                                    )
-                                }
-                            )
-
-                            PreferenceDivider()
-
-                            val showUnplayedOldVideoLabel by preferences.showUnplayedOldVideoLabel.collectAsState()
-                            SwitchPreference(
-                                icon = {
-                                  Icon(
-                                    Icons.Outlined.Label,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                  )
-                                },
-                                value = showUnplayedOldVideoLabel,
-                                onValueChange = { preferences.showUnplayedOldVideoLabel.set(it) },
-                                modifier = Modifier.settingsAnchor(R.string.pref_appearance_show_unplayed_old_video_label_title),
-                                title = {
-                                    Text(
-                                        text = stringResource(id = R.string.pref_appearance_show_unplayed_old_video_label_title),
-                                    )
-                                },
-                                summary = {
-                                    Text(
-                                        text = stringResource(id = R.string.pref_appearance_show_unplayed_old_video_label_summary),
-                                        color = MaterialTheme.colorScheme.outline,
-                                    )
-                                }
-                            )
-
-                            PreferenceDivider()
-
-                            val unplayedOldVideoDays by preferences.unplayedOldVideoDays.collectAsState()
-                            SliderPreference(
-                                icon = {
-                                  Icon(
-                                    Icons.Outlined.CalendarToday,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                  )
-                                },
-                                value = unplayedOldVideoDays.toFloat(),
-                                onValueChange = { preferences.unplayedOldVideoDays.set(it.roundToInt()) },
-                                modifier = Modifier.settingsAnchor(R.string.pref_appearance_unplayed_old_video_days_title),
-                                title = { Text(text = stringResource(id = R.string.pref_appearance_unplayed_old_video_days_title), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                valueRange = 1f..30f,
-                                summary = {
-                                    Text(
-                                        text = stringResource(
-                                            id = R.string.pref_appearance_unplayed_old_video_days_summary,
-                                            unplayedOldVideoDays,
-                                        ),
-                                        color = MaterialTheme.colorScheme.outline,
-                                    )
-                                },
-                                onSliderValueChange = { preferences.unplayedOldVideoDays.set(it.roundToInt()) },
-                                sliderValue = unplayedOldVideoDays.toFloat(),
-                                enabled = showUnplayedOldVideoLabel
-                            )
-
-                            PreferenceDivider()
-
-                            val autoScrollToLastPlayed by browserPreferences.autoScrollToLastPlayed.collectAsState()
-                            SwitchPreference(
-                                icon = {
-                                  Icon(
-                                    Icons.Outlined.SwapVert,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                  )
-                                },
-                                value = autoScrollToLastPlayed,
-                                onValueChange = { browserPreferences.autoScrollToLastPlayed.set(it) },
-                                modifier = Modifier.settingsAnchor(R.string.pref_appearance_auto_scroll_title),
-                                title = {
-                                    Text(text = stringResource(R.string.pref_appearance_auto_scroll_title))
-                                },
-                                summary = {
-                                    Text(
-                                        text = stringResource(R.string.pref_appearance_auto_scroll_summary),
-                                        color = MaterialTheme.colorScheme.outline,
-                                    )
-                                }
-                            )
-
-                            PreferenceDivider()
-
-                            // 侧边滚动条：网络浏览 / Emby 媒体库等长列表右侧那根可拖动的滚动条。
+                            // 侧边滚动条：Emby 媒体库等长列表右侧那根可拖动的滚动条。
                             // **全局开关** —— 消费入口统一在 ui/utils/SideScrollbar.kt 的两个外壳里
                             // （LazyGridSideScrollbar / LazyListSideScrollbar），所有长列表套同一个壳
                             // 即自动遵循本设置；新增长列表不要绕过壳直接调滚动条库。
@@ -405,33 +292,6 @@ object AppearancePreferencesScreen : Screen {
                                         color = MaterialTheme.colorScheme.outline,
                                     )
                                 },
-                            )
-
-                            PreferenceDivider()
-
-                            val tapThumbnailToSelect by gesturePreferences.tapThumbnailToSelect.collectAsState()
-                            SwitchPreference(
-                                icon = {
-                                  Icon(
-                                    Icons.Outlined.TouchApp,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                  )
-                                },
-                                value = tapThumbnailToSelect,
-                                onValueChange = { gesturePreferences.tapThumbnailToSelect.set(it) },
-                                modifier = Modifier.settingsAnchor(R.string.pref_gesture_tap_thumbnail_to_select_title),
-                                title = {
-                                    Text(
-                                        text = stringResource(id = R.string.pref_gesture_tap_thumbnail_to_select_title),
-                                    )
-                                },
-                                summary = {
-                                    Text(
-                                        text = stringResource(id = R.string.pref_gesture_tap_thumbnail_to_select_summary),
-                                        color = MaterialTheme.colorScheme.outline,
-                                    )
-                                }
                             )
                         }
                     }

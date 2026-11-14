@@ -28,12 +28,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bookmark
-import androidx.compose.material.icons.rounded.Cloud
-import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -45,34 +39,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.marlboroadvance.mpvex.R
+import app.marlboroadvance.mpvex.ui.browser.AppTab
 import app.marlboroadvance.mpvex.ui.cine.CineTheme
-
-/**
- * 底部 / 侧边导航的五个入口。
- *
- * ⚠️ 顺序与 Classic 的底部导航**必须一致**（首页 / 收藏 / 历史 / 本地 / 网络）：
- * 用户在两套界面之间切换时，肌肉记忆（第几个是收藏）不该变。
- *
- * 只有 [Home] 有 Cine 版本页面，其余四个暂时回落到 Classic 的整页实现
- * （见 `CineRoot`）—— 所以这一层的职责只有「切哪个 tab」，不管内容怎么画。
- */
-enum class CineTab(
-  val labelRes: Int,
-  val icon: ImageVector,
-) {
-  Home(R.string.cine_nav_home, Icons.Rounded.Home),
-  Favorites(R.string.cine_nav_favorites, Icons.Rounded.Bookmark),
-  History(R.string.cine_nav_history, Icons.Rounded.History),
-  Local(R.string.cine_nav_local, Icons.Rounded.Folder),
-  Network(R.string.cine_nav_network, Icons.Rounded.Cloud),
-}
 
 /**
  * 手机端悬浮 Dock。
@@ -88,12 +61,13 @@ enum class CineTab(
  * @param hidden 下滚时收起（设计稿 05）。**只平移不缩小**：缩放会让胶囊里的
  *   文字重新排版，收起来的一瞬间能看到字在跳。
  * @param showLabels 设置 → 外观 →「隐藏导航栏标题」。false 时选中项也不再展开文字，
- *   胶囊只剩五个图标（宽度由 SpaceEvenly 平均分，不会塌）。
+ *   胶囊只剩当前层的图标（宽度由 SpaceEvenly 平均分，不会塌）。
  */
 @Composable
 fun CineDock(
-  selected: CineTab,
-  onSelect: (CineTab) -> Unit,
+  tabs: List<AppTab>,
+  selected: AppTab,
+  onSelect: (AppTab) -> Unit,
   hidden: Boolean,
   modifier: Modifier = Modifier,
   showLabels: Boolean = true,
@@ -128,7 +102,7 @@ fun CineDock(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
-      CineTab.entries.forEach { tab ->
+      tabs.forEach { tab ->
         DockItem(
           tab = tab,
           selected = tab == selected,
@@ -142,7 +116,7 @@ fun CineDock(
 
 @Composable
 private fun DockItem(
-  tab: CineTab,
+  tab: AppTab,
   selected: Boolean,
   showLabel: Boolean,
   onClick: () -> Unit,
@@ -166,7 +140,7 @@ private fun DockItem(
       tint = if (selected) colors.onChipSelected else colors.onSurfaceVariant,
       modifier = Modifier.size(20.dp),
     )
-    // 文字只在选中时出现：Dock 上五个都带字会挤成一条导航条，失去「浮起」的轻量感。
+    // 文字只在选中时出现，避免四项外层导航挤成一条实心栏。
     // 开关关掉后选中项也不展开 —— 那正是「只留图标」这个选项要的效果。
     AnimatedVisibility(
       visible = selected && showLabel,
@@ -200,8 +174,9 @@ private fun DockItem(
  */
 @Composable
 fun CineRail(
-  selected: CineTab,
-  onSelect: (CineTab) -> Unit,
+  tabs: List<AppTab>,
+  selected: AppTab,
+  onSelect: (AppTab) -> Unit,
   modifier: Modifier = Modifier,
   showLabels: Boolean = true,
 ) {
@@ -229,7 +204,7 @@ fun CineRail(
     // 设计稿 .rail：padding 14 0 20 + gap 6
     verticalArrangement = Arrangement.spacedBy(6.dp),
   ) {
-    CineTab.entries.forEach { tab ->
+    tabs.forEach { tab ->
       RailItem(
         tab = tab,
         selected = tab == selected,
@@ -242,7 +217,7 @@ fun CineRail(
 
 @Composable
 private fun RailItem(
-  tab: CineTab,
+  tab: AppTab,
   selected: Boolean,
   showLabel: Boolean,
   onClick: () -> Unit,

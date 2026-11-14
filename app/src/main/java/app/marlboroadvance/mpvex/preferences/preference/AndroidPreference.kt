@@ -3,15 +3,11 @@ package app.marlboroadvance.mpvex.preferences.preference
 import android.content.SharedPreferences
 import android.content.SharedPreferences.Editor
 import androidx.core.content.edit
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
-import kotlinx.coroutines.flow.stateIn
 
 sealed class AndroidPreference<T>(
   private val preferences: SharedPreferences,
@@ -30,8 +26,6 @@ sealed class AndroidPreference<T>(
     value: T,
   ): Editor.() -> Unit
 
-  override fun key(): String = key
-
   override fun get(): T =
     try {
       read(preferences, key, defaultValue)
@@ -44,15 +38,11 @@ sealed class AndroidPreference<T>(
     preferences.edit(action = write(key, value))
   }
 
-  override fun isSet(): Boolean = preferences.contains(key)
-
   override fun delete() {
     preferences.edit {
       remove(key)
     }
   }
-
-  override fun defaultValue(): T = defaultValue
 
   override fun changes(): Flow<T> =
     keyFlow
@@ -60,8 +50,6 @@ sealed class AndroidPreference<T>(
       .onStart { emit("ignition") }
       .map { get() }
       .conflate()
-
-  override fun stateIn(scope: CoroutineScope): StateFlow<T> = changes().stateIn(scope, SharingStarted.Eagerly, get())
 
   class StringPrimitive(
     preferences: SharedPreferences,

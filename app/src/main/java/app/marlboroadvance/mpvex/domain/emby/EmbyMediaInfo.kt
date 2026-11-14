@@ -198,6 +198,41 @@ fun embyMediaSourceLabel(source: EmbyMediaSource): String {
   return parts.joinToString(" · ").ifBlank { "版本" }
 }
 
+/** 单集页按版本分组；旧媒体信息表保持原排列。 */
+data class EmbyVersionMediaInfo(
+  val title: String,
+  val basic: List<MediaInfoEntry.Row>,
+  val tracks: List<EmbyTrackMediaInfo>,
+)
+
+data class EmbyTrackMediaInfo(val title: String, val rows: List<MediaInfoEntry.Row>)
+
+fun buildEmbyVersionMediaInfo(item: EmbyItem): List<EmbyVersionMediaInfo> =
+  item.MediaSources.orEmpty().mapIndexed { sourceIndex, source ->
+    val single = item.copy(MediaSources = listOf(source), RunTimeTicks = source.RunTimeTicks)
+    val basic = buildEmbyMediaInfoEntries(single).takeWhile { it !is MediaInfoEntry.Section }
+      .filterIsInstance<MediaInfoEntry.Row>()
+    val tracks = source.MediaStreams.orEmpty().filter { it.Type in listOf("Video", "Audio", "Subtitle") }
+      .mapIndexed { index, stream ->
+        val title = when (stream.Type) { "Video" -> "视频"; "Audio" -> "音频"; else -> "字幕" } + " ${index + 1}"
+        val entries = buildEmbyMediaInfoEntries(single.copy(MediaSources = listOf(source.copy(MediaStreams = listOf(stream)))))
+        val rows = entries.dropWhile { it !is MediaInfoEntry.Section }.filterIsInstance<MediaInfoEntry.Row>().toMutableList()
+        fun add(label: String, value: String?) { if (!value.isNullOrBlank()) rows += MediaInfoEntry.Row(label, value) }
+        add("轨道索引", stream.Index?.toString())
+        add("标题", stream.DisplayTitle ?: stream.Title)
+        add("显示语言", stream.DisplayLanguage)
+        add("外置", if (stream.IsExternal == true) "是（外置）" else "否")
+        if (stream.Type == "Subtitle") {
+          add("编码器", stream.Codec?.uppercase())
+          add("语言", languageLabel(stream.Language))
+          stream.IsDefault?.let { add("默认", if (it) "是" else "否") }
+          stream.IsForced?.let { add("强制", if (it) "是" else "否") }
+        }
+        EmbyTrackMediaInfo(title, rows)
+      }
+    EmbyVersionMediaInfo(source.Name?.takeIf { it.isNotBlank() } ?: "版本 ${sourceIndex + 1}", basic, tracks)
+  }
+
 /** `HEVC (Main 10 · L4.1)` 这样的编码器描述；没有档次/级别时只给编码名 */
 private fun codecLine(stream: EmbyMediaStream): String? {
   val codec = stream.Codec?.uppercase() ?: return null
@@ -240,7 +275,7 @@ private fun languageLabel(code: String?): String? {
   }
 }
 
-private fun formatBitrate(bps: Long): String = when {
+internal fun formatBitrate(bps: Long): String = when {
   bps >= 1_000_000 -> "%.1f Mbps".format(bps / 1_000_000.0)
   bps >= 1_000 -> "%d kbps".format(bps / 1_000)
   else -> "$bps bps"
@@ -265,7 +300,7 @@ fun formatEmbyDurationFull(ticks: Long): String {
   }
 }
 
-private fun formatFileSize(bytes: Long): String {
+internal fun formatFileSize(bytes: Long): String {
   val mb = bytes / (1024.0 * 1024.0)
   return when {
     mb >= 1024 -> "%.2f GB".format(mb / 1024)

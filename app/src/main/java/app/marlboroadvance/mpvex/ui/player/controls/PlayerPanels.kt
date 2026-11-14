@@ -19,7 +19,6 @@ import app.marlboroadvance.mpvex.ui.player.Panels
 import app.marlboroadvance.mpvex.ui.player.controls.components.panels.AudioDelayPanel
 import app.marlboroadvance.mpvex.ui.player.controls.components.panels.SubtitleDelayPanel
 import app.marlboroadvance.mpvex.ui.player.controls.components.panels.SubtitleSettingsPanel
-import app.marlboroadvance.mpvex.ui.player.controls.components.panels.VideoSettingsPanel
 
 @Composable
 fun PlayerPanels(
@@ -49,9 +48,6 @@ fun PlayerPanels(
       }
       Panels.AudioDelay -> {
         AudioDelayPanel(onDismissRequest)
-      }
-      Panels.VideoFilters -> {
-        VideoSettingsPanel(onDismissRequest)
       }
     }
   }

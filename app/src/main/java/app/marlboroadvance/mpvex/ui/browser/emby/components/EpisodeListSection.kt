@@ -22,8 +22,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
@@ -93,9 +91,6 @@ fun EpisodeListSection(
   resumeSecondsOf: (EmbyItem) -> Long? = { it.resumeSeconds() },
   onClick: (EmbyItem, Long) -> Unit = { item, _ -> },
   onLongClick: (EmbyItem) -> Unit = {},
-  downloadStateOf: (EmbyItem) -> EpisodeDownloadState? = { null },
-  onDownload: (EmbyItem) -> Unit = {},
-  onDownloadSeason: (List<EmbyItem>) -> Unit = {},
 ) {
   if (episodes.isEmpty()) return
 
@@ -181,43 +176,6 @@ fun EpisodeListSection(
           }
         }
 
-        // ── 批量操作行 ──
-        // 「下载本季」单独一行、**左对齐**：和上面季节 chip 行、下面分集行
-        // 的 16dp 起始边距对齐，视觉上是一条竖线。
-        // 单独成行的理由仍在：它是**作用于当前这一季**的动作，
-        // 若和季 chip 放同一行最右，横向滚到末尾才会看见，长剧里等于藏起来了。
-        // ⚠️ 做成**胶囊按钮**（tonal 底 + 圆角 50% + 下载图标）而不是一段带
-        //    clip 的文本：后者看着像正文链接，用户会漏掉这个批量入口。
-        Row(
-          modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, top = 2.dp),
-          horizontalArrangement = Arrangement.Start,
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Row(
-            modifier = Modifier
-              .clip(RoundedCornerShape(50))
-              .background(MaterialTheme.colorScheme.secondaryContainer)
-              .clickable(enabled = visible.isNotEmpty()) { onDownloadSeason(visible) }
-              .padding(horizontal = 14.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-          ) {
-            Icon(
-              imageVector = Icons.Default.Download,
-              contentDescription = null,
-              tint = MaterialTheme.colorScheme.onSecondaryContainer,
-              modifier = Modifier.size(16.dp),
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-              text = "下载本季 ${visible.size} 集",
-              style = MaterialTheme.typography.labelMedium,
-              color = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
-          }
-        }
-
         // ── 分集横向行 ──
         // ⚠️ 只画一行、靠 LazyRow 横向懒加载：几百集也不会一次性组合。
         LazyRow(
@@ -236,10 +194,8 @@ fun EpisodeListSection(
               played = isPlayed(ep),
               progress = progressOf(ep),
               isCurrent = ep.Id != null && ep.Id == currentEpisodeId,
-              downloadState = downloadStateOf(ep),
               onClick = { onClick(ep, resumeSecondsOf(ep) ?: 0L) },
               onLongClick = { onLongClick(ep) },
-              onDownload = { onDownload(ep) },
             )
           }
         }
@@ -388,10 +344,8 @@ private fun RelatedEpisodeRow(
           progress = progressOf(ep),
           isCurrent = ep.Id != null && ep.Id == currentEpisodeId,
           // 这一区只负责「换一集看」，不放下载钮 —— 150dp 的卡上再挤一个按钮会吃掉标题。
-          downloadState = EpisodeDownloadState.Done,
           onClick = { onClick(ep, resumeSecondsOf(ep) ?: 0L) },
           onLongClick = { onLongClick(ep) },
-          onDownload = {},
         )
       }
     }
@@ -411,10 +365,8 @@ private fun EpisodeCard(
   played: Boolean,
   progress: Float?,
   isCurrent: Boolean,
-  downloadState: EpisodeDownloadState?,
   onClick: () -> Unit,
   onLongClick: () -> Unit,
-  onDownload: () -> Unit,
 ) {
   val container =
     if (isCurrent) MaterialTheme.colorScheme.primaryContainer
@@ -485,32 +437,6 @@ private fun EpisodeCard(
             //   maxLines=2 + 省略号兜底，超长标题不会把卡片撑高。
             .heightIn(min = titleHeight),
         )
-        // 下载入口：卡宽只有 150dp，所以做成 24dp 的极小钮（48dp 的点击区由 IconButton 撑开
-        // 会挤掉标题 ⇒ 这里用最小尺寸的 IconButton，靠外层 padding 补手感）。
-        // ⚠️ 它必须和整卡的 tapOrLongPress **共存**：IconButton 自己消费点击，
-        //    点它不会触发播放（Compose 的事件分发是「子节点优先」）。
-        IconButton(
-          onClick = onDownload,
-          modifier = Modifier.size(24.dp),
-          enabled = downloadState == null,
-        ) {
-          Icon(
-            imageVector = when (downloadState) {
-              null -> Icons.Default.Download
-              EpisodeDownloadState.Queued -> Icons.Default.DownloadDone
-              EpisodeDownloadState.Done -> Icons.Default.DownloadDone
-            },
-            contentDescription =
-              when (downloadState) {
-                null -> "下载这一集"
-                EpisodeDownloadState.Queued -> "已在下载队列"
-                EpisodeDownloadState.Done -> "已下载"
-              },
-            tint = if (downloadState == null) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(16.dp),
-          )
-        }
       }
       // ⚠️ 卡片高度一共三个变量，三个都要治，治漏一个就是「有的高有的矮」：
       //   ① 标题 1 行 vs 2 行   → 上面 `heightIn(min = titleHeight)` 已治；
@@ -562,7 +488,6 @@ private fun EpisodeCard(
  * 卡片只关心「能不能点」，排队 / 下载中 / 暂停 / 失败在用户眼里都是「已经交出去了」，
  * 具体百分比与重试在下载管理页看 —— 150dp 的卡上塞不进 ProgressBar。
  */
-enum class EpisodeDownloadState { Queued, Done }
 
 @Composable
 private fun SeasonChip(text: String, selected: Boolean, onClick: () -> Unit) {

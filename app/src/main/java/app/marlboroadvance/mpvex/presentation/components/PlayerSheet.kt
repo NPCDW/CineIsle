@@ -80,6 +80,8 @@ fun PlayerSheet(
   tonalElevation: Dp = 1.dp,
   customMaxWidth: Dp? = null,
   customMaxHeight: Dp? = null,
+  landscapeSide: Boolean = false,
+  landscapeSideWidth: Dp = 420.dp,
   surfaceColor: Color? = null,
   content: @Composable () -> Unit,
 ) {
@@ -87,11 +89,15 @@ fun PlayerSheet(
   val density = LocalDensity.current
   val latestOnDismissRequest by rememberUpdatedState(onDismissRequest)
   val latestDismissEnabled by rememberUpdatedState(dismissEnabled)
-  val maxWidth = customMaxWidth ?:
-  if (LocalConfiguration.current.orientation == ORIENTATION_LANDSCAPE) {
-    640.dp
+  val isLandscapeSide = landscapeSide && LocalConfiguration.current.orientation == ORIENTATION_LANDSCAPE
+  val maxWidth = if (isLandscapeSide) {
+    landscapeSideWidth
   } else {
-    420.dp
+    customMaxWidth ?: if (LocalConfiguration.current.orientation == ORIENTATION_LANDSCAPE) {
+      640.dp
+    } else {
+      420.dp
+    }
   }
   val isImeVisible = WindowInsets.ime.getBottom(density) > 0
   val maxHeight = customMaxHeight ?: when {
@@ -147,14 +153,15 @@ fun PlayerSheet(
         ).fillMaxSize()
         .background(Color.Black.copy(alpha))
         .onSizeChanged {
+          val hidden = if (isLandscapeSide) it.width.toFloat() else it.height.toFloat()
           val anchors =
             DraggableAnchors {
               0 at 0f
-              1 at it.height.toFloat()
+              1 at hidden
             }
           anchoredDraggableState.updateAnchors(anchors)
         },
-    contentAlignment = Alignment.BottomCenter,
+    contentAlignment = if (isLandscapeSide) Alignment.CenterEnd else Alignment.BottomCenter,
   ) {
     Surface(
       modifier =
@@ -168,23 +175,33 @@ fun PlayerSheet(
             remember(anchoredDraggableState) {
               anchoredDraggableState.preUpPostDownNestedScrollConnection()
             },
+          ).then(
+            if (isLandscapeSide) Modifier.fillMaxSize() else Modifier,
           ).then(modifier)
           .offset {
-            IntOffset(
-              0,
-              anchoredDraggableState.offset
-                .takeIf { it.isFinite() }
-                ?.roundToInt()
-                ?: 0,
-            )
+            if (isLandscapeSide) {
+              IntOffset(
+                anchoredDraggableState.offset.takeIf { it.isFinite() }?.roundToInt() ?: 0,
+                0,
+              )
+            } else {
+              IntOffset(
+                0,
+                anchoredDraggableState.offset.takeIf { it.isFinite() }?.roundToInt() ?: 0,
+              )
+            }
           }.anchoredDraggable(
             state = anchoredDraggableState,
-            orientation = Orientation.Vertical,
+            orientation = if (isLandscapeSide) Orientation.Horizontal else Orientation.Vertical,
           ).windowInsetsPadding(
             WindowInsets.systemBars
               .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
           ).imePadding(),
-      shape = MaterialTheme.shapes.extraLarge.copy(bottomEnd = ZeroCornerSize, bottomStart = ZeroCornerSize),
+      shape = if (isLandscapeSide) {
+        MaterialTheme.shapes.extraLarge.copy(topEnd = ZeroCornerSize, bottomEnd = ZeroCornerSize)
+      } else {
+        MaterialTheme.shapes.extraLarge.copy(bottomEnd = ZeroCornerSize, bottomStart = ZeroCornerSize)
+      },
       color = surfaceColor ?: MaterialTheme.colorScheme.surface,
       tonalElevation = tonalElevation,
       content = {

@@ -61,7 +61,7 @@ data class EmbyScanChunk(
   val scanned: Int,
   /** 服务端报告的该查询总条目数（第一页之后才有意义） */
   val total: Int,
-  /** 这一页的原始条目（未过滤） */
+  /** Supported items from this page, before any additional caller-specific filtering. */
   val items: List<EmbyItem>,
 )
 

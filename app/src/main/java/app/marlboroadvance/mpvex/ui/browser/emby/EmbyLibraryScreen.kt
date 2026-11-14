@@ -124,6 +124,7 @@ import app.marlboroadvance.mpvex.domain.emby.EmbyItem
 import app.marlboroadvance.mpvex.domain.emby.EmbyScanQuery
 import app.marlboroadvance.mpvex.domain.emby.EmbyServer
 import app.marlboroadvance.mpvex.domain.emby.EmbyUserData
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
 import app.marlboroadvance.mpvex.preferences.preference.Preference
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
@@ -141,21 +142,20 @@ import app.marlboroadvance.mpvex.ui.browser.emby.components.MEDIA_BADGE_BG
 import app.marlboroadvance.mpvex.ui.browser.emby.components.FOLDER_ICON_BLUE
 import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyAppearance
 import app.marlboroadvance.mpvex.ui.browser.emby.components.VideoFeedIcon
-import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyItemActionsDialog
-import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyMediaActionsDialog
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyMediaCard
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySearchFilter
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySearchFilterRow
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySkeletonGrid
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySkeletonList
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LegacySeasonLibraryContent
+import app.marlboroadvance.mpvex.ui.browser.emby.components.isSeasonLibraryEntry
 import app.marlboroadvance.mpvex.ui.browser.emby.components.SearchHistoryPanel
-import app.marlboroadvance.mpvex.ui.browser.emby.components.runEmbyLibraryAction
 import app.marlboroadvance.mpvex.ui.browser.emby.photo.EmbyPhotoBrowserScreen
 import app.marlboroadvance.mpvex.ui.browser.emby.photo.EmbyPhotoCard
 import app.marlboroadvance.mpvex.ui.browser.emby.photo.EmbyPhotoGridScreen
 import app.marlboroadvance.mpvex.ui.browser.emby.photo.photoSubtitle
 import app.marlboroadvance.mpvex.ui.player.feed.VerticalFeedActivity
-import app.marlboroadvance.mpvex.ui.player.feed.feedItemOf
+import app.marlboroadvance.mpvex.ui.player.feed.feedPlaybackItemOf
 import app.marlboroadvance.mpvex.ui.utils.LazyGridSideScrollbar
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
 import app.marlboroadvance.mpvex.ui.utils.scrollToTop
@@ -180,8 +180,8 @@ import kotlin.math.roundToInt
  * 3. 工具行：媒体数量 + 随机播放 + 视图样式 + 排序
  * 4. 媒体网格（海报 / 背景图 / 横幅三种样式）
  *
- * 层级导航：媒体库 →（影视剧）季列表 → 剧集列表 → 详情。
- * 单击行为：容器类继续下钻，其余打开详情页，播放由详情页发起。
+ * 层级导航：媒体库 → 影视剧详情 → 季详情 → 单集详情。
+ * 单击行为：影视剧、季及媒体打开详情页，文件夹等容器继续下钻，播放由详情页发起。
  */
 /**
  * 退出搜索时的内容快照：词 + 整批结果 + 总数 + 滚动位置。
@@ -245,6 +245,9 @@ data class EmbyLibraryScreen(
       factory = EmbyViewModel.factory(context.applicationContext as Application),
     )
     val server by viewModel.currentServer.collectAsState()
+    if (isSeasonLibraryEntry(includeItemTypes, isFolderDive, personId) &&
+      LegacySeasonLibraryContent(libraryId, server, viewModel)
+    ) return
     val scope = rememberCoroutineScope()
 
     var searchQuery by remember { mutableStateOf("") }
@@ -306,7 +309,6 @@ data class EmbyLibraryScreen(
     // 代价是卡片变高、一屏少看几条。
     val titleLines by browserPreferences.embyLibraryTitleLines.collectAsState()
     // 卡片右上角心形快捷收藏开关（默认开）。关掉后退回只读角标。
-    val quickFavoriteEnabled by browserPreferences.embyQuickFavorite.collectAsState()
     // 搜索联想词列表是否收起（默认展开）。联想只是参考，用户收起后一直记着。
     val suggestCollapsed by browserPreferences.embySearchSuggestCollapsed.collectAsState()
     // 文件夹宫格封面是否随机合成（默认开）。改它会换一套缓存键，来回切不会串图。
@@ -325,7 +327,6 @@ data class EmbyLibraryScreen(
     var suggestAutoCollapsed by remember { mutableStateOf(false) }
     // 快捷收藏的反馈 Toast：复用同一个实例、每次先 cancel，
     // 避免连点几张卡片时 Toast 在系统里排成一长串、越积越久。
-    val quickFavoriteToast = remember { mutableStateOf<Toast?>(null) }
     // 没手动切过时跟随该排序项的自然方向：名称 / 年份升序，其余（加入时间、评分…）降序
     val sortOrder = sortOrderOverride.takeIf { it.isNotBlank() }
       ?: if (sortBy == "SortName" || sortBy == "ProductionYear") "Ascending" else "Descending"
@@ -951,40 +952,55 @@ data class EmbyLibraryScreen(
       error = null
       runCatching {
         if (searchQuery.isBlank()) {
-          viewModel.loadItems(
-            server = current,
-            parentId = libraryId,
-            includeItemTypes = effectiveTypes,
-            filters = effectiveFilters,
-            sortBy = sortBy,
-            sortOrder = sortOrder,
-            // 用 consumedCount（服务端实际给过多少条），不用 items.size ——
-            // 后者被客户端过滤/去重削过，会让翻页窗口回退、同一页反复拉，
-            // 「全新条目为 0」时更是直接把 items.size 冻住、无限重拉同一页。
-            startIndex = if (reset) 0 else consumedCount,
-            limit = PAGE_SIZE,
-            recursive = recursive,
-            excludeItemTypes = effectiveExclude,
-            // 类型 / 标签一律用 **Id** 筛（GenreIds / TagIds）—— 这是网页端的做法，
-            // 也避开了「按名字筛」在部分服务端踩坏列抛 500 的坑。
-            // 名字版的 genres / tags 恒不传（要按名字筛就得走上面的客户端扫描）
-            genres = null,
-            tags = null,
-            genreIds = genreIdsOf(selectedGenres).takeIf { it.isNotEmpty() },
-            tagIds = tagIdsOf(selectedTags).takeIf { it.isNotEmpty() },
-            years = selectedYears.toList().takeIf { it.isNotEmpty() },
-            officialRatings = selectedRatings.toList().takeIf { it.isNotEmpty() },
-            minCommunityRating = minRating,
-            isFavorite = if (favoriteOnly) true else null,
-            mediaTypes = effectiveMediaTypes,
-            isFolder = effectiveIsFolder,
-            personIds = selectedPersonIds.toList().takeIf { it.isNotEmpty() },
-            isPlayed = playedFilter,
-            isHD = hdFilter,
-            is3D = threeDFilter,
-            hasSubtitles = subtitlesFilter,
-            studioIds = selectedStudioIds.toList().takeIf { it.isNotEmpty() },
-          )
+          val pageStart = if (reset) 0 else consumedCount
+          var skipped = 0
+          var page: EmbyItemsPage
+          do {
+            page = viewModel.loadItems(
+              server = current,
+              parentId = libraryId,
+              includeItemTypes = effectiveTypes,
+              filters = effectiveFilters,
+              sortBy = sortBy,
+              sortOrder = sortOrder,
+              // 用 consumedCount（服务端实际给过多少条），不用 items.size ——
+              // 后者被客户端过滤/去重削过，会让翻页窗口回退、同一页反复拉，
+              // 「全新条目为 0」时更是直接把 items.size 冻住、无限重拉同一页。
+              startIndex = pageStart + skipped,
+              limit = PAGE_SIZE,
+              recursive = recursive,
+              excludeItemTypes = effectiveExclude,
+              // 类型 / 标签一律用 **Id** 筛（GenreIds / TagIds）—— 这是网页端的做法，
+              // 也避开了「按名字筛」在部分服务端踩坏列抛 500 的坑。
+              // 名字版的 genres / tags 恒不传（要按名字筛就得走上面的客户端扫描）
+              genres = null,
+              tags = null,
+              genreIds = genreIdsOf(selectedGenres).takeIf { it.isNotEmpty() },
+              tagIds = tagIdsOf(selectedTags).takeIf { it.isNotEmpty() },
+              years = selectedYears.toList().takeIf { it.isNotEmpty() },
+              officialRatings = selectedRatings.toList().takeIf { it.isNotEmpty() },
+              minCommunityRating = minRating,
+              isFavorite = if (favoriteOnly) true else null,
+              mediaTypes = effectiveMediaTypes,
+              isFolder = effectiveIsFolder,
+              personIds = selectedPersonIds.toList().takeIf { it.isNotEmpty() },
+              isPlayed = playedFilter,
+              isHD = hdFilter,
+              is3D = threeDFilter,
+              hasSubtitles = subtitlesFilter,
+              studioIds = selectedStudioIds.toList().takeIf { it.isNotEmpty() },
+            )
+            if (page.items.isNotEmpty() || page.consumedCount == 0) break
+            skipped += page.consumedCount
+            if (page.totalCount > 0 && pageStart + skipped >= page.totalCount) {
+              page = page.copy(consumedCount = 0)
+              break
+            }
+            if (skipped >= PAGE_SIZE * 50) {
+              throw IllegalStateException("过滤条目过多，请重试以继续加载。")
+            }
+          } while (true)
+          page.copy(consumedCount = skipped + page.consumedCount)
         } else {
           // 发起搜索前先取「这一层浏览列表」：Emby 的 SearchTerm 不索引容器（兼容服务端
           // 更是常常只搜可播放媒体），于是「在文件夹视图里按名字找子目录」永远为空。
@@ -1066,7 +1082,7 @@ data class EmbyLibraryScreen(
             items + page.items.filter { seen.add(it.Id ?: it.Name ?: "") }
           }
           // 游标按**服务端给了多少**推进，与本地去重结果无关
-          if (reset) consumedCount = page.items.size else consumedCount += page.items.size
+          if (reset) consumedCount = page.consumedCount else consumedCount += page.consumedCount
           totalCount = page.totalCount
           // ── 继承来的「文件夹」在本层没东西可钻 ⇒ 自动落到「全部」──
           // 「文件夹」这一档只查容器（Folder / CollectionFolder / UserView / PhotoAlbum），
@@ -1084,7 +1100,7 @@ data class EmbyLibraryScreen(
           if (
             reset && category == EmbyCategory.FOLDER && categoryInherited &&
             !autoFellBackToAll && !hasActiveFilter && searchQuery.isBlank() &&
-            page.items.isEmpty() && page.totalCount <= 0
+            page.consumedCount == 0 && page.totalCount <= 0
           ) {
             autoFellBackToAll = true
             // 作废本次收尾：否则紧接着的 `isLoading = false` 会让「没有内容」闪一帧，
@@ -1098,7 +1114,7 @@ data class EmbyLibraryScreen(
           // 去重削光时都会这样。把 totalCount 对齐已消耗，续页条件
           // （consumedCount < totalCount）自然失效；不拦的话同一个 StartIndex 会被
           // 无限重拉，表现就是「一直加载中、界面没响应」。
-          if (!reset && (page.items.isEmpty() || items.size == beforeSize)) {
+          if (page.consumedCount == 0 || (!reset && page.items.isNotEmpty() && items.size == beforeSize)) {
             totalCount = consumedCount
           }
         }
@@ -1427,51 +1443,6 @@ data class EmbyLibraryScreen(
      *    绝不让界面停在假的成功态上；
      * 4. 同时写 [EmbyLibraryCache]，切换筛选条件（cacheKey 变）重新进列表时红心不会弹回。
      */
-    fun toggleFavoriteQuick(
-      item: EmbyItem,
-      srv: EmbyServer,
-    ) {
-      val id = item.Id ?: return
-      // 目标状态取「当前列表里的真实状态」，而不是入参 item 里的快照：
-      // 卡片按 Id 复用、回调又可能晚一拍，入参未必是最新的（曾经就是它导致
-      // 「只能收藏、取消不掉」）。列表状态是我们刚刚乐观改过的那一份，最可信。
-      val liveFavorite =
-        items.firstOrNull { it.Id == id }?.UserData?.IsFavorite
-          ?: EmbyLibraryCache.favoriteStateOf(id)
-          ?: (item.UserData?.IsFavorite == true)
-      val target = !liveFavorite
-
-      fun applyLocal(fav: Boolean) {
-        items =
-          items.map { cur ->
-            if (cur.Id == id) {
-              cur.copy(UserData = (cur.UserData ?: EmbyUserData()).copy(IsFavorite = fav))
-            } else {
-              cur
-            }
-          }
-        EmbyLibraryCache.updateFavorite(id, fav)
-      }
-
-      // 复用同一个 Toast 实例：新的先 cancel 掉旧的，连点也不会排队堆积。
-      fun toast(msg: String) {
-        quickFavoriteToast.value?.cancel()
-        quickFavoriteToast.value =
-          Toast.makeText(context, msg, Toast.LENGTH_SHORT).also { it.show() }
-      }
-
-      applyLocal(target)
-      // 乐观更新已经把红心换色了，这里补一句明确反馈，点下去立刻有回应。
-      toast(if (target) "已收藏" else "已取消收藏")
-      scope.launch {
-        val result = viewModel.toggleFavorite(srv, item, target)
-        if (result.isFailure) {
-          applyLocal(!target)
-          toast(result.exceptionOrNull()?.message ?: "操作失败")
-        }
-      }
-    }
-
     // 搜索联想候选：**结果里的片名 + 历史搜索词**，纯本地包含匹配。
     // 为什么不走服务端 `/Search/Hints`：每敲一个字都发一次请求太重，而且那个端点
     // 并非所有服务端实现（兼容层）都支持，失败时联想就整个没了。本地匹配在
@@ -1752,6 +1723,7 @@ data class EmbyLibraryScreen(
           gachaReelCards = if (gachaStylePref == EmbyGachaStyle.SLOT && count == 1) {
             distinct.take(GACHA_POOL_SIZE).map { item ->
               GachaCard(
+                server = current,
                 item = item,
                 title = viewModel.displayTitle(item),
                 posterUrl = viewModel.imageUrl(current, item, "Primary", GACHA_POSTER_WIDTH),
@@ -1763,6 +1735,7 @@ data class EmbyLibraryScreen(
           }
           var cards = picked.map { item ->
             GachaCard(
+              server = current,
               item = item,
               title = viewModel.displayTitle(item),
               // 海报按**实际显示尺寸**向服务端要（v202）：网格小卡 111~180dp 宽、
@@ -1810,9 +1783,8 @@ data class EmbyLibraryScreen(
      *
      * 三件事必须一起做：
      *  · **先关抽卡层** —— 播放页会压在本页之上，卡面留在下面没有意义；
-     *  · **同一帧挂上「正在打开」遮罩** —— 起播前最多要探 2 秒直链（`warmStream`），
-     *    不挂遮罩就是光秃秃的媒体库，用户以为刚才那一下点空了。遮罩复用随机播放那一个
-     *    （同一个 `AppLoadingIndicator` 入口、同一个吞重复点击的行为），不另造；
+     *  · **同一帧挂上「正在打开」遮罩** —— 防止重复点击，并覆盖播放器 Activity
+     *    真正启动前的短暂切换；
      *  · **用可等待的起播**（[EmbyViewModel.launchRandomPlaybackAwait]）—— fire-and-forget
      *    那版立刻返回，`finally` 当场就把遮罩撤了，空窗照样露出来。
      *
@@ -1849,7 +1821,7 @@ data class EmbyLibraryScreen(
       scope.launch {
         try {
         val current = viewModel.currentServerOrAwait() ?: return@launch
-        val random = viewModel.loadPhotos(
+        val randomPage = viewModel.loadPhotos(
           server = current,
           parentId = libraryId,
           sortBy = "Random",
@@ -1857,7 +1829,8 @@ data class EmbyLibraryScreen(
           startIndex = 0,
           limit = browserPreferences.randomPlayCount.randomPlayLimit(),
           recursive = true,
-        ).Items
+        )
+        val random = randomPage.Items
         if (random.isEmpty()) {
           android.widget.Toast
             .makeText(context, "当前范围内没有照片", android.widget.Toast.LENGTH_SHORT)
@@ -1867,6 +1840,7 @@ data class EmbyLibraryScreen(
         backStack.add(
           EmbyPhotoBrowserScreen(
             initialPhotos = random,
+            initialConsumedCount = randomPage.consumedCount,
             initialIndex = 0,
             parentId = libraryId,
             title = title,
@@ -1900,10 +1874,10 @@ data class EmbyLibraryScreen(
         val items = random.mapNotNull { item ->
           val id = item.Id ?: return@mapNotNull null
           // 容器 / 编码元数据由 feedItemOf 一起带上：起播前据此预判该走哪个内核
-          feedItemOf(
+          feedPlaybackItemOf(
             item = item,
             title = viewModel.displayTitle(item),
-            url = viewModel.getStreamUrl(current, id),
+            streamUrl = { sourceId -> viewModel.getStreamUrl(current, id, mediaSourceId = sourceId) },
           )
         }
         if (items.isEmpty()) {
@@ -1922,7 +1896,7 @@ data class EmbyLibraryScreen(
         }
         // 与「随机播放」同一个意思：视界流同样要说明这次取片的范围（两种手势都弹）。
         showGestureHint("视界流", drillDown)
-        VerticalFeedActivity.launch(context, items, libraryId, favoritesOnly)
+        VerticalFeedActivity.launch(context, items, libraryId, favoritesOnly, current.id, initialConsumedCount = random.size)
         } finally {
           randomLaunching = false
         }
@@ -2569,6 +2543,7 @@ data class EmbyLibraryScreen(
               items(actorItems, key = { it.Id ?: it.Name ?: "" }) { person ->
                 val s = server ?: return@items
                 EmbyMediaCard(
+                  server = s,
                   title = person.Name.orEmpty(),
                   subtitle = null,
                   // 人物只有 Primary（头像），不跟着 cardStyle 跑去取 Backdrop
@@ -2712,7 +2687,9 @@ data class EmbyLibraryScreen(
                   // 照片行：缩略图走照片端点，副标题换成相机 / 尺寸（年份对照片没意义）
                   val isPhotoRow = item.Type == "Photo"
                   EmbyCompactRow(
+                    server = s,
                     title = viewModel.displayTitle(item),
+                    contentDescription = item.Name,
                     subtitle = if (isPhotoRow) photoSubtitle(item) else itemSubtitle(item),
                     imageUrl = if (isPhotoRow) {
                       viewModel.photoImageUrl(s, item, 240)
@@ -2741,7 +2718,6 @@ data class EmbyLibraryScreen(
                       actionTarget = item
                       menuAnchor = offset
                     },
-                    onToggleFavorite = if (quickFavoriteEnabled) ({ toggleFavoriteQuick(item, s) }) else null,
                     modifier = Modifier.animateItem(),
                   )
                 }
@@ -2816,7 +2792,6 @@ if (viewMode == EmbyLibraryViewMode.YEAR) {
   actionTarget = item
                menuAnchor = offset
          },
-          onToggleFavorite = if (quickFavoriteEnabled) ({ toggleFavoriteQuick(item, s) }) else null,
           titleMaxLines = titleLines,
           // 「剩余时长」角标只在「继续播放」分类里给（别的分类里是噪音）
           showRemaining = category == EmbyCategory.RESUMABLE,
@@ -2855,7 +2830,6 @@ if (viewMode == EmbyLibraryViewMode.YEAR) {
                         actionTarget = item
                         menuAnchor = offset
                       },
-                      onToggleFavorite = if (quickFavoriteEnabled) ({ toggleFavoriteQuick(item, s) }) else null,
                       titleMaxLines = titleLines,
                       // 「剩余时长」角标只在「继续播放」分类里给（别的分类里是噪音）
                       showRemaining = category == EmbyCategory.RESUMABLE,
@@ -2951,81 +2925,6 @@ if (viewMode == EmbyLibraryViewMode.YEAR) {
           // 空列表时弹窗会自动退回经典翻牌。
           reelCards = gachaReelCards,
         )
-      }
-
-      // ── 长按操作框：文件夹走「扫描 / 刷新元数据」，媒体走完整的那一套 ──
-      val target = actionTarget
-      val targetServer = server
-      if (target != null && targetServer != null) {
-        // 锚定到长按的那一点：菜单从手指旁边展开
-        Box(
-          modifier = Modifier.offset {
-            androidx.compose.ui.unit.IntOffset(
-              menuAnchor.x.roundToInt(),
-              menuAnchor.y.roundToInt(),
-            )
-          },
-        ) {
-        val targetId = target.Id
-        val targetName = viewModel.displayTitle(target)
-        if (isScannableFolder(target)) {
-          EmbyItemActionsDialog(
-            name = targetName,
-            kindLabel = "文件夹",
-            onDismissRequest = { actionTarget = null },
-            onScan = {
-              actionTarget = null
-              runEmbyLibraryAction(
-                context = context,
-                scope = scope,
-                server = targetServer,
-                itemId = targetId,
-                name = targetName,
-                okMessage = "已通知服务器扫描「$targetName」，稍后下拉刷新查看新文件",
-                action = { srv, id -> runCatching { viewModel.scanLibrary(srv, id) } },
-              )
-            },
-            onRefreshMetadata = { replaceMetadata, replaceImages ->
-              actionTarget = null
-              runEmbyLibraryAction(
-                context = context,
-                scope = scope,
-                server = targetServer,
-                itemId = targetId,
-                name = targetName,
-                okMessage = "已通知服务器刷新「$targetName」的元数据，稍后下拉刷新查看",
-                action = { srv, id ->
-                  runCatching { viewModel.refreshLibraryMetadata(srv, id, replaceMetadata, replaceImages) }
-                },
-              )
-            },
-          )
-        } else {
-          EmbyMediaActionsDialog(
-            server = targetServer,
-            item = target,
-            viewModel = viewModel,
-            onDismissRequest = { actionTarget = null },
-            onChanged = { updated ->
-              val id = updated.Id
-              if (id != null) {
-                items = items.map { if (it.Id == id) updated else it }
-                // 演员分类的长按（收藏/取消收藏演员）改的是 actorItems 这份独立数据，
-                // 不同步的话菜单关了红心不刷新
-                if (actorItems.any { it.Id == id }) {
-                  actorItems = actorItems.map { if (it.Id == id) updated else it }
-                }
-              }
-            },
-            onDeleted = { id ->
-              items = items.filterNot { it.Id == id }
-              EmbyLibraryCache.removeItem(id)
-            },
-            // 图片 / 元数据换过之后，列表里这条的 ImageTags 已经旧了，重拉一次才看得到新封面
-            onImagesChanged = { scope.launch { load(reset = true) } },
-          )
-        }
-        } // 关闭锚定 Box（菜单跟着长按的那一点走）
       }
 
     // ── 筛选面板（2026-10-09 改为「加号 + 复选对话框 + 圆角标签」版式）──
@@ -3458,7 +3357,6 @@ private fun EmbyLibraryMediaCell(
   folderCoverGen: Int,
   onClick: () -> Unit,
   onLongClick: ((androidx.compose.ui.geometry.Offset) -> Unit)?,
-  onToggleFavorite: (() -> Unit)?,
   titleMaxLines: Int = 1,
   /**
    * 是否在卡片左下角显示「剩余 xx分xx秒」。
@@ -3476,6 +3374,7 @@ private fun EmbyLibraryMediaCell(
   // 版式和信息都是错的。照片模式下服务端只会回 Photo，所以这条分支对纯视频列表零影响。
   if (item.Type == "Photo") {
     EmbyPhotoCard(
+      server = server,
       item = item,
       displayUrl = viewModel.photoImageUrl(server, item),
       // 原格式（可能是 HEIC/AVIF）解不动时，退回服务端 format=jpg 转码
@@ -3512,7 +3411,9 @@ private fun EmbyLibraryMediaCell(
   }
 
   EmbyMediaCard(
+    server = server,
     title = viewModel.displayTitle(item),
+    contentDescription = item.Name,
     subtitle = itemSubtitle(item),
     imageUrl = viewModel.imageUrl(server, item, imageTypeFor(cardStyle), 480),
     fallbackImageUrl = viewModel.imageUrl(server, item, "Primary", 480),
@@ -3527,7 +3428,6 @@ private fun EmbyLibraryMediaCell(
     style = cardStyle,
     fillWidth = cardStyle == EmbyCardStyle.POSTER,
     onLongClick = onLongClick,
-    onToggleFavorite = onToggleFavorite,
     titleMaxLines = titleMaxLines,
     // 文件夹类型图标：与宫格封面 / 「点进去还是播放」共用 isFolderLike 这一个判定，
     // 避免卡片与批量逻辑各写一份、改一处漏一处（见 needsFolderMosaic 的 KDoc）。
@@ -3570,6 +3470,7 @@ private fun ToolbarIconAction(
  */
 @Composable
 private fun EmbyCompactRow(
+  server: EmbyServer,
   title: String,
   subtitle: String?,
   imageUrl: String?,
@@ -3577,7 +3478,7 @@ private fun EmbyCompactRow(
   isFavorite: Boolean,
   onClick: () -> Unit,
   onLongClick: ((androidx.compose.ui.geometry.Offset) -> Unit)?,
-  onToggleFavorite: (() -> Unit)?,
+  contentDescription: String? = title,
   /** 是否为文件夹类条目：true 时在小海报左下角显示文件夹图标（与网格卡同一约定） */
   isFolder: Boolean = false,
   /** 列表 item 传进来的修饰符（`Modifier.animateItem()`），挂在根 Row 上做重排位移 */
@@ -3605,8 +3506,9 @@ private fun EmbyCompactRow(
         .background(MaterialTheme.colorScheme.surfaceVariant),
     ) {
       EmbyImage(
+        server = server,
         url = imageUrl,
-        contentDescription = title,
+        contentDescription = contentDescription,
         modifier = Modifier.fillMaxSize(),
         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
       )
@@ -3662,21 +3564,7 @@ private fun EmbyCompactRow(
         )
       }
     }
-    val onFav = onToggleFavorite
-    if (onFav != null) {
-      IconButton(onClick = onFav) {
-        Icon(
-          imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-          contentDescription = if (isFavorite) "取消收藏" else "收藏",
-          tint = if (isFavorite) {
-            MaterialTheme.colorScheme.primary
-          } else {
-            MaterialTheme.colorScheme.onSurfaceVariant
-          },
-          modifier = Modifier.size(20.dp),
-        )
-      }
-    } else if (isFavorite) {
+    if (isFavorite) {
       // 快捷收藏关闭：退回只读角标，只在已收藏时露一颗实心红心，不占可点区域
       Icon(
         imageVector = Icons.Default.Favorite,
@@ -4112,22 +4000,9 @@ private fun openItem(
   }
   runCatching {
     when (item.Type) {
-      "Series" -> backStack.add(
-        EmbyLibraryScreen(
-          libraryId = id,
-          title = item.Name ?: "",
-          collectionType = item.CollectionType,
-          includeItemTypes = listOf("Season"),
-        ),
-      )
+      "Series" -> backStack.add(EmbyDetailScreen(itemId = id, title = item.Name.orEmpty()))
 
-      "Season" -> backStack.add(
-        EmbyLibraryScreen(
-          libraryId = id,
-          title = item.Name ?: "",
-          includeItemTypes = listOf("Episode"),
-        ),
-      )
+      "Season" -> backStack.add(EmbyDetailScreen(itemId = id, title = item.Name.orEmpty()))
 
       // 相册：Emby 的「文件夹」分类里也会有它（照片库 / 家庭视频库），但装的是
       // 照片不是视频 —— 必须进专用照片网格（瀑布流 + 排序 + 随机播放）。
@@ -4191,7 +4066,7 @@ private fun openItem(
         ),
       )
 
-      else -> backStack.add(EmbyDetailScreen(itemId = id, title = item.Name ?: ""))
+      else -> backStack.add(EmbyDetailScreen(itemId = id, title = item.displayTitle()))
     }
   }.onFailure {
     Toast.makeText(

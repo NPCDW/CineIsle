@@ -1,7 +1,6 @@
 package app.marlboroadvance.mpvex.ui.browser.emby.photo
 
 import android.app.Application
-import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,45 +61,9 @@ import kotlinx.serialization.Serializable
 import org.koin.compose.koinInject
 
 /**
- * 照片全屏浏览器（Emby）。
- *
- * **外壳来自 [SharedPhotoViewer]**（与网络位置的 [app.marlboroadvance.mpvex.ui.browser
- * .networkstreaming.NetworkPhotoViewerScreen] 共用同一份实现）：翻页、沉浸、下拉关闭、
- * 幻灯片、胶片条、上一张/下一张、顶栏。改那些交互只需要改共享组件，两个入口同时生效。
- * 本文件只剩 Emby 特有的那一层：从服务端取图（`photoImageUrl` 的缩放 / JPEG 兜底）、
- * 长按操作面板、旋转、收藏、续页、记住浏览位置。
- *
- * 交互（需求锁定）：
- * - **缩放**：Telephoto（双指缩放 / 双击 / 拖拽），照片用 `ContentScale.Fit`
- *   不裁切；缩放中手势被 zoomable 消费，不会误触发翻页。最大 4×，越界橡皮筋回弹。
- * - **下拉关闭**：没放大的照片往下拖，整页跟手位移 + 缩小 + 变暗；拖过阈值松手就退出，
- *   没过就弹回去。⭐ 放大状态下不抢这个手势 —— 那时竖向拖动是「平移画面」，
- *   判据读 [PhotoZoomRegistry.zoomFractionOf]（不是 Compose State，所以不产生重组）。
- * - **沉浸（全屏）**：点画面任意处切换 —— 隐藏顶栏、翻页钮、幻灯片钮，只留照片；
- *   再点一次退出。顶栏也有一个入口（外壳画的「全屏」钮）。
- *   沉浸态下返回键先退出沉浸，再按才真的返回（不会「一键退出」）。
- * - **长按**：弹**底部操作面板**（保存原图 / 另存为 JPEG / 收藏 / 旋转 / 图片信息）。
- *   ⚠️ 长按只有这一个出口 —— 旧版「长按直接弹保存对话框」已收编进面板第一组，
- *   两个长按入口并存会让用户不知道长按到底会弹什么。
- * - **幻灯片**：右下角播放/暂停；间隔走「设置 → Emby 照片浏览与保存 → 幻灯片间隔」；
- *   **是否进页自播**走同页下方的「自动播放」开关（默认关，用户自己决定）。
- *   手动滑页只重置计时、不停止播放；播到最后一张自动停。
- *   **转场是淡出→换页→淡入**（不再是硬切），播放期间按钮上显示**剩余秒数**（圆环 + 数字）。
- *   播放期间 `keepScreenOn`，暂停/退出即解除。
- * - **底部胶片条**：设置开关（默认关），开着时底部多一条缩略图，点一下跳到那张。
- * - **左下角悬浮按钮**：横向排布的「上一张 / 下一张」半透明圆钮；
- *   第一张时上一张置灰、最后一张时下一张置灰（不留假按钮）。
- * - **底部信息栏**：文件名 + 「大小 · 日期」+ 序号，两个入口都有。
- * - **旋转**：顶栏按钮每次顺时针 90°，角度**按条目 Id** 记（翻页回来还在）。
- *   按钮由共享外壳画（[app.marlboroadvance.mpvex.ui.browser.photo.PhotoRotationState] 持有角度），
- *   长按面板的「旋转 90 度」走同一个入口。
- *   只影响显示与「另存为 JPEG」；「保存原图」永远是原字节，不跟着转。
- * - **前后预加载**：预取相邻 ±N 张（N 走「设置 → Emby 照片浏览与保存 → 照片预加载张数」，1~3）。
- * - **更多菜单**：图片信息（懒显示，只在点开时读当前条目的 EXIF 字段）/
- *   保存原图 / 另存为 JPEG。保存位置走「设置 → Emby 照片浏览与保存 → 照片保存位置」。
- * - **续页**：滑到距队列末尾 3 张以内自动拉下一页（StartIndex 用独立
- *   [consumed] 计数，不用队列 size）。
- * - **记住位置**：退出时按 parentId 记下当前第几张，下次进同一个相册由网格页定位回去。
+ * Read-only Emby photo browser. SharedPhotoViewer provides zoom, rotation,
+ * immersive paging, slideshow and filmstrip. This screen loads images and
+ * subsequent pages, remembers local viewing position, and shows photo metadata.
  */
 @Serializable
 data class EmbyPhotoBrowserScreen(
@@ -110,6 +73,7 @@ data class EmbyPhotoBrowserScreen(
   /** 库 Id 或相册 Id：续页按同一父级拉 */
   val parentId: String,
   val title: String = "",
+  val initialConsumedCount: Int = initialPhotos.size,
 ) : Screen {
   @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
   @Composable
@@ -127,13 +91,12 @@ data class EmbyPhotoBrowserScreen(
     val safeInitial = initialIndex.coerceIn(0, maxOf(0, initialPhotos.size - 1))
     val pagerState = rememberPagerState(initialPage = safeInitial) { queue.size }
     var totalCount by remember { mutableIntStateOf(0) }
-    var consumed by remember { mutableIntStateOf(initialPhotos.size) }
+    var consumed by remember { mutableIntStateOf(initialConsumedCount) }
     var loadingMore by remember { mutableStateOf(false) }
 
     // 幻灯片 / 沉浸 / 下拉关闭 / 胶片条 / 信息栏 / 顶栏的全屏与旋转钮
-    // 全部在 [SharedPhotoViewer] 里（与网络位置的照片浏览器共用一份实现），
-    // 这一层只留 Emby 特有的东西：保存、长按操作面板、续页、收藏、取图 URL。
-    var saving by remember { mutableStateOf(false) }
+    // 全部在 [SharedPhotoViewer] 里，
+    // 这一层保留只读图片信息、续页和取图 URL。
     var showInfo by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     val currentPage = pagerState.currentPage
@@ -160,15 +123,11 @@ data class EmbyPhotoBrowserScreen(
     // ── 旋转 ──
     // 角度按**条目 Id** 记（不是按页码）：续页追加、来回翻页都不会丢。
     // 状态实例与共享外壳**共用同一个**：顶栏旋转钮在外壳里画，这里的
-    // 「另存为 JPEG」导出角度、长按面板的「旋转 90 度」读写的必须是同一份 ——
-    // 各存一份的后果是「顶栏转过了，导出还是正的」。
+    // 长按面板与顶栏使用同一份本机显示旋转状态。
     val rotation = rememberPhotoRotationState()
 
     /** 旋转状态的 key（与 entries 里的 key 完全一致，否则两边会记到不同槽位） */
     fun rotationKeyOf(item: EmbyItem): Any = item.Id ?: item.Name.orEmpty()
-
-    /** 某张照片当前应显示的旋转角（顺时针，0/90/180/270） */
-    fun rotationOf(item: EmbyItem?): Int = item?.let { rotation.of(rotationKeyOf(it)) } ?: 0
 
     /** 长按命中的条目；非空时弹底部操作面板 */
     var longPressTarget by remember { mutableStateOf<EmbyItem?>(null) }
@@ -192,15 +151,27 @@ data class EmbyPhotoBrowserScreen(
       scope.launch {
         val result = runCatching {
           withContext(Dispatchers.IO) {
-            vm.loadPhotos(current, parentId, startIndex = consumed, limit = PAGE_SIZE)
+            var skipped = 0
+            var page: app.marlboroadvance.mpvex.domain.emby.EmbyItemsResult
+            do {
+              page = vm.loadPhotos(current, parentId, startIndex = consumed + skipped, limit = PAGE_SIZE)
+              if (page.Items.isNotEmpty() || page.consumedCount == 0) break
+              skipped += page.consumedCount
+              if (page.TotalRecordCount > 0 && consumed + skipped >= page.TotalRecordCount) {
+                page = page.copy(consumedCount = 0)
+                break
+              }
+              if (skipped >= PAGE_SIZE * 50) throw IllegalStateException("过滤条目过多，请重试以继续加载。")
+            } while (true)
+            page.copy(consumedCount = skipped + page.consumedCount)
           }
         }
         result.onSuccess { res ->
           totalCount = res.TotalRecordCount
           val seen = queue.mapNotNull { it.Id }.toHashSet()
           queue = queue + res.Items.filter { it.Id == null || it.Id !in seen }
-          consumed += res.Items.size
-          if (res.Items.isEmpty()) totalCount = consumed // 没数据就停，别死循环
+          consumed += res.consumedCount
+          if (res.consumedCount == 0) totalCount = consumed
         }
         loadingMore = false
       }
@@ -233,6 +204,7 @@ data class EmbyPhotoBrowserScreen(
           withContext(Dispatchers.IO) {
             EmbyPhotoImageLoader.preload(
               context = context,
+              server = current,
               url = vm.photoImageUrl(current, item, maxWidth = PHOTO_MAX_WIDTH),
               fallbackUrl = vm.photoImageUrl(
                 current,
@@ -246,71 +218,6 @@ data class EmbyPhotoBrowserScreen(
       }
     }
 
-    /**
-     * 保存某张照片。
-     *
-     * @param item 目标照片（顶部菜单传当前这张；长按菜单传长按到的那张）
-     * @param asJpeg true = 另存为 JPEG（按用户当前旋转角度导出），false = 保存原图（原字节）
-     */
-    fun savePhoto(item: EmbyItem?, asJpeg: Boolean) {
-      val current = server ?: return
-      if (item == null) return
-      if (saving) return
-      saving = true
-      // 保存位置优先级：自研选择器选的绝对路径 > 老版本的 SAF 树 URI > 系统相册
-      val saveDirPath = browserPreferences.photoSaveDirPath.get().takeIf { it.isNotBlank() }
-      val saveDirUri = browserPreferences.photoSaveDirUri.get().takeIf { it.isNotBlank() }
-      scope.launch {
-        val result = if (asJpeg) {
-          EmbyPhotoSaver.saveAsJpeg(
-            context = context,
-            server = current,
-            item = item,
-            saveDirUri = saveDirUri,
-            rotationDegrees = rotationOf(item),
-            saveDirPath = saveDirPath,
-          )
-        } else {
-          EmbyPhotoSaver.saveOriginal(
-            context = context,
-            server = current,
-            item = item,
-            saveDirUri = saveDirUri,
-            saveDirPath = saveDirPath,
-          )
-        }
-        saving = false
-        val where = if (saveDirPath == null && saveDirUri == null) "系统相册" else "所选目录"
-        val message = when (result) {
-          is EmbyPhotoSaver.Result.Success -> if (asJpeg) "已保存 JPEG 到$where" else "原图已保存到$where"
-          is EmbyPhotoSaver.Result.Failure -> result.reason
-        }
-        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-      }
-    }
-
-    /** 收藏 / 取消收藏当前这张（写服务端，失败要给提示，不能静默） */
-    fun toggleFavorite(item: EmbyItem) {
-      val current = server ?: return
-      val target = item.UserData?.IsFavorite != true
-      scope.launch {
-        val ok = runCatching {
-          withContext(Dispatchers.IO) { vm.toggleFavorite(current, item, target) }
-        }.isSuccess
-        Toast.makeText(
-          context,
-          if (!ok) {
-            "操作失败，请检查网络"
-          } else if (target) {
-            "已加入收藏"
-          } else {
-            "已取消收藏"
-          },
-          Toast.LENGTH_SHORT,
-        ).show()
-      }
-    }
-
     SharedPhotoViewer(
       entries = entries,
       pagerState = pagerState,
@@ -318,9 +225,9 @@ data class EmbyPhotoBrowserScreen(
       autoPlaySlideshow = autoPlaySlideshow,
       rotation = rotation,
       onBack = { backStack.removeLastOrNull() },
-      topBarActions = { chrome ->
+      topBarActions = { _ ->
         // ⚠️ 全屏 / 旋转**已经由外壳画**。
-        //    这里只放「更多」——以前这两个按钮写在本文件里，直接导致网络版没有。
+        //    更多菜单只提供图片信息。
         Box {
           IconButton(onClick = { showMenu = true }) {
             Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White)
@@ -336,20 +243,6 @@ data class EmbyPhotoBrowserScreen(
                 showInfo = true
               },
             )
-            DropdownMenuItem(
-              text = { Text("保存原图") },
-              onClick = {
-                showMenu = false
-                savePhoto(queue.getOrNull(chrome.currentIndex), asJpeg = false)
-              },
-            )
-            DropdownMenuItem(
-              text = { Text("另存为 JPEG") },
-              onClick = {
-                showMenu = false
-                savePhoto(queue.getOrNull(chrome.currentIndex), asJpeg = true)
-              },
-            )
           }
         }
       },
@@ -358,6 +251,7 @@ data class EmbyPhotoBrowserScreen(
         if (item != null) {
           val current = server
           EmbyPhotoPageImage(
+            server = current,
             url = current?.let { vm.photoImageUrl(it, item, maxWidth = PHOTO_MAX_WIDTH) },
             fallbackUrl = current?.let {
               vm.photoImageUrl(it, item, maxWidth = PHOTO_MAX_WIDTH, format = "jpg")
@@ -382,6 +276,7 @@ data class EmbyPhotoBrowserScreen(
         val item = queue.getOrNull(index)
         if (item != null) {
           EmbyPhotoThumbnail(
+            server = server,
             url = server?.let { vm.photoImageUrl(it, item, maxWidth = FILMSTRIP_WIDTH) },
             fallbackUrl = server?.let {
               vm.photoImageUrl(it, item, maxWidth = FILMSTRIP_WIDTH, format = "jpg")
@@ -433,26 +328,12 @@ data class EmbyPhotoBrowserScreen(
       }
 
       // ── 长按操作面板 ──
-      // 长按的**唯一**出口。「保存原图 / 另存为 JPEG」从旧版那个「长按直接弹的
-      // 保存对话框」搬到这里的第一组 —— 功能一个没少，但不再有两个长按入口打架。
+      // 只读操作：旋转与图片信息。
       val longPressed = longPressTarget
       if (longPressed != null) {
         PhotoActionSheet(
           title = longPressed.Name,
-          favorite = longPressed.UserData?.IsFavorite == true,
           onDismiss = { longPressTarget = null },
-          onSaveOriginal = {
-            longPressTarget = null
-            savePhoto(longPressed, asJpeg = false)
-          },
-          onSaveJpeg = {
-            longPressTarget = null
-            savePhoto(longPressed, asJpeg = true)
-          },
-          onToggleFavorite = {
-            longPressTarget = null
-            toggleFavorite(longPressed)
-          },
           onRotate = {
             longPressTarget = null
             // 与顶栏旋转钮同一个动作入口（外壳持有的那份状态），别在这里另存一份角度
@@ -482,24 +363,12 @@ data class EmbyPhotoBrowserScreen(
   }
 }
 
-/**
- * 长按照片弹出的操作面板。
- *
- * ⚠️ **不加图标**：菜单项一律纯文字 + 可选副标题（项目 UI 纪律）。副标题只用在
- * 「两种保存方式」上 —— 这两个不解释一句，大部分人不知道有什么区别。
- *
- * 每项点完**先关面板再执行**：不关的话保存中的 Toast 会被面板盖住，
- * 而保存是几秒的异步操作，用户看到的是「点了没反应」。
- */
+/** Read-only photo actions: display rotation and metadata. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PhotoActionSheet(
   title: String?,
-  favorite: Boolean,
   onDismiss: () -> Unit,
-  onSaveOriginal: () -> Unit,
-  onSaveJpeg: () -> Unit,
-  onToggleFavorite: () -> Unit,
   onRotate: () -> Unit,
   onShowInfo: () -> Unit,
 ) {
@@ -521,20 +390,6 @@ private fun PhotoActionSheet(
           maxLines = 2,
         )
       }
-      PhotoActionItem(
-        title = "保存原图",
-        subtitle = "保留 EXIF 与原始格式",
-        onClick = onSaveOriginal,
-      )
-      PhotoActionItem(
-        title = "另存为 JPEG",
-        subtitle = "按当前旋转角度导出",
-        onClick = onSaveJpeg,
-      )
-      PhotoActionItem(
-        title = if (favorite) "取消收藏" else "加入收藏",
-        onClick = onToggleFavorite,
-      )
       PhotoActionItem(title = "旋转 90 度", onClick = onRotate)
       PhotoActionItem(title = "图片信息", onClick = onShowInfo)
     }

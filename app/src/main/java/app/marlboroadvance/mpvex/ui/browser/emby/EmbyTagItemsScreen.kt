@@ -1,5 +1,9 @@
 package app.marlboroadvance.mpvex.ui.browser.emby
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
 import app.marlboroadvance.mpvex.domain.emby.EmbyUserData
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import org.koin.compose.koinInject
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
 import app.marlboroadvance.mpvex.presentation.Screen
@@ -86,6 +91,7 @@ data class EmbyTagItemsScreen(
       factory = EmbyViewModel.factory(context.applicationContext as Application),
     )
     val server by viewModel.currentServer.collectAsState()
+    CompositionLocalProvider(LocalEmbyImageServer provides server) {
     val scope = rememberCoroutineScope()
     // 随机播放数量上限读用户设置，与媒体库 / 演员页的随机按钮同一口径
     val browserPreferences = koinInject<BrowserPreferences>()
@@ -133,6 +139,7 @@ data class EmbyTagItemsScreen(
         items = result.items.distinctBy { it.Id ?: it.Name ?: "" },
         totalCount = result.totalCount,
         pageSize = limit,
+        consumedCount = result.consumedCount,
       )
     }
 
@@ -222,52 +229,6 @@ data class EmbyTagItemsScreen(
               contentDescription = "随机播放",
             )
           }
-          // ── 顶栏收藏红心 ──
-          // 与演员作品页同一套交互：乐观更新红心 → 请求服务器 → 按结果修正并弹 Toast；
-          // 动效复用 FavoriteHeartIcon（弹跳 + 星光 + 红心渐变）。
-          // 仅当能解析出可收藏条目（类型 / 工作室）时显示；标签无 Id 自动隐藏红心。
-          val facetItemSnapshot = facetItem
-          if (facetItemSnapshot != null) {
-            val isFacetFavorite = facetItemSnapshot.UserData?.IsFavorite == true
-            IconButton(
-              enabled = true,
-              onClick = {
-                val current = facetItem ?: return@IconButton
-                val currentServer = server ?: return@IconButton
-                val wasFavorite = current.UserData?.IsFavorite == true
-                // 乐观更新：先把红心翻过来，动效才跟得上手指；失败再回滚
-                facetItem = current.copy(
-                  UserData = (current.UserData ?: EmbyUserData()).copy(IsFavorite = !wasFavorite),
-                )
-                scope.launch {
-                  val result = viewModel.toggleFavorite(currentServer, current)
-                  val nowFavorite = result.getOrNull()
-                  facetItem = current.copy(
-                    UserData = (current.UserData ?: EmbyUserData())
-                      .copy(IsFavorite = nowFavorite ?: wasFavorite),
-                  )
-                  Toast.makeText(
-                    context,
-                    when (nowFavorite) {
-                      true -> "已收藏「$keyword」"
-                      false -> "已取消收藏「$keyword」"
-                      null -> "收藏失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
-                    },
-                    Toast.LENGTH_SHORT,
-                  ).show()
-                }
-              },
-            ) {
-              // 与演员作品页同款：弹跳 + 星光 + 红心渐变（状态驱动，点击时先乐观更新）
-              // 尺寸对齐 24dp，避免「顶栏这颗比其它页面小一圈」的观感落差
-              FavoriteHeartIcon(
-                isFavorite = isFacetFavorite,
-                isToggling = false,
-                iconSize = 24.dp,
-                idleColor = LocalContentColor.current,
-              )
-            }
-          }
         },
       )
 
@@ -314,7 +275,8 @@ data class EmbyTagItemsScreen(
             ) {
               items(page.items, key = { it.Id ?: it.Name ?: "" }) { item ->
                 EmbyMediaCard(
-                  title = item.Name ?: "",
+                  title = item.displayTitle(),
+                  contentDescription = item.Name,
                   subtitle = item.ProductionYear?.toString(),
                   imageUrl = server?.let { viewModel.imageUrl(it, item, "Primary", 400) },
                   progress = null,
@@ -322,7 +284,7 @@ data class EmbyTagItemsScreen(
                   fillWidth = true,
                   onClick = {
                     item.Id?.let { id ->
-                      backStack.add(EmbyDetailScreen(itemId = id, title = item.Name ?: ""))
+                      backStack.add(EmbyDetailScreen(itemId = id, title = item.displayTitle()))
                     }
                   },
                 )
@@ -342,6 +304,7 @@ data class EmbyTagItemsScreen(
           }
         }
       }
+    }
     }
   }
 }

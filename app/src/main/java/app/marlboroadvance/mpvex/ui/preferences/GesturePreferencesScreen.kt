@@ -263,7 +263,7 @@ object GesturePreferencesScreen : Screen {
                 SingleActionGesture.PlayPause,
                 SingleActionGesture.Custom,
               ),
-            valueToText = { AnnotatedString(context.getString(it.titleRes)) },
+            valueToText = { AnnotatedString(stringResource(it.titleRes)) },
             modifier = Modifier.settingsAnchor(R.string.pref_gesture_single_tap_center_title, R.string.pref_gesture_double_tap_center_title),
             title = {
               Text(
@@ -410,7 +410,7 @@ object GesturePreferencesScreen : Screen {
                 SingleActionGesture.PlayPause,
                 SingleActionGesture.Custom,
               ),
-            valueToText = { AnnotatedString(context.getString(it.titleRes)) },
+            valueToText = { AnnotatedString(stringResource(it.titleRes)) },
             modifier = Modifier.settingsAnchor(R.string.pref_gesture_media_play),
             title = { Text(text = stringResource(R.string.pref_gesture_media_play), maxLines = 1, overflow = TextOverflow.Ellipsis) },
             summary = { Text(
@@ -477,7 +477,6 @@ object GesturePreferencesScreen : Screen {
             }
           }
 
-          // View Section removed - "Tap thumbnail to select" moved to Appearance Preferences
         }
       }
     }

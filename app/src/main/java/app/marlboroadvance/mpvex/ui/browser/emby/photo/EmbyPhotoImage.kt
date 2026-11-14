@@ -33,6 +33,8 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
 import app.marlboroadvance.mpvex.ui.browser.emby.components.rememberShimmer
 import app.marlboroadvance.mpvex.ui.browser.emby.components.shimmer
 import app.marlboroadvance.mpvex.ui.browser.photo.PhotoLoadRegistry
@@ -75,15 +77,18 @@ fun rememberEmbyPhotoPainter(
   url: String?,
   fallbackUrl: String?,
   contentScale: ContentScale = ContentScale.Fit,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ): EmbyPhotoPainter {
   val context = LocalContext.current
   val imageLoader = remember(context) { EmbyPhotoImageLoader.get(context) }
 
   // 主地址失败过就改用兜底地址；换 url（翻页 / 换图）自动重置回主地址
-  var useFallback by remember(url, fallbackUrl) { mutableStateOf(false) }
-  val target = (if (useFallback) fallbackUrl else url).takeIf { !it.isNullOrBlank() }
+  var useFallback by remember(server, url, fallbackUrl) { mutableStateOf(false) }
+  val target = (if (useFallback) fallbackUrl else url).takeIf { server != null && !it.isNullOrBlank() }
 
-  val request = remember(target) { target?.let { EmbyPhotoImageLoader.request(context, it) } }
+  val request = remember(context, server, target) {
+    if (server != null && target != null) EmbyPhotoImageLoader.request(context, target, server) else null
+  }
   val painter = rememberAsyncImagePainter(
     model = request,
     imageLoader = imageLoader,
@@ -91,14 +96,17 @@ fun rememberEmbyPhotoPainter(
   )
   val state by painter.state.collectAsState()
 
-  LaunchedEffect(state, target) {
-    if (state is AsyncImagePainter.State.Error && !useFallback && target == url) {
+  LaunchedEffect(server, state, target) {
+    if (server != null && state is AsyncImagePainter.State.Error && !useFallback && target == url) {
       useFallback = true
     }
   }
 
-  return remember(painter, state) {
-    EmbyPhotoPainter(painter = painter, state = state) { painter.restart() }
+  return remember(context, server, target, painter, state) {
+    EmbyPhotoPainter(painter = painter.takeIf { server != null }, state = state.takeIf { server != null }) {
+      if (server != null && target != null) EmbyPhotoImageLoader.evict(context, target, server)
+      painter.restart()
+    }
   }
 }
 
@@ -116,8 +124,9 @@ fun EmbyPhotoThumbnail(
   contentDescription: String?,
   modifier: Modifier = Modifier,
   contentScale: ContentScale = ContentScale.Crop,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
-  val holder = rememberEmbyPhotoPainter(url, fallbackUrl, contentScale)
+  val holder = rememberEmbyPhotoPainter(url, fallbackUrl, contentScale, server)
   val shimmer = rememberShimmer()
   Box(modifier = modifier) {
     if (holder.painter != null) {
@@ -229,8 +238,9 @@ fun EmbyPhotoPageImage(
    * HEIC 兜底（Error → 换 JPEG）会让状态回到 Loading，正好等于「再等一会儿」。
    */
   loadRegistry: PhotoLoadRegistry? = null,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
-  val holder = rememberEmbyPhotoPainter(url, fallbackUrl, ContentScale.Fit)
+  val holder = rememberEmbyPhotoPainter(url, fallbackUrl, ContentScale.Fit, server)
   val shimmer = rememberShimmer()
   // ⚠️ 参数名以 javap 出的真实签名为准：ZoomSpec(maxZoomFactor, minZoomFactor,
   //    overzoomEffect)。凭印象写 `minimum` / `maximum` / `preventOverOrUnderZoom`

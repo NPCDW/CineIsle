@@ -1,0 +1,66 @@
+FROM debian:trixie-slim
+
+RUN sed -i "s@http://deb.debian.org/debian@http://mirrors.cloud.tencent.com/debian@g" /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Check-Valid-Until "false";\nAcquire::Check-Date "false";\n' > /etc/apt/apt.conf.d/99no-valid-until \
+    && apt-mark hold tzdata && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl wget unzip openssh-server git openjdk-21-jdk-headless \
+    && ln -s "$(dirname "$(dirname "$(readlink -f /usr/bin/javac)")")" /opt/java \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 vscode（固定官方镜像版本，避免 GitHub 安装脚本下载失败）
+RUN curl -fsSL https://code-server.dev/install.sh | sh \
+    && code-server --install-extension cnbcool.cnb-welcome --force \
+    && code-server --install-extension tamasfe.even-better-toml --force \
+    && code-server --install-extension fill-labs.dependi --force \
+    && code-server --install-extension Tencent-Cloud.coding-copilot --force \
+    && code-server --install-extension donjayamanne.githistory --force
+
+ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
+ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
+
+ENV LANG=C.UTF-8 \
+    JAVA_HOME=/opt/java \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    GIT_EXE=/usr/bin/git
+ENV PATH="${JAVA_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/36.0.0:${PATH}"
+
+# CineIsle: AGP 9.4 / Gradle 9.6，使用项目自带的 Gradle Wrapper
+RUN mkdir -p /tmp/android-cli-download /tmp/android-cli-extract "${ANDROID_HOME}/cmdline-tools" \
+    && curl -fSL --retry 3 "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/android-cli-download/tools.zip \
+    && printf '%s  %s\n' "${ANDROID_CMDLINE_TOOLS_SHA256}" /tmp/android-cli-download/tools.zip | sha256sum -c - \
+    && unzip -q /tmp/android-cli-download/tools.zip -d /tmp/android-cli-extract \
+    && mv /tmp/android-cli-extract/cmdline-tools "${ANDROID_HOME}/cmdline-tools/latest" \
+    && rm -rf /tmp/android-cli-download /tmp/android-cli-extract \
+    && yes | sdkmanager --sdk_root="${ANDROID_HOME}" --licenses >/dev/null
+
+RUN sdkmanager --sdk_root="${ANDROID_HOME}" "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+
+# Maven Central 在当前网络返回 429；只替换 settings 仓库，兼容 FAIL_ON_PROJECT_REPOS
+RUN mkdir -p /root/.gradle/init.d \
+    && printf '%s\n' \
+    'def useMirrors = { repositories ->' \
+    '    repositories.withType(org.gradle.api.artifacts.repositories.MavenArtifactRepository).configureEach { repository ->' \
+    '        def address = repository.url.toString()' \
+    '        if (address.startsWith("https://repo.maven.apache.org/maven2") || address.startsWith("https://repo1.maven.org/maven2")) {' \
+    '            repository.setUrl("https://maven.aliyun.com/repository/public")' \
+    '        } else if (address.startsWith("https://plugins.gradle.org/m2")) {' \
+    '            repository.setUrl("https://maven.aliyun.com/repository/gradle-plugin")' \
+    '        }' \
+    '    }' \
+    '}' \
+    'gradle.beforeSettings { settings -> useMirrors(settings.pluginManagement.repositories) }' \
+    'gradle.settingsEvaluated { settings -> useMirrors(settings.dependencyResolutionManagement.repositories) }' \
+    > /root/.gradle/init.d/cineisle-mirrors.gradle
+
+# 预缓存项目 Wrapper 的发行包，校验值来自 gradle-wrapper.properties；不安装全局 Gradle
+RUN mkdir -p /root/.gradle/wrapper/dists/gradle-9.6.0-bin/42k10rwplmzkhuboz9kdazi7s \
+    && curl -fSL --retry 3 https://mirrors.cloud.tencent.com/gradle/gradle-9.6.0-bin.zip \
+        -o /root/.gradle/wrapper/dists/gradle-9.6.0-bin/42k10rwplmzkhuboz9kdazi7s/gradle-9.6.0-bin.zip \
+    && printf '%s  %s\n' bbaeb2fef8710818cf0e261201dab964c572f92b942812df0c3620d62a529a01 \
+        /root/.gradle/wrapper/dists/gradle-9.6.0-bin/42k10rwplmzkhuboz9kdazi7s/gradle-9.6.0-bin.zip | sha256sum -c -
+
+# 在 CineIsle 项目目录打单个 ARM64 Debug APK（自动签名）：
+# sh ./gradlew --no-daemon :app:assembleStandardDebug -Pabi=arm64-v8a
+WORKDIR /workspace
+CMD ["bash"]

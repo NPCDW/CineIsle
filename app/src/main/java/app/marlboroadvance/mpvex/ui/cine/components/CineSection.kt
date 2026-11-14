@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -36,9 +35,6 @@ import app.marlboroadvance.mpvex.ui.utils.pressDownScale
 
 /** 分区动作图标：换一批 */
 val CineRefreshIcon: ImageVector get() = Icons.Rounded.Refresh
-
-/** 分区动作图标：全部 / 尖角 */
-val CineChevronIcon: ImageVector get() = Icons.AutoMirrored.Rounded.KeyboardArrowRight
 
 /** 分区标题右侧的动作（`全部` / `换一批`）。不用 Button —— 它太宽，会抢走标题的重量。 */
 @Composable

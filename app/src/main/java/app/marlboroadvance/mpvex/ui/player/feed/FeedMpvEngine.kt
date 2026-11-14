@@ -1,37 +1,39 @@
 package app.marlboroadvance.mpvex.ui.player.feed
 
+import android.os.Handler
+import android.os.Looper
+import app.marlboroadvance.mpvex.domain.emby.playback.LoopbackPlaybackServer
+import app.marlboroadvance.mpvex.domain.emby.playback.PlaybackSpec
+import app.marlboroadvance.mpvex.ui.player.LoembyMpvTransport
+import app.marlboroadvance.mpvex.ui.player.LoembyPlaybackCallbacks
+import app.marlboroadvance.mpvex.ui.player.LoembyPlaybackCoordinator
+
 import android.content.Context
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import app.marlboroadvance.mpvex.R
-import app.marlboroadvance.mpvex.domain.emby.EmbyClient
 import app.marlboroadvance.mpvex.ui.player.MPVView
-import java.io.File
+import app.marlboroadvance.mpvex.ui.player.engine.PlayerLib
 import `is`.xyz.mpv.MPVLib
+import `is`.xyz.mpv.MPVNode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import `is`.xyz.mpv.Utils as MpvUtils
 
 /**
- * 视界流里的「mpv 兜底引擎」—— 只负责**当前这一条**的解码与出画面。
+ * 视界流里的 mpv 播放引擎。整个 feed 只创建这一份实例，翻页时通过 [play] 换源。
  *
- * ── 它是什么、不是什么 ──
- * 这里不是播放页的缩小版：没有控制器、没有播放列表、没有弹幕，只有「一块能放视频的
- * Surface」+ 几个取值/取值写入的方法。界面（标题、进度、按钮、手势）仍然全部由
- * [FeedScreen] 用 Compose 画 —— 用户看不到任何「换了内核」的痕迹。
- *
- * ── 为什么需要它 ──
- * 内置内核（ExoPlayer）的解复用器只认 mp4 / mkv / ts / flv 这一批，解码只能走系统
- * MediaCodec。wmv / asf / rmvb，以及本机没有硬件解码器、构建里也没打包 ffmpeg 扩展
- * 的编码，在上面两条路都走不通。mpv 自带完整 ffmpeg，是这类文件的唯一出路。
- *
- * ── mpv 是进程级单例，所以「只能有一条」 ──
- * `MPVLib` 一个进程只有一份句柄，不存在「两条同时用 mpv 播」的可能。本类的用法因此是
- * **同一时刻只服务一个下标**：
- * · 用户滑到某条解不了 → [play] 接管；
- * · 滑走 → [stop]，把内核让回空转状态，下一条照常走 ExoPlayer（默认引擎）；
- * · 再滑回来 → 重新 [play] 同一条（mpv 仍然只占这一份实例）。
- * 这也正是「mpv 只在个别条目上兜底、其它一律默认引擎」能成立的原因：
- * 只要同一时刻只有一条在用 mpv，单例就不是限制。
+ * 界面（标题、进度、按钮、手势）仍然由 [FeedScreen] 用 Compose 绘制；本类负责画面、
+ * loopback 注册以及 coordinator 生命周期。
  *
  * ── 生命周期 ──
  * [ensureHost] 必须在**主线程**调用，且要在画面 View 被加进窗口**之前**完成
@@ -42,7 +44,93 @@ import `is`.xyz.mpv.Utils as MpvUtils
  */
 internal class FeedMpvEngine(
   private val context: Context,
-) {
+  private val onError: (String) -> Unit = {},
+) : KoinComponent {
+
+  private val loopback: LoopbackPlaybackServer by inject()
+  private val coordinator: LoembyPlaybackCoordinator by inject()
+  private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private var registration: Job? = null
+  @Volatile private var generation = 0L
+  private var active = false
+  private var finished = false
+  private var released = false
+  @Volatile private var coreAlive = false
+  @Volatile private var observer: MPVLib.EventObserver? = null
+
+  private fun requireMain() = check(Looper.myLooper() == Looper.getMainLooper()) {
+    "Feed mpv access must run on Main"
+  }
+
+  private fun requireCore() {
+    requireMain()
+    check(coreAlive) { "Feed mpv core is not ready" }
+  }
+
+  /** Coordinator and the feed share exactly the initialized MPVLib singleton. */
+  private val transport = object : LoembyMpvTransport {
+    override fun command(vararg args: String) {
+      requireCore()
+      if (args.firstOrNull() == "loadfile") {
+        require(args.getOrNull(1)?.let(loopback::isLocalPlayUrl) == true) {
+          "Feed mpv only loads registered local /play_media URLs"
+        }
+      }
+      MPVLib.command(*args)
+    }
+    override fun getDouble(name: String): Double? { requireCore(); return MPVLib.getPropertyDouble(name) }
+    override fun propertyString(name: String): String? { requireCore(); return MPVLib.getPropertyString(name) }
+    override fun setDouble(name: String, value: Double) { requireCore(); MPVLib.setPropertyDouble(name, value) }
+    override fun setString(name: String, value: String) { requireCore(); MPVLib.setPropertyString(name, value) }
+    override fun setBoolean(name: String, value: Boolean) { requireCore(); MPVLib.setPropertyBoolean(name, value) }
+    override fun getBoolean(name: String): Boolean? { requireCore(); return MPVLib.getPropertyBoolean(name) }
+    override fun getNode(name: String): MPVNode? { requireCore(); return MPVLib.getPropertyNode(name) }
+  }
+
+  private fun registerObserver() {
+    requireCore()
+    val events = object : MPVLib.EventObserver {
+      private fun onMain(block: () -> Unit) {
+        val ticket = generation
+        mainHandler.post {
+          // Ignore queued events from a stopped request or a destroyed/recreated singleton.
+          if (coreAlive && observer === this && active && generation == ticket) {
+            runCatching(block).onFailure { Log.w("FeedMpv", "mpv event ignored") }
+          }
+        }
+      }
+      override fun eventProperty(property: String) {
+        onMain {
+          if (property == "eof-reached" && transport.getBoolean(property) == true) {
+            coordinator.eofReached(this@FeedMpvEngine)
+          }
+        }
+      }
+      override fun eventProperty(property: String, value: Boolean) {
+        onMain { if (property == "eof-reached" && value) coordinator.eofReached(this@FeedMpvEngine) }
+      }
+      override fun eventProperty(property: String, value: Double) {
+        onMain { coordinator.propertyChanged(property, value, this@FeedMpvEngine) }
+      }
+      override fun eventProperty(property: String, value: Long) {}
+      override fun eventProperty(property: String, value: String) {}
+      override fun eventProperty(property: String, value: MPVNode) {}
+      override fun event(eventId: Int, data: MPVNode) {
+        onMain {
+          when (eventId) {
+            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED,
+            MPVLib.MpvEvent.MPV_EVENT_START_FILE,
+            MPVLib.MpvEvent.MPV_EVENT_END_FILE -> coordinator.event(eventId, data, this@FeedMpvEngine)
+          }
+        }
+      }
+    }
+    observer = events
+    MPVLib.addObserver(events)
+    MPVLib.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+    MPVLib.observeProperty("volume", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+  }
 
   /** 画面 View（外层那层 FrameLayout）；null = 还没建（或建失败） */
   private var host: View? = null
@@ -52,17 +140,11 @@ internal class FeedMpvEngine(
   /** 初始化走到了不可恢复的失败 —— 不再重试，避免反复碰 native */
   private var broken = false
 
-  /** 当前交给 mpv 的地址（同一地址重复 [play] 直接忽略，防止无谓的重新打开） */
-  private var currentUrl: String? = null
+  /** A bound request is deduplicated before asynchronous local registration. */
+  private var currentSpec: PlaybackSpec? = null
 
-  /**
-   * 已经点名、但**还没送进 mpv** 的地址。
-   *
-   * 为什么要攒一下：`SurfaceHolder.surface.isValid` 为 false 时 mpv 没有输出窗口，
-   * 这时候把文件塞进去，`vo` 建不起来 ⇒ 有声音、画面全黑。所以 [play] 只登记，
-   * 由 [pump] 在 Surface 真正就绪之后才执行 `loadfile`。
-   */
-  private var pendingUrl: String? = null
+  /** Only a registered local /play_media URL may wait for Surface readiness. */
+  private var pendingLocalUrl: String? = null
 
   /**
    * `initOptions` 选定的视频输出（`gpu` 或 `gpu-next`）。
@@ -75,7 +157,7 @@ internal class FeedMpvEngine(
   private var voName: String? = null
 
   /** 是否已经成功初始化（之后才允许碰任何 `MPVLib` 属性） */
-  val ready: Boolean get() = mpvView != null
+  val ready: Boolean get() { requireMain(); return coreAlive }
 
   /** 已建好的画面 View（交给 Compose 的 AndroidView 托管用） */
   fun hostView(): View? = host
@@ -86,8 +168,10 @@ internal class FeedMpvEngine(
    * ⚠️ 调用时机见类注释：[ensureHost] 返回后调用方才可以把返回的 View 交给 Compose。
    */
   fun ensureHost(inflater: LayoutInflater): View? {
+    requireMain()
+    if (released) return null
     host?.let { return it }
-    if (broken) return null
+    if (broken || PlayerLib.isCoreReady) return null
 
     // ① 脚本 / 字体 / shader 先就位：`glsl-shaders`、`sub-fonts-dir` 这类都是
     //    setOptionString，过了 initialize 再设就不生效了（与 PlayerActivity 的
@@ -114,48 +198,75 @@ internal class FeedMpvEngine(
     }
 
     mpvView = view
+    coreAlive = true
+    PlayerLib.markCoreReady()
     host = root
+    runCatching { registerObserver() }.onFailure {
+      broken = true
+      release()
+      return null
+    }
     // 记下 initOptions 选定的输出（见 [voName] 的说明）：surfaceDestroyed 会把它
     // 置成 null，而我们不会走 AAR 那条「无待加载文件才恢复」的分支。
     voName = runCatching { MPVLib.getPropertyString("vo") }.getOrNull()
 
-    // ④ `keep-open` 保持 MPVView.initOptions 里的 true（不要改成 false）：
-    //    到片尾时 mpv 停在最后一帧、`eof-reached` 一直为真，[reachedEnd] 才有稳定的
-    //    判据；改成 false 会在 EOF 瞬间把播放列表清掉，`eof-reached` 跟着复位，
-    //    心跳很可能一次都读不到 ⇒ 播完就这么停在黑屏上。
-    //    视界流的「接着下一条」由调用方 eof → goNext 完成，不需要 mpv 自己收尾。
+    // Keep the final frame; Coordinator applies its EOF guard before the feed advances.
 
     return root
   }
 
-  /**
-   * 把与 ExoPlayer 侧**同一套**的请求头交给 mpv。
-   *
-   * 为什么必须一致：strm 的真实媒体在网盘 CDN 上，这类直链的签名把 UA 与 Referer
-   * 一起算进去。两个内核用不同的 UA 去拉同一个地址，就会一边能播、一边 403。
-   */
-  fun applyHeaders(headers: Map<String, String>) {
-    if (mpvView == null) return
-    headers["User-Agent"]?.let { ua ->
-      runCatching { MPVLib.setPropertyString("user-agent", ua) }
-    }
-    headers["Referer"]?.let { referer ->
-      runCatching { MPVLib.setPropertyString("http-header-fields", "Referer: $referer") }
-    }
-  }
-
-  /** 开始播 [url]（同一地址重复调用无副作用） */
-  fun play(url: String) {
-    if (mpvView == null) return
-    if (url == currentUrl) {
-      // 已经在放这一条（从别的条目滑回来时会被再次调用）：只把暂停解掉
-      runCatching { MPVLib.setPropertyBoolean("pause", false) }
+  /** Register asynchronously; native mpv only receives the registered local URL. */
+  fun play(spec: PlaybackSpec) {
+    requireMain()
+    if (!ready || released) return
+    if (active && spec == currentSpec) {
+      setPaused(false)
       return
     }
-    currentUrl = url
-    pendingUrl = url
-    // 立刻试一次：多数时候画面层早就 attach 好了（滑回来、重载都是在同一层上）
-    pump()
+    stop()
+    currentSpec = spec
+    active = true
+    finished = false
+    val ticket = generation
+    registration = scope.launch {
+      var local: String? = null
+      try {
+        local = loopback.register(spec)
+        if (!active || generation != ticket || !ready) return@launch
+        coordinator.prepare(local, transport, object : LoembyPlaybackCallbacks {
+          private fun ownsRequest() = active && coreAlive && generation == ticket
+          override fun onError(message: String) {
+            if (ownsRequest()) this@FeedMpvEngine.onError(message)
+          }
+          override fun onFinished(reason: String) {
+            if (!ownsRequest()) return
+            // Only Coordinator can accept EOF. Active stop is disabled before finish below.
+            finished = reason == "next" || reason == "end-of-playlist"
+            if (reason == "error") {
+              active = false
+              generation++
+              currentSpec = null
+              pendingLocalUrl = null
+              registration?.cancel()
+              runCatching { transport.command("stop") }
+              this@FeedMpvEngine.onError("Emby 播放失败，请重试或返回")
+            }
+          }
+        }, owner = this@FeedMpvEngine)
+        if (!active || generation != ticket || !ready) return@launch
+        pendingLocalUrl = local
+        pump()
+      } catch (cancelled: CancellationException) {
+        throw cancelled
+      } catch (_: Exception) {
+        if (active && generation == ticket && ready) {
+          stop()
+          onError("获取 Emby 本地播放地址失败，请检查服务器配置")
+        }
+      } finally {
+        if (!active || generation != ticket || !ready) local?.let(loopback::release)
+      }
+    }
   }
 
   /**
@@ -177,18 +288,23 @@ internal class FeedMpvEngine(
    * 就绪后立刻生效。
    */
   fun pump() {
+    requireMain()
     val view = mpvView ?: return
-    val url = pendingUrl ?: return
+    val local = pendingLocalUrl ?: return
+    if (!active || !ready) return
     val surfaceReady = runCatching { view.holder?.surface?.isValid == true }.getOrDefault(false)
     if (!surfaceReady) return
     // ① 先把 vo 恢复回来：surfaceDestroyed 会把 vo 与 force-window 一起关掉，
     //    不恢复就是「挂上了 Surface 也不出画面」—— 有声音、全黑。
     ensureVo(view)
-    pendingUrl = null
-    // ② `replace` 而不是默认的追加：这里是「一屏一条」的语义，不留队列
-    runCatching { MPVLib.command("loadfile", url, "replace") }
-    runCatching { MPVLib.setPropertyBoolean("pause", false) }
-    Log.w("FeedMpv", "loadfile: $url")
+    // Identity belongs exclusively to LoopbackHttpPool's upstream requests.
+    transport.setString("user-agent", "")
+    transport.setString("http-header-fields", "")
+    pendingLocalUrl = null
+    // A single logical entry; reloads from the EOF guard use this same guarded transport.
+    transport.command("loadfile", local, "replace")
+    transport.setBoolean("pause", false)
+    Log.w("FeedMpv", "loadfile")
   }
 
   /**
@@ -228,39 +344,67 @@ internal class FeedMpvEngine(
   fun surfaceReady(): Boolean =
     runCatching { mpvView?.holder?.surface?.isValid == true }.getOrDefault(false)
 
-  /** 停止播放并把内核置回空闲（滑走时调用：声音必须立刻停） */
-  fun stop() {
-    if (mpvView == null) return
-    currentUrl = null
-    pendingUrl = null
-    runCatching { MPVLib.command("stop") }
+  /** Main.immediate/UNDISPATCHED runs Coordinator cancellation before native teardown. */
+  private fun finishPlayback(reason: String, destroy: Boolean = false) {
+    requireMain()
+    active = false
+    finished = false
+    generation++
+    registration?.cancel()
+    registration = null
+    currentSpec = null
+    pendingLocalUrl = null
+    scope.launch(start = CoroutineStart.UNDISPATCHED) {
+      try {
+        coordinator.finish(reason = reason, owner = this@FeedMpvEngine)
+      } finally {
+        if (coreAlive) {
+          runCatching { transport.command("stop") }
+          runCatching { transport.setString("user-agent", "") }
+          runCatching { transport.setString("http-header-fields", "") }
+          if (destroy) {
+            observer?.let { runCatching { MPVLib.removeObserver(it) } }
+            observer = null
+            coreAlive = false
+            PlayerLib.markCoreGone()
+            runCatching { MPVLib.destroy() }
+            mpvView = null
+            host = null
+          }
+        }
+        if (destroy) scope.cancel()
+      }
+    }
   }
 
+  /** Stop immediately on Main; explicit stop must not trigger the feed's auto-next. */
+  fun stop() = finishPlayback("stop")
+
   fun setPaused(paused: Boolean) {
-    if (mpvView == null) return
+    if (!ready) return
     runCatching { MPVLib.setPropertyBoolean("pause", paused) }
   }
 
   fun isPaused(): Boolean =
-    if (mpvView == null) true else runCatching { MPVLib.getPropertyBoolean("pause") ?: true }
+    if (!ready) true else runCatching { MPVLib.getPropertyBoolean("pause") ?: true }
       .getOrDefault(true)
 
   fun positionSec(): Double =
-    if (mpvView == null) 0.0 else runCatching { MPVLib.getPropertyDouble("time-pos") ?: 0.0 }
+    if (!ready) 0.0 else runCatching { MPVLib.getPropertyDouble("time-pos") ?: 0.0 }
       .getOrDefault(0.0)
 
   fun durationSec(): Double =
-    if (mpvView == null) 0.0 else runCatching { MPVLib.getPropertyDouble("duration") ?: 0.0 }
+    if (!ready) 0.0 else runCatching { MPVLib.getPropertyDouble("duration") ?: 0.0 }
       .getOrDefault(0.0)
 
   fun seekTo(sec: Double) {
-    if (mpvView == null) return
+    if (!ready) return
     // v217：显式 `+keyframes`。mpv 是进程级单例 —— 主播放器的 PlayerViewModel 会
     // 按时长**动态改写全局 `hr-seek`**（小于 2 分钟的片子会被切成精确 seek），
     // 视界流的短 clip 恰好全落在这个区间里，等于被那条逻辑误伤：拖一下每条
     // seek 都要「解到精确帧」。命令级 flag 优先于全局选项，写死 keyframes
     // 才不受污染；对短视频拖动来说，落点差不到一个 GOP，用户感知不出。
-    runCatching { MPVLib.command("seek", sec.coerceAtLeast(0.0).toString(), "absolute+keyframes") }
+    runCatching { transport.command("seek", sec.coerceAtLeast(0.0).toString(), "absolute+keyframes") }
   }
 
   /**
@@ -270,34 +414,16 @@ internal class FeedMpvEngine(
    * 才有值，后者在某些容器上容器头一读完就能读到，拿它撤圈会撤出一个黑屏。
    */
   fun hasPicture(): Boolean =
-    if (mpvView == null) false else runCatching {
+    if (!ready) false else runCatching {
       (MPVLib.getPropertyInt("video-params/w") ?: 0) > 0
     }.getOrDefault(false)
 
   fun isBuffering(): Boolean =
-    if (mpvView == null) false else runCatching {
+    if (!ready) false else runCatching {
       MPVLib.getPropertyBoolean("paused-for-cache") ?: false
     }.getOrDefault(false)
 
-  fun reachedEnd(): Boolean =
-    if (mpvView == null) false else runCatching {
-      MPVLib.getPropertyBoolean("eof-reached") ?: false
-    }.getOrDefault(false)
-
-  /**
-   * 截图：写到 [target]，由调用方负责转存进相册。
-   *
-   * 为什么不能像 ExoPlayer 那条路一样从 View 上取像素：mpv 的输出是 SurfaceView 的
-   * Surface，画面在独立图层里，`getBitmap()` 拿不到（见 view_feed_mpv.xml 的说明）。
-   * mpv 自己能把当前帧按原分辨率写文件，效果更好。
-   */
-  fun screenshot(target: File): Boolean {
-    if (mpvView == null) return false
-    return runCatching {
-      MPVLib.command("screenshot-to-file", target.absolutePath)
-      true
-    }.getOrDefault(false)
-  }
+  fun reachedEnd(): Boolean { requireMain(); return ready && finished }
 
   /**
    * 释放内核。
@@ -307,10 +433,9 @@ internal class FeedMpvEngine(
    * 自己会 detachSurface，重复销毁反而容易碰上已释放的句柄。
    */
   fun release() {
-    stop()
-    if (mpvView != null) runCatching { MPVLib.destroy() }
-    mpvView = null
-    host = null
-    currentUrl = null
+    requireMain()
+    if (released) return
+    released = true
+    finishPlayback("quit", destroy = true)
   }
 }

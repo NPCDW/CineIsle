@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="emby_shared_loading">Loading servers from PostgreSQL…</string>
+    <string name="emby_shared_load_failed">Unable to load shared server configurations.</string>
+    <string name="emby_shared_retry">Retry</string>
+    <string name="emby_shared_refresh">Refresh shared configurations</string>
+    <string name="emby_shared_empty">No Emby servers in the shared database</string>
+    <string name="emby_shared_operation_failed">The operation failed. Check the connection or account and retry. No successful save was confirmed.</string>
+    <string name="emby_shared_error_config">The PostgreSQL configuration is invalid. Review the database settings.</string>
+    <string name="emby_shared_error_connection">Cannot reach PostgreSQL. Check the network and database availability, then retry.</string>
+    <string name="emby_shared_error_timeout">The PostgreSQL operation timed out. Refresh before retrying a change to check its result.</string>
+    <string name="emby_shared_error_auth">PostgreSQL authentication failed. Review the database account and access rules.</string>
+    <string name="emby_shared_error_database">The shared database is unavailable or permission was denied.</string>
+    <string name="emby_shared_error_tls">PostgreSQL TLS verification failed. Check the certificate and hostname.</string>
+    <string name="emby_shared_error_storage">The shared configuration could not be saved. Review the database and retry.</string>
+    <string name="emby_shared_error_load">The saved PostgreSQL configuration could not be loaded. Review the database settings.</string>
+    <string name="emby_shared_error_unknown">The PostgreSQL operation failed. Refresh or review the database settings and retry.</string>
+    <string name="emby_shared_error_schema">The shared database schema is incompatible. Update the clients or database schema; local server storage will not be used.</string>
+    <string name="emby_shared_error_source_changed">The configured database source changed. Refresh before editing this server again.</string>
+    <string name="emby_shared_error_not_found">This shared server no longer exists. Refresh the list.</string>
+    <string name="emby_shared_error_commit_unknown">The database commit result is unknown. Refresh to check whether the change was applied before retrying.</string>
+    <string name="emby_shared_no_usable_server">Shared servers are configured, but none is currently selected or usable. Open server management to check disabled states and invalid line or reverse-routing references.</string>
+    <string name="emby_servers_title">Servers</string>
+    <string name="emby_servers_back">Back</string>
+    <string name="emby_servers_settings">Settings</string>
+    <string name="emby_servers_empty">No servers. Configure them on the desktop, then refresh.</string>
+    <string name="emby_servers_unnamed">Emby server</string>
+    <string name="emby_servers_disabled">Disabled on desktop</string>
+    <string name="emby_servers_unavailable">Connection unavailable</string>
+    <string name="emby_servers_not_verified">Refresh to verify configuration</string>
+    <string name="emby_servers_connection_info">Connection information</string>
+    <string name="emby_servers_current_line">Current line</string>
+    <string name="emby_servers_reverse_proxy">Reverse proxy</string>
+    <string name="emby_servers_reverse_url">Reverse proxy URL</string>
+    <string name="emby_servers_effective_url">Effective connection URL</string>
+    <string name="emby_servers_none">None / unavailable</string>
+    <string name="emby_servers_close">Close</string>
+    <string name="emby_servers_read_only">Read-only configuration. Make changes in the desktop client.</string>
+    <string name="emby_servers_selection_failed">This server cannot be selected. Refresh the list and check its connection configuration on the desktop.</string>
+    <string name="emby_servers_refresh_failed">Unable to refresh servers. Check PostgreSQL availability and retry.</string>
+</resources>

@@ -1,16 +1,17 @@
 package app.marlboroadvance.mpvex.ui.browser.emby
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
-import android.widget.Toast
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -41,8 +42,6 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Edit
@@ -113,11 +112,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import app.marlboroadvance.mpvex.domain.dislike.DislikeKey
-import app.marlboroadvance.mpvex.domain.dislike.DislikeRepository
-import app.marlboroadvance.mpvex.domain.emby.EmbyDownloadStatus
-import app.marlboroadvance.mpvex.domain.emby.EmbyEnqueueResult
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
+import app.marlboroadvance.mpvex.domain.emby.EmbyItemPolicy
 import app.marlboroadvance.mpvex.domain.emby.EmbyMediaSource
 import app.marlboroadvance.mpvex.domain.emby.EmbyPerson
 import app.marlboroadvance.mpvex.domain.emby.EmbyRepository
@@ -131,6 +127,7 @@ import app.marlboroadvance.mpvex.domain.emby.MediaInfoEntry
 import app.marlboroadvance.mpvex.domain.emby.MediaSourcePreference
 import app.marlboroadvance.mpvex.domain.emby.buildEmbyMediaInfoEntries
 import app.marlboroadvance.mpvex.domain.emby.effectiveEmbyMediaSourceId
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.domain.emby.embyMediaSourceLabel
 import app.marlboroadvance.mpvex.domain.emby.formatEmbyDurationFull
 import app.marlboroadvance.mpvex.domain.playbackstate.repository.PlaybackStateRepository
@@ -139,35 +136,29 @@ import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
 import app.marlboroadvance.mpvex.presentation.components.ConfirmDialog
 import app.marlboroadvance.mpvex.presentation.components.pullrefresh.PullRefreshBox
-import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyIdentifyDialog
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImage
-import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyRefreshMetadataDialog
+import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySeriesDetailContent
+import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySeasonDetailContent
+import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyMediaDetailContent
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySkeletonDetail
-import app.marlboroadvance.mpvex.ui.browser.emby.components.EpisodeDownloadState
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EpisodeListSection
 import app.marlboroadvance.mpvex.ui.browser.emby.components.RelatedEpisodes
 import app.marlboroadvance.mpvex.ui.browser.emby.components.RelatedEpisodesSection
 import app.marlboroadvance.mpvex.ui.browser.emby.components.isSpecial
-import app.marlboroadvance.mpvex.ui.browser.emby.components.ExternalPlayerPickerDialog
 import app.marlboroadvance.mpvex.ui.browser.emby.components.FavoriteHeartIcon
 import app.marlboroadvance.mpvex.ui.browser.emby.components.rememberDominantColor
-import app.marlboroadvance.mpvex.ui.browser.emby.components.runEmbyLibraryAction
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
 import app.marlboroadvance.mpvex.ui.utils.longPressToCopy
-import android.net.Uri
-import androidx.compose.material.icons.outlined.Cast
 import org.koin.compose.koinInject
-import app.marlboroadvance.mpvex.dlna.DlnaSheet
-import app.marlboroadvance.mpvex.dlna.DlnaCastManager
-import app.marlboroadvance.mpvex.dlna.CastPayload
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import java.util.UUID
 
 /**
  * 媒体详情页。
  *
  * 布局（沉浸式）：
- * 1. 顶部透明栏浮在剧照之上：左侧返回，右侧「标记为已播放 / 收藏 / 更多」
+ * 1. 顶部透明栏浮在剧照之上：左侧返回
  * 2. 剧照（Backdrop）从屏幕顶端一直延伸到按钮下方，标题叠在剧照上
  * 3. 剧照下方依次是播放/删除按钮、简介、演职员，最后是完整的媒体编码信息
  */
@@ -175,43 +166,35 @@ import kotlinx.serialization.Serializable
 data class EmbyDetailScreen(
   val itemId: String,
   val title: String,
+  val detailEntryId: String = UUID.randomUUID().toString(),
 ) : Screen {
   @OptIn(ExperimentalMaterial3Api::class)
   @Composable
   override fun Content() {
     val context = LocalContext.current
     val backStack = LocalBackStack.current
+    val replaceEpisode: (EmbyItem) -> Unit = { episode ->
+      episode.Id?.takeIf { it.isNotBlank() }?.let { id ->
+        replaceTopEmbyDetailEntry(backStack, detailEntryId, id, episode.displayTitle())
+      }
+    }
     val viewModel: EmbyViewModel = viewModel(
       factory = EmbyViewModel.factory(context.applicationContext as Application),
     )
     val server by viewModel.currentServer.collectAsState()
+    CompositionLocalProvider(LocalEmbyImageServer provides server) {
     val scope = rememberCoroutineScope()
-    val dlnaManager = koinInject<DlnaCastManager>()
-    var castSheetShown by remember { mutableStateOf(false) }
-    var showEditMeta by remember { mutableStateOf(false) }
 
-    // 下载状态：用来把详情页的下载按钮显示成「下载 / 下载中 12% / 已下载」
-    val downloadViewModel: EmbyDownloadViewModel = viewModel(
-      factory = EmbyDownloadViewModel.factory(context.applicationContext as Application),
-    )
-    val downloadTasks by downloadViewModel.tasks.collectAsState()
-
-    var item by remember { mutableStateOf<EmbyItem?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
+    val initialServer = server
+    var item by remember(itemId, initialServer) {
+      mutableStateOf(initialServer?.let { EmbyDetailCache.item(it, itemId) })
+    }
+    var isLoading by remember(itemId, initialServer) { mutableStateOf(item == null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-    var showMoreMenu by remember { mutableStateOf(false) }
-    // 「更多」菜单里的刮削 / 刷新元数据：改为与媒体库长按菜单同一套的抽屉式实现
-    var showIdentifySheet by remember { mutableStateOf(false) }
-    var showRefreshSheet by remember { mutableStateOf(false) }
-    // 「用外部播放器打开」：null = 弹窗没开；非 null = 这份候选列表
-    var externalPlayers by remember { mutableStateOf<List<ExternalPlayerOption>?>(null) }
-    var externalLastKey by remember { mutableStateOf("") }
     // 下拉刷新的转圈状态（转完由 PullRefreshBox 自己收起）
     val isRefreshing = remember { mutableStateOf(false) }
     // 收藏请求进行中：挡住连点。否则「点了取消、请求还没回来又点一下」会拿旧状态
     // 再算一次方向，把刚取消的又收藏回去 —— 看起来就像「只能点亮、取消不了」。
-    var favoriteBusy by remember { mutableStateOf(false) }
     // 点播放 → 播放器真正起来之间有一段**实在的等待**：
     // 要解析直链、探测 ISO、拼 intent、再拉起 Activity，冷启动时尤其明显。
     // 这段空窗期什么都不显示的话，用户会以为「点了没反应」而反复点。
@@ -230,7 +213,7 @@ data class EmbyDetailScreen(
     // null = 不覆盖（单版本条目 / 本地还没按版本记过进度 ⇒ 沿用服务端进度）。
     var versionResumeSeconds by remember(itemId) { mutableStateOf<Long?>(null) }
     val playbackStateRepository = koinInject<PlaybackStateRepository>()
-    // 「多版本优先选择」规则：用户在播放入口（含外部播放器、含按版本存续播进度）
+    // 「多版本优先选择」规则：用户在播放入口（含按版本存续播进度）
     // 没手动选版本时据此自动挑。用 .get() 而不是 collectAsState 是**刻意的**：
     // 这是一次性取值（点播放的那一刻决定用哪个版本），不需要在改设置时让整页重组。
     // ⚠️ 位置很要紧：下面的 LaunchedEffect 与后面的播放/媒体信息都要用它，
@@ -257,35 +240,27 @@ data class EmbyDetailScreen(
         }
     }
 
-    // ── 「标记为不喜欢」──
-    // 状态直接读仓库的内存快照（O(1)、零 IO），并订阅全量流 ⇒
-    // 在播放器里标了 / 取消了，回到本页菜单项的文案与图标自动跟着变，
-    // 不需要任何"通知详情页刷新"的代码。
-    val dislikeRepository = koinInject<DislikeRepository>()
-    val browserPreferencesForDislike = koinInject<BrowserPreferences>()
-    // 提前取出图片 URL 生成器：koinInject 只能在组合函数体里调，
-    // 而真正用它的地方在 onToggleDislike 回调（此时已出组合作用域）。
-    val embyRepositoryForDislike = koinInject<EmbyRepository>()
-    // 用 currentServer（StateFlow）而不是 currentServerOrAwait()（suspend）：
-    // 这里是组合函数体，不能调挂起函数；而且服务器恢复本来是异步的，
-    // 订阅 StateFlow 天然覆盖「先 null 后有值」这一路。
-    val dislikeServer by viewModel.currentServer.collectAsState()
-    val dislikeKey = remember(itemId, dislikeServer?.id) {
-      dislikeServer?.id?.let { DislikeKey(it, itemId) }
-    }
-    val dislikeMarks by dislikeRepository.all.collectAsState()
-    val isDisliked = dislikeKey != null &&
-      dislikeMarks.any { it.key == dislikeKey && it.active }
-    val showDislikeInMenu by browserPreferencesForDislike.dislikeShowInDetailMenu
-      .collectAsState()
-
-    suspend fun load() {
+    suspend fun load(force: Boolean = false) {
       // 冷启动时当前服务器可能还没恢复，这里等一下，避免静默不加载
       val current = viewModel.currentServerOrAwait() ?: return
-      isLoading = true
-      runCatching { viewModel.loadItemDetail(current, itemId) }
-        .onSuccess { item = it }
-        .onFailure { error = it.message ?: "加载详情失败" }
+      val hadItem = item != null
+      if (!hadItem) isLoading = true
+      // Direct detail routes must pass the same policy as browse/play before exposing actions.
+      runCatching {
+        EmbyDetailCache.loadItem(current, itemId, force) {
+          viewModel.loadItemDetail(current, itemId).also { EmbyItemPolicy.requireSupported(it) }
+        }
+      }
+        .onSuccess {
+          item = it
+          error = null
+        }
+        .onFailure {
+          if (!hadItem) {
+            item = null
+            error = it.message ?: "加载详情失败"
+          }
+        }
       isLoading = false
     }
 
@@ -302,36 +277,26 @@ data class EmbyDetailScreen(
       backStack.add(screen)
     }
 
-    LaunchedEffect(itemId) { load() }
+    LaunchedEffect(itemId, initialServer) { load(force = item != null) }
 
-    // ── 分集列表（电视剧 / 综艺）──
-    // ⚠️ 数据**必须提在这一层**，理由与下面的推荐区完全相同：分集区是 LazyColumn 里的
-    // `item {}`，滚出视口会被销毁组合、滚回来重新组合 —— 请求写在区块内部的话，
-    // 上下滑一趟就会把整部剧的分集重新拉好几轮（长剧一次几百 KB）。
-    // 只有 `Series` 才发这个请求：`Episode` 自己的详情页不需要，电影更没有。
-    var seriesEpisodes by remember(itemId) { mutableStateOf<List<EmbyItem>>(emptyList()) }
-    var episodesLoading by remember(itemId) { mutableStateOf(false) }
-    LaunchedEffect(itemId, item?.Type, server?.id) {
-      val current = item ?: return@LaunchedEffect
-      val currentServer = server ?: return@LaunchedEffect
-      if (current.Type != "Series") return@LaunchedEffect
-      episodesLoading = true
-      seriesEpisodes = runCatching {
-        viewModel.loadSeriesEpisodes(currentServer, current.Id ?: itemId)
-      }.getOrDefault(emptyList())
-      episodesLoading = false
-    }
+    // 剧集详情只展示季列表；单集播放队列由相关分集提供。
+    val seriesEpisodes = emptyList<EmbyItem>()
 
     // 从播放器返回时刷新详情：播放器的进度/已看上报是异步落到服务器的，而本页组合
     // 在播放期间并未销毁（播放器是另一个 Activity），返回时 LaunchedEffect 不会重跑，
     // 不刷新的话进度条就停在进来之前的旧值。延迟 800ms 等上报先落库再拉。
     val detailLifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(detailLifecycleOwner, itemId) {
+      var initialResume = true
       val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-        if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && item != null) {
-          scope.launch {
-            kotlinx.coroutines.delay(800)
-            load()
+        if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+          if (initialResume) {
+            initialResume = false
+          } else if (item != null) {
+            scope.launch {
+              kotlinx.coroutines.delay(800)
+              load(force = true)
+            }
           }
         }
       }
@@ -371,80 +336,13 @@ data class EmbyDetailScreen(
     var genreRecommendItems by remember(itemId) { mutableStateOf<List<EmbyItem>>(emptyList()) }
     var recommendReloadKey by remember(itemId) { mutableStateOf(0) }
 
-    // ── 单集详情页的「相关分集」──
-    // 只有**当前条目是 Episode** 时才需要：这时 `seriesEpisodes` 是空的（只有 Series 才拉全剧），
-    // 页面上没有任何入口能切到兄弟集，用户点进第 3 集就困在第 3 集。
-    // 数据分两段、成本差很多：
-    //  ① 同季 + 特别篇：`SiblingIds`（随详情一起回来，零额外往返）→ 一次 `Ids` 批量取内容；
-    //  ② 演员相关：`/Items?PersonIds&IncludeItemTypes=Episode` 再按 SeriesId 过滤。
-    //      这一步要多发请求，所以只取**第一个演员**（`People` 首位），不遍历全阵容。
-    var relatedEpisodes by remember(itemId) { mutableStateOf(RelatedEpisodes()) }
-    LaunchedEffect(itemId, item?.Id, item?.Type, server?.id, recommendReloadKey) {
-      val current = item ?: return@LaunchedEffect
-      val currentServer = server ?: return@LaunchedEffect
-      if (current.Type != "Episode") {
-        relatedEpisodes = RelatedEpisodes()
-        return@LaunchedEffect
-      }
-      val selfId = current.Id ?: itemId
-      val siblingIds = current.SiblingIds.filter { it != selfId }
-      withContext(Dispatchers.IO) {
-        // ① 兄弟集：有 SiblingIds 就只取它们；没有就退回「按 SeriesId 拉全剧」——
-        //    老服务端不返回 SiblingIds，退回路径保证这一区不会凭空消失。
-        val seasonmates = if (siblingIds.isNotEmpty()) {
-          viewModel.loadItemsByIds(currentServer, siblingIds + selfId)
-            .sortedBy { it.IndexNumber ?: Int.MAX_VALUE }
-        } else {
-          val seriesId = current.SeriesId
-          if (seriesId.isNullOrBlank()) {
-            emptyList()
-          } else {
-            viewModel.loadSeriesEpisodes(currentServer, seriesId)
-              // ⚠️ 只留**同一季**：没有 SiblingIds 时只能靠 ParentIndexNumber 判「同季」，
-              //    不判的话整部剧几十集全塞进「同季」区，名不副实。
-              .filter { it.ParentIndexNumber == current.ParentIndexNumber }
-              .sortedBy { it.IndexNumber ?: Int.MAX_VALUE }
-          }
-        }
-        val (specials, mains) = seasonmates.partition { it.isSpecial() }
-        relatedEpisodes = RelatedEpisodes(
-          sameSeason = mains,
-          specials = specials,
-        )
-
-        // ② 演员相关：只取一个演员（`People` 里 Type == Actor 的第一位）
-        val actor = current.People.orEmpty()
-          .firstOrNull { it.Type == "Actor" && it.Id != null }
-        if (actor?.Id == null) return@withContext
-        val seriesId = current.SeriesId
-        val works = viewModel.loadPersonItems(
-          server = currentServer,
-          personId = actor.Id,
-          limit = 100,
-          includeItemTypes = listOf("Episode"),
-        )
-        val siblings = works
-          .filter { ep ->
-            ep.Id != null && ep.Id != selfId &&
-              // 同一部剧：SeriesId 一致。本地 / 缺字段时退化成按剧名比 —— 否则整区为空。
-              (ep.SeriesId != null && ep.SeriesId == seriesId || ep.SeriesName == current.SeriesName)
-          }
-          .distinctBy { it.Id }
-          .sortedWith(
-            compareBy({ it.ParentIndexNumber ?: Int.MAX_VALUE }, { it.IndexNumber ?: Int.MAX_VALUE }),
-          )
-        if (siblings.isNotEmpty()) {
-          relatedEpisodes = relatedEpisodes.copy(
-            actorEpisodes = siblings,
-            actorName = actor.Name,
-          )
-        }
-      }
-    }
+    // Episode 使用共用页面的当前季分页，不再查询旧的相关分集与演员作品。
+    val relatedEpisodes = RelatedEpisodes()
 
     LaunchedEffect(itemId, item?.Id, server?.id, showRecommendations, recommendReloadKey) {
       if (!showRecommendations) return@LaunchedEffect
       val current = item ?: return@LaunchedEffect
+      if (current.Type in listOf("Series", "Season", "Episode", "Movie")) return@LaunchedEffect
       val currentServer = server ?: return@LaunchedEffect
       val currentId = current.Id ?: itemId
 
@@ -518,6 +416,28 @@ data class EmbyDetailScreen(
         else -> {
           val current = item ?: return@Box
           val currentServer = server ?: return@Box
+          if (current.Type.equals("Season", ignoreCase = true)) {
+            EmbySeasonDetailContent(
+              season = current,
+              server = currentServer,
+              viewModel = viewModel,
+              onBack = { backStack.removeLastOrNull() },
+              onOpenEpisode = { episode -> episode.Id?.let { pushChild(EmbyDetailScreen(it, episode.displayTitle())) } },
+            )
+            return@Box
+          }
+          if (current.Type.equals("Episode", ignoreCase = true) || current.Type.equals("Movie", ignoreCase = true)) {
+            EmbyMediaDetailContent(
+              item = current,
+              server = currentServer,
+              viewModel = viewModel,
+              onBack = { backStack.removeLastOrNull() },
+              onOpenEpisode = replaceEpisode,
+              onOpenSeries = { series -> series.Id?.let { pushChild(EmbyDetailScreen(it, series.Name.orEmpty())) } },
+              onOpenPerson = { person -> person.Id?.let { pushChild(EmbyPersonScreen(it, person.Name.orEmpty(), person.PrimaryImageTag)) } },
+            )
+            return@Box
+          }
           // 多版本媒体：真正要播放的版本 Id。只有存在多个版本时才非空 ——
           // 单版本媒体一律 null，播放链路与改动前完全一致。
           // 用户没在下拉框里选过时，按设置里的「多版本优先选择」规则自动挑。
@@ -530,11 +450,6 @@ data class EmbyDetailScreen(
           val playSourceLabel = playSourceId
             ?.let { id -> current.MediaSources.orEmpty().firstOrNull { it.Id == id } }
             ?.let { embyMediaSourceLabel(it) }
-          // 该条目当前的下载任务（没有就是 null）：按钮的文字、进度、图标都由它决定
-          val currentDownload = current.Id?.let { id ->
-            downloadTasks.firstOrNull { it.itemId == id }
-          }
-
           // ── 下拉刷新 ──
           // 详情页的数据（进度、已看状态、演员、推荐）都是进页面那一次拉回来的，
           // 从播放器返回时虽然有 800ms 延迟的自动刷新，但用户手动拉一下仍然是最直接的重取方式。
@@ -556,700 +471,152 @@ data class EmbyDetailScreen(
             listState = listState,
             modifier = Modifier.fillMaxSize(),
           ) {
-            DetailBody(
-              item = current,
-              server = currentServer,
-              listState = listState,
-              collapse = collapse,
-              showRecommendations = showRecommendations,
-              // 剧照当封面区的整张背景图用，所以要按屏幕级别的宽度取（1080 足够铺满常见机型）：
-              // 之前取 128px 是为了「放大即虚化」的糊底效果，用户不喜欢 —— 现在直接看清晰大图。
-              // EmbyImageLoader 的 maxWidth 只做客户端降采样、不会改写 URL，
-              // 所以尺寸必须从源头（这个 URL）给定。
-              backdropUrl = viewModel.imageUrl(currentServer, current, "Backdrop", 1080),
-              posterUrl = viewModel.imageUrl(currentServer, current, "Primary", 600),
-              onPlay = { resume, reverse ->
-                // 长按切内核时给个明确反馈，否则用户不知道这一下到底换了什么
-                viewModel.resolveEngineOverride(reverse)?.let {
-                  Toast.makeText(context, "使用 ${it.label} 内核播放", Toast.LENGTH_SHORT).show()
-                }
-                // 已经点过一次就别再放一次（连点会起两个播放页）
-                if (!playLaunching) {
-                  playLaunching = true
-                  scope.launch {
-                    try {
-                      viewModel.play(
-                        currentServer,
-                        current,
-                        resume,
-                        reverse,
-                        playSourceId,
-                        mediaSourceLabel = playSourceLabel,
-                      )
-                    } finally {
-                      // ⚠️ 只在**没成功拉起播放器**时复位（比如解析失败 / 抛异常），
-                      //  成功拉起时本页已经不显示了，复位也会随重组被丢掉；
-                      //  但若这里无条件复位，慢路径下会让转圈提前消失、用户又能连点。
-                      playLaunching = false
+            if (current.Type.equals("Series", ignoreCase = true)) {
+              EmbySeriesDetailContent(
+                item = current,
+                server = currentServer,
+                viewModel = viewModel,
+                listState = listState,
+                onBack = { backStack.removeLastOrNull() },
+                onOpenSeason = { season ->
+                  season.Id?.let {
+                    pushChild(EmbyDetailScreen(it, season.Name.orEmpty()))
+                  }
+                },
+                onOpenPerson = { person ->
+                  person.Id?.let { pushChild(EmbyPersonScreen(it, person.Name.orEmpty(), person.PrimaryImageTag)) }
+                },
+                onOpenStudio = { studio ->
+                  pushChild(EmbyTagItemsScreen(studio.Name.orEmpty(), "studio", studio.Id.orEmpty()))
+                },
+              )
+            } else {
+              DetailBody(
+                item = current,
+                server = currentServer,
+                listState = listState,
+                collapse = collapse,
+                showRecommendations = showRecommendations,
+                // 剧照当封面区的整张背景图用，所以要按屏幕级别的宽度取（1080 足够铺满常见机型）：
+                // 之前取 128px 是为了「放大即虚化」的糊底效果，用户不喜欢 —— 现在直接看清晰大图。
+                // EmbyImageLoader 的 maxWidth 只做客户端降采样、不会改写 URL，
+                // 所以尺寸必须从源头（这个 URL）给定。
+                backdropUrl = viewModel.imageUrl(currentServer, current, "Backdrop", 1080),
+                posterUrl = viewModel.imageUrl(currentServer, current, "Primary", 600),
+                onPlay = { resume ->
+                  // 已经点过一次就别再放一次（连点会起两个播放页）
+                  if (!playLaunching) {
+                    playLaunching = true
+                    scope.launch {
+                      try {
+                        viewModel.play(
+                          currentServer,
+                          current,
+                          resume,
+                          selectedMediaSourceId,
+                          mediaSourceLabel = playSourceLabel,
+                        )
+                      } finally {
+                        // ⚠️ 只在**没成功拉起播放器**时复位（比如解析失败 / 抛异常），
+                        //  成功拉起时本页已经不显示了，复位也会随重组被丢掉；
+                        //  但若这里无条件复位，慢路径下会让转圈提前消失、用户又能连点。
+                        playLaunching = false
+                      }
                     }
                   }
-                }
-              },
-              playLaunching = playLaunching,
-              // 电视剧「从头播放」：走独立的入口，不受大按钮「挑有进度的那集」影响。
-              onPlayFromStart = {
-                if (!playLaunching) {
-                  playLaunching = true
-                  scope.launch {
-                    try {
-                      viewModel.play(
-                        currentServer,
-                        current,
-                        0L,
-                        false,
-                        playSourceId,
-                        mediaSourceLabel = playSourceLabel,
-                        fromStart = true,
-                      )
-                    } finally {
-                      playLaunching = false
+                },
+                playLaunching = playLaunching,
+                // 电视剧「从头播放」：走独立的入口，不受大按钮「挑有进度的那集」影响。
+                onPlayFromStart = {
+                  if (!playLaunching) {
+                    playLaunching = true
+                    scope.launch {
+                      try {
+                        viewModel.play(
+                          currentServer,
+                          current,
+                          0L,
+                          selectedMediaSourceId,
+                          mediaSourceLabel = playSourceLabel,
+                          fromStart = true,
+                        )
+                      } finally {
+                        playLaunching = false
+                      }
                     }
                   }
-                }
-              },
-              selectedMediaSourceId = selectedMediaSourceId,
-              onSelectMediaSource = { selectedMediaSourceId = it },
-              versionResumeSeconds = versionResumeSeconds,
-              onToggleFavorite = {
-                if (!favoriteBusy) {
-                  val wasFavorite = current.UserData?.IsFavorite == true
-                  // 目标状态在**这里**定死，并显式传给 ViewModel：
-                  // 由 ViewModel 从传进去的 item 反推方向的话，item 是旧快照时
-                  // 方向就会跟用户看到的相反（红心只能点亮、取消不了）。
-                  val target = !wasFavorite
-                  favoriteBusy = true
-                  // 乐观更新：先把红心翻过来，动效才跟得上手指；失败再回滚
-                  item = current.copy(
-                    UserData = (current.UserData ?: EmbyUserData()).copy(IsFavorite = target),
+                },
+                selectedMediaSourceId = selectedMediaSourceId,
+                onSelectMediaSource = { selectedMediaSourceId = it },
+                versionResumeSeconds = versionResumeSeconds,
+                onBack = { backStack.removeLastOrNull() },
+                onPersonClick = { pid, pname, tag ->
+                  pushChild(
+                    EmbyPersonScreen(personId = pid, personName = pname, personImageTag = tag),
                   )
-                  scope.launch {
-                    val result = viewModel.toggleFavorite(currentServer, current, target)
-                    val nowFavorite = result.getOrNull()
-                    item = current.copy(
-                      UserData = (current.UserData ?: EmbyUserData())
-                        .copy(IsFavorite = nowFavorite ?: wasFavorite),
-                    )
-                    favoriteBusy = false
-                    // 同步媒体库的进程内缓存：从详情页返回列表时命中缓存、不重新请求，
-                    // 缓存不同步的话列表卡片上的红心会停在旧状态
-                    current.Id?.let { id ->
-                      EmbyLibraryCache.updateFavorite(id, nowFavorite ?: wasFavorite)
+                },
+                // 点类型 / 标签 / 工作室 chip：进「按该维度找片」的结果页
+                onMetaClick = { keyword, kind, filterId ->
+                  pushChild(
+                    EmbyTagItemsScreen(keyword = keyword, kind = kind, filterId = filterId),
+                  )
+                },
+                // 推荐（按演员 / 导演）与同类型推荐的数据：由本层加载好后传进去，
+                // 详情区内只负责画 —— 避免滚动时 item 被回收 / 重组而反复发请求。
+                recommendItems = recommendItems,
+                genreRecommendLabel = genreRecommendLabel,
+                genreRecommendItems = genreRecommendItems,
+                // 点推荐卡片：同一位演员 / 导演的另一部片子，直接再开一层详情页
+                onRecommendClick = { id, name ->
+                  pushChild(EmbyDetailScreen(itemId = id, title = name))
+                },
+                episodes = seriesEpisodes,
+                relatedEpisodes = relatedEpisodes,
+                // 点某一集 = 播这一集（并带后续连播）。
+                // ⚠️ 这里**不要**再走详情页的 playLaunching 闸门：那个闸门是给
+                //    「点播放按钮」防连点用的，而分集卡片各自独立，连点不同集是正常操作。
+                onPlayEpisode = { episode, resume ->
+                  val currentServer = server
+                  // 服务器尚未解析出来时点集：不静默吞掉点击，也不带着 null 往下走
+                  //（launchPlaylist 的 server 不可空）。此时页面下方就是加载态，
+                  // 用户再点一次即可 —— 比「点下去什么都没发生」好排查。
+                  if (currentServer != null) {
+                    scope.launch {
+                      // 点某一集时把**整季**带进播放队列（从这一集起），而不是只播这一条：
+                      // - 队列里有兄弟集 ⇒ 片尾能自动连播、切集时标题对得上；
+                      // - 队列里每条都带着自己的集号 ⇒ 弹幕按真实集号匹配，
+                      //   否则单独播第 5 集时队列只有 1 条，弹幕会取成第 1 集。
+                      val startAt = seriesEpisodes.indexOfFirst { it.Id == episode.Id }
+                        .takeIf { it >= 0 } ?: 0
+                      // 单集详情页没有 seriesEpisodes，队列只有这一条 ⇒ 追「同季」的后续：
+                      // 否则从第 3 集点进去就再也连播不到第 4 集（片尾只能退出）。
+                      val base = seriesEpisodes.ifEmpty {
+                        relatedEpisodes.sameSeason.ifEmpty { listOf(episode) }
+                      }
+                      val from = base.indexOfFirst { it.Id == episode.Id }.takeIf { it >= 0 } ?: 0
+                      val queue = base.drop(from).ifEmpty { listOf(episode) }
+                      viewModel.launchPlaylist(
+                        server = currentServer,
+                        items = queue,
+                        resumeSeconds = resume,
+                      )
                     }
-                    // 红心有动效，但「到底收没收藏成功」得给个字，服务端失败时才不会误以为成了
-                    Toast.makeText(
-                      context,
-                      when (nowFavorite) {
-                        true -> "已加入收藏"
-                        false -> "已取消收藏"
-                        null -> "收藏失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
-                      },
-                      Toast.LENGTH_SHORT,
-                    ).show()
                   }
-                }
-              },
-              onTogglePlayed = { played ->
-                val playedItemId = current.Id ?: return@DetailBody
-                // 乐观更新：先把勾翻到预期状态，失败再回滚
-                item = current.copy(
-                  UserData = (current.UserData ?: EmbyUserData()).copy(
-                    Played = played,
-                    PlaybackPositionTicks = if (played) {
-                      current.UserData?.PlaybackPositionTicks ?: 0
-                    } else {
-                      0
-                    },
-                  ),
-                )
-                scope.launch {
-                  val result = viewModel.setPlayed(currentServer, playedItemId, played)
-                  if (result.isFailure) item = current
-                  // 勾的填充色会变，但点完到底成没成要有字说得清楚
-                  Toast.makeText(
-                    context,
-                    when {
-                      result.isSuccess && played -> "已标记为已播放"
-                      result.isSuccess -> "已标记为未播放"
-                      else -> "标记失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
-                    },
-                    Toast.LENGTH_SHORT,
-                  ).show()
-                }
-              },
-              onBack = { backStack.removeLastOrNull() },
-              onDelete = { showDeleteConfirm = true },
-              onDownload = {
-                // 已有任务时，这个按钮变成「暂停 / 继续」开关（与下载管理页同一套动作）：
-                //   下载中 / 排队中 → 暂停；已暂停 / 失败 → 继续；已完成 → 只提示。
-                // 没有任务才走去重入队，行为与以前一致。
-                val downloadItemId = current.Id
-                val existing = downloadItemId?.let { id ->
-                  downloadTasks.firstOrNull { it.itemId == id }
-                }
-                when (existing?.status) {
-                  EmbyDownloadStatus.RUNNING, EmbyDownloadStatus.QUEUED -> {
-                    downloadViewModel.pause(existing.itemId)
-                    Toast.makeText(
-                      context,
-                      if (existing.status == EmbyDownloadStatus.QUEUED) "已暂停下载（已移出队列）" else "已暂停下载",
-                      Toast.LENGTH_SHORT,
-                    ).show()
-                  }
-
-                  EmbyDownloadStatus.PAUSED, EmbyDownloadStatus.FAILED -> {
-                    downloadViewModel.resume(existing.itemId)
-                    Toast.makeText(context, "已继续下载", Toast.LENGTH_SHORT).show()
-                  }
-
-                  EmbyDownloadStatus.COMPLETED ->
-                    Toast.makeText(context, "该媒体已经下载过了", Toast.LENGTH_SHORT).show()
-
-                  null ->
-                    when (downloadViewModel.enqueue(currentServer, current)) {
-                      EmbyEnqueueResult.STARTED ->
-                        Toast.makeText(context, "已加入下载队列", Toast.LENGTH_SHORT).show()
-
-                      EmbyEnqueueResult.EXISTS ->
-                        Toast.makeText(context, "该媒体已在下载列表中", Toast.LENGTH_SHORT).show()
-
-                      EmbyEnqueueResult.COMPLETED ->
-                        Toast.makeText(context, "该媒体已经下载过了", Toast.LENGTH_SHORT).show()
-
-                      EmbyEnqueueResult.INVALID ->
-                        Toast.makeText(context, "该媒体不支持下载", Toast.LENGTH_SHORT).show()
-                    }
-                }
-              },
-              downloadLabel = currentDownload?.let { task ->
-                when (task.status) {
-                  EmbyDownloadStatus.COMPLETED -> "已下载"
-                  EmbyDownloadStatus.PAUSED -> "已暂停"
-                  EmbyDownloadStatus.FAILED -> "下载失败"
-                  EmbyDownloadStatus.QUEUED -> "排队中"
-                  EmbyDownloadStatus.RUNNING ->
-                    "下载中 ${((task.progressFraction ?: 0f) * 100).toInt()}%"
-                }
-              },
-              downloadStatus = currentDownload?.status,
-              // 下载按钮的自下而上填充进度：下载中/暂停用真实进度，已完成填满，
-              // 排队给一个 0 值（按钮内部会做呼吸式待机动画），没任务传 null 不画
-              downloadProgress = currentDownload?.let { task ->
-                when (task.status) {
-                  EmbyDownloadStatus.RUNNING -> task.progressFraction ?: 0f
-                  EmbyDownloadStatus.PAUSED -> task.progressFraction ?: 0f
-                  EmbyDownloadStatus.COMPLETED -> 1f
-                  EmbyDownloadStatus.QUEUED -> 0f
-                  EmbyDownloadStatus.FAILED -> 0f
-                }
-              },
-              downloadFailed = currentDownload?.status == EmbyDownloadStatus.FAILED,
-              onCast = {
-                val id = current.Id
-                if (id != null) {
-                  val url = viewModel.getStreamUrl(currentServer, id, true, playSourceId)
-                  dlnaManager.pendingPayload =
-                    CastPayload(Uri.parse(url), viewModel.displayTitle(current))
-                  castSheetShown = true
-                }
-              },
-              // 外部播放器：先枚举本机能吃这条流的播放器，再用我们自己的列表让用户挑
-              // （为什么不用系统选择器，见 ExternalPlayerPickerDialog 的注释）。
-              // 一个都没枚举到时把原因说出来，否则点了没反应会让人以为是按钮坏了
-              onPlayExternal = {
-                viewModel.listExternalPlayers(currentServer, current, playSourceId)
-                  .onSuccess { list ->
-                    externalLastKey = viewModel.lastExternalPlayerKey()
-                    externalPlayers = list
-                  }
-                  .onFailure { e ->
-                    Toast.makeText(
-                      context,
-                      e.message ?: "打开外部播放器失败",
-                      Toast.LENGTH_LONG,
-                    ).show()
-                  }
-              },
-              // 服务器转码：要先向服务器问一次播放方案（有网络往返），
-              // 所以立刻回一个提示，免得点完一两秒里毫无动静、让人以为没反应
-              onPlayTranscoded = {
-                // 与播放键同一套续播口径：多版本条目优先用「该版本自己的」本地进度
-                val resumeSeconds = versionResumeSeconds
-                  ?: EmbyTicks.ticksToSeconds(current.UserData?.PlaybackPositionTicks ?: 0L)
-                Toast.makeText(context, "正在请求服务器转码…", Toast.LENGTH_SHORT).show()
-                scope.launch {
-                  viewModel.playTranscoded(currentServer, current, resumeSeconds, mediaSourceId = playSourceId)
-                    .onFailure { e ->
-                      Toast.makeText(
-                        context,
-                        e.message ?: "服务器转码失败",
-                        Toast.LENGTH_LONG,
-                      ).show()
-                    }
-                }
-              },
-              // 以前这两项是「点了直接对服务器发一把 full 刷新」，现在换成
-              // 媒体库长按菜单同款的抽屉：刮削=可检索的识别（EmbyIdentifyDialog），
-              // 刷新=带选项的确认（EmbyRefreshMetadataDialog），见文件底部挂载处
-              onRefreshMetadata = { showRefreshSheet = true },
-              onScrapeMetadata = { showIdentifySheet = true },
-              onEditMetadata = { showEditMeta = true },
-              onPersonClick = { pid, pname, tag ->
-                pushChild(
-                  EmbyPersonScreen(personId = pid, personName = pname, personImageTag = tag),
-                )
-              },
-              // 点类型 / 标签 / 工作室 chip：进「按该维度找片」的结果页
-              onMetaClick = { keyword, kind, filterId ->
-                pushChild(
-                  EmbyTagItemsScreen(keyword = keyword, kind = kind, filterId = filterId),
-                )
-              },
-              moreMenuExpanded = showMoreMenu,
-              onMoreMenuChange = { showMoreMenu = it },
-              isDisliked = isDisliked,
-              showDislikeInMenu = showDislikeInMenu && dislikeKey != null,
-              onToggleDislike = {
-                val key = dislikeKey
-                if (key != null) {
-                  val target = item
-                  if (isDisliked) {
-                    dislikeRepository.unmark(key)
-                    Toast.makeText(context, "已取消标记", Toast.LENGTH_SHORT).show()
-                  } else {
-                    dislikeRepository.mark(
-                      key = key,
-                      title = target?.Name.orEmpty(),
-                      reason = null,
-                      // ImageTags 是 Map（见 EmbyModels），不是对象 ——
-                      // 写 .Primary 会被解析成别的成员，报 "Unresolved reference 'Primary'"。
-                      imageUrl = target?.ImageTags?.get("Primary")?.let { tag ->
-                        dislikeServer?.let { s -> embyRepositoryForDislike.imageUrl(s, itemId, tag = tag) }
-                      },
-                    )
-                    Toast.makeText(context, "已标记为不喜欢", Toast.LENGTH_SHORT).show()
-                  }
-                }
-              },
-              // 推荐（按演员 / 导演）与同类型推荐的数据：由本层加载好后传进去，
-              // 详情区内只负责画 —— 避免滚动时 item 被回收 / 重组而反复发请求。
-              recommendItems = recommendItems,
-              genreRecommendLabel = genreRecommendLabel,
-              genreRecommendItems = genreRecommendItems,
-              // 点推荐卡片：同一位演员 / 导演的另一部片子，直接再开一层详情页
-              onRecommendClick = { id, name ->
-                pushChild(EmbyDetailScreen(itemId = id, title = name))
-              },
-              episodes = seriesEpisodes,
-              relatedEpisodes = relatedEpisodes,
-              // 点某一集 = 播这一集（并带后续连播）。
-              // ⚠️ 这里**不要**再走详情页的 playLaunching 闸门：那个闸门是给
-              //    「点播放按钮」防连点用的，而分集卡片各自独立，连点不同集是正常操作。
-              onPlayEpisode = { episode, resume ->
-                val currentServer = server
-                // 服务器尚未解析出来时点集：不静默吞掉点击，也不带着 null 往下走
-                //（launchPlaylist 的 server 不可空）。此时页面下方就是加载态，
-                // 用户再点一次即可 —— 比「点下去什么都没发生」好排查。
-                if (currentServer != null) {
-                  scope.launch {
-                    // 点某一集时把**整季**带进播放队列（从这一集起），而不是只播这一条：
-                    // - 队列里有兄弟集 ⇒ 片尾能自动连播、切集时标题对得上；
-                    // - 队列里每条都带着自己的集号 ⇒ 弹幕按真实集号匹配，
-                    //   否则单独播第 5 集时队列只有 1 条，弹幕会取成第 1 集。
-                    val startAt = seriesEpisodes.indexOfFirst { it.Id == episode.Id }
-                      .takeIf { it >= 0 } ?: 0
-                    // 单集详情页没有 seriesEpisodes，队列只有这一条 ⇒ 追「同季」的后续：
-                    // 否则从第 3 集点进去就再也连播不到第 4 集（片尾只能退出）。
-                    val base = seriesEpisodes.ifEmpty {
-                      relatedEpisodes.sameSeason.ifEmpty { listOf(episode) }
-                    }
-                    val from = base.indexOfFirst { it.Id == episode.Id }.takeIf { it >= 0 } ?: 0
-                    val queue = base.drop(from).ifEmpty { listOf(episode) }
-                    viewModel.launchPlaylist(
-                      server = currentServer,
-                      items = queue,
-                      resumeSeconds = resume,
-                    )
-                  }
-                }
-              },
-              // 长按某一集 = 进这一集的详情页（看简介 / 换版本 / 换音轨）
-              onOpenEpisode = { epId, epName ->
-                pushChild(EmbyDetailScreen(itemId = epId, title = epName))
-              },
-              // 分集卡上的「下载这一集」：状态直接从已有的 downloadTasks 里查，
-              // 不额外发请求 —— 下载管理页与本页看的是同一份 Flow。
-              downloadStateOf = { ep ->
-                val task = ep.Id?.let { id -> downloadTasks.firstOrNull { it.itemId == id } }
-                when (task?.status) {
-                  null -> null
-                  EmbyDownloadStatus.COMPLETED -> EpisodeDownloadState.Done
-                  else -> EpisodeDownloadState.Queued
-                }
-              },
-              // 整季批量下载：只挑**还没下过、没在队列里**的集，重复入队会刷一堆
-              // 「已在下载列表中」的提示，而这里用户是明确要「补齐这一季」。
-              // 全部下过 → 直接给一句提示，不要静默什么都不发生。
-              onDownloadSeason = { seasonEpisodes ->
-                val currentServer = server
-                if (currentServer != null) {
-                  val pending = seasonEpisodes.filter { ep ->
-                    ep.Id == null || downloadTasks.none { it.itemId == ep.Id }
-                  }
-                  if (pending.isEmpty()) {
-                    Toast.makeText(context, "这一季都已经下载过了", Toast.LENGTH_SHORT).show()
-                  } else {
-                    var added = 0
-                    pending.forEach { ep ->
-                      if (downloadViewModel.enqueue(currentServer, ep) == EmbyEnqueueResult.STARTED) added++
-                    }
-                    Toast.makeText(
-                      context,
-                      if (added > 0) "已加入 $added 集到下载队列" else "这些集都已在下队列中",
-                      Toast.LENGTH_SHORT,
-                    ).show()
-                  }
-                }
-              },
-              onDownloadEpisode = { ep ->
-                val currentServer = server
-                if (currentServer != null) {
-                  val result = downloadViewModel.enqueue(currentServer, ep)
-                  val text =
-                    when (result) {
-                      EmbyEnqueueResult.STARTED -> "已加入下载队列"
-                      EmbyEnqueueResult.EXISTS -> "这一集已经在队列里了"
-                      EmbyEnqueueResult.COMPLETED -> "这一集已经下载过了"
-                      EmbyEnqueueResult.INVALID -> "这一集没有可下载的媒体文件"
-                    }
-                  Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
-                }
-              },
-            )
+                },
+                // 长按某一集 = 进这一集的详情页（看简介 / 换版本 / 换音轨）
+                onOpenEpisode = { epId, epName ->
+                  pushChild(EmbyDetailScreen(itemId = epId, title = epName))
+                },
+                // 分集卡上的「下载这一集」：状态直接从已有的 downloadTasks 里查，
+                // 不额外发请求 —— 下载管理页与本页看的是同一份 Flow。
+                // 整季批量下载：只挑**还没下过、没在队列里**的集，重复入队会刷一堆
+                // 「已在下载列表中」的提示，而这里用户是明确要「补齐这一季」。
+                // 全部下过 → 直接给一句提示，不要静默什么都不发生。
+              )
+            }
           }
         }
       }
-    }
-
-    if (castSheetShown) {
-      DlnaSheet(onDismissRequest = { castSheetShown = false })
-    }
-
-    // ── 外部播放器选择弹窗：把本机能吃这条流的播放器全列出来（已剔除自家两个播放页）──
-    externalPlayers?.let { list ->
-      val playerTarget = item
-      val serverTarget = server
-      ExternalPlayerPickerDialog(
-        players = list,
-        lastUsedKey = externalLastKey.takeIf { it.isNotEmpty() },
-        onPick = { player ->
-          externalPlayers = null
-          if (playerTarget != null && serverTarget != null) {
-            viewModel.playWithExternalPlayer(
-              serverTarget,
-              playerTarget,
-              player,
-              effectiveEmbyMediaSourceId(
-                playerTarget,
-                selectedMediaSourceId,
-                autoSourcePreference,
-              ),
-            )
-              .onFailure { e ->
-                Toast.makeText(context, e.message ?: "打开外部播放器失败", Toast.LENGTH_LONG).show()
-              }
-          }
-        },
-        onSystemChooser = {
-          externalPlayers = null
-          if (playerTarget != null && serverTarget != null) {
-            viewModel.playWithExternalPlayerChooser(
-              serverTarget,
-              playerTarget,
-              effectiveEmbyMediaSourceId(
-                playerTarget,
-                selectedMediaSourceId,
-                autoSourcePreference,
-              ),
-            )
-              .onFailure { e ->
-                Toast.makeText(context, e.message ?: "打开外部播放器失败", Toast.LENGTH_LONG).show()
-              }
-          }
-        },
-        onDismiss = { externalPlayers = null },
-      )
-    }
-
-    // ── 刮削元数据（= Emby 的「识别」）：与媒体库长按菜单同一个组件 ──
-    // ⚠️ 这两个弹窗此前**只声明了开关、忘了挂载**，所以「更多」里点它们毫无反应。
-    val identifyItem = item
-    val identifyServer = server
-    if (showIdentifySheet && identifyItem != null && identifyServer != null) {
-      EmbyIdentifyDialog(
-        server = identifyServer,
-        item = identifyItem,
-        viewModel = viewModel,
-        onDismissRequest = { showIdentifySheet = false },
-        // 应用成功后片名 / 简介 / 图片都可能被换掉，重拉一次详情
-        onApplied = { scope.launch { load() } },
-      )
-    }
-
-    // ── 刷新元数据：与媒体库长按菜单同一个二级选项框（可选强制覆盖）──
-    if (showRefreshSheet && item != null) {
-      val refreshName = item?.Name ?: ""
-      EmbyRefreshMetadataDialog(
-        name = refreshName,
-        kindLabel = "条目",
-        onDismissRequest = { showRefreshSheet = false },
-        onConfirm = { replaceMetadata, replaceImages ->
-          showRefreshSheet = false
-          runEmbyLibraryAction(
-            context = context,
-            // 抽屉一点完就关：这类「发出去就该跑完」的动作挂 ViewModel 作用域，
-            // 免得退出页面把请求连坐取消（与 EmbyIdentifyDialog 同一口径）
-            scope = viewModel.viewModelScope,
-            server = server,
-            itemId = itemId,
-            name = refreshName,
-            okMessage = "已通知服务器刷新「$refreshName」的元数据，稍后下拉刷新查看",
-            action = { s, id ->
-              runCatching { viewModel.refreshLibraryMetadata(s, id, replaceMetadata, replaceImages) }
-            },
-          )
-        },
-      )
-    }
-
-    // ── 编辑元数据弹窗：名称 / 原名 / 排序名 / 简介 / 年份 / 首映日期 /
-    //    类型 / 标签 / 制作地区 / 工作室 / 评分 / 分级 / 演员与导演，整体 PUT 回服务器 ──
-    if (showEditMeta && item != null) {
-      val targetItem = item
-      val targetServer = server
-      var nameState by remember { mutableStateOf(targetItem?.Name ?: "") }
-      var originalTitleState by remember { mutableStateOf(targetItem?.OriginalTitle ?: "") }
-      var sortNameState by remember { mutableStateOf(targetItem?.SortName ?: "") }
-      var overviewState by remember { mutableStateOf(targetItem?.Overview ?: "") }
-      var yearState by remember { mutableStateOf(targetItem?.ProductionYear?.toString() ?: "") }
-      var premiereState by remember { mutableStateOf(targetItem?.PremiereDate?.take(10) ?: "") }
-      var genresState by remember { mutableStateOf(targetItem?.Genres?.joinToString("、") ?: "") }
-      var tagsState by remember { mutableStateOf(targetItem?.Tags?.joinToString("、") ?: "") }
-      var locationsState by remember {
-        mutableStateOf(targetItem?.ProductionLocations?.joinToString("、") ?: "")
-      }
-      var studiosState by remember {
-        mutableStateOf(targetItem?.Studios?.mapNotNull { it.Name }?.joinToString("、") ?: "")
-      }
-      var ratingState by remember { mutableStateOf(targetItem?.CommunityRating?.toString() ?: "") }
-      var officialState by remember { mutableStateOf(targetItem?.OfficialRating ?: "") }
-      var peopleState by remember {
-        mutableStateOf<List<EmbyPerson>>(targetItem?.People?.map { it.copy() } ?: emptyList())
-      }
-
-      AlertDialog(
-        onDismissRequest = { showEditMeta = false },
-        title = { Text("编辑元数据") },
-        text = {
-          Column(
-            modifier = Modifier
-              .fillMaxWidth()
-              .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-          ) {
-            OutlinedTextField(
-              value = nameState,
-              onValueChange = { nameState = it },
-              label = { Text("名称") },
-              singleLine = true,
-            )
-            OutlinedTextField(
-              value = originalTitleState,
-              onValueChange = { originalTitleState = it },
-              label = { Text("原名") },
-              singleLine = true,
-            )
-            OutlinedTextField(
-              value = sortNameState,
-              onValueChange = { sortNameState = it },
-              label = { Text("排序名") },
-              singleLine = true,
-            )
-            OutlinedTextField(
-              value = overviewState,
-              onValueChange = { overviewState = it },
-              label = { Text("简介") },
-              minLines = 3,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-              OutlinedTextField(
-                value = yearState,
-                onValueChange = { yearState = it },
-                label = { Text("年份") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-              )
-              OutlinedTextField(
-                value = premiereState,
-                onValueChange = { premiereState = it },
-                label = { Text("首映日期") },
-                placeholder = { Text("2020-05-01") },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-              )
-            }
-            OutlinedTextField(
-              value = genresState,
-              onValueChange = { genresState = it },
-              label = { Text("类型（、或逗号分隔）") },
-              singleLine = true,
-            )
-            OutlinedTextField(
-              value = tagsState,
-              onValueChange = { tagsState = it },
-              label = { Text("标签（、或逗号分隔）") },
-              singleLine = true,
-            )
-            OutlinedTextField(
-              value = locationsState,
-              onValueChange = { locationsState = it },
-              label = { Text("制作地区（、或逗号分隔）") },
-              singleLine = true,
-            )
-            OutlinedTextField(
-              value = studiosState,
-              onValueChange = { studiosState = it },
-              label = { Text("工作室（、或逗号分隔）") },
-              singleLine = true,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-              OutlinedTextField(
-                value = ratingState,
-                onValueChange = { ratingState = it },
-                label = { Text("评分") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-              )
-              OutlinedTextField(
-                value = officialState,
-                onValueChange = { officialState = it },
-                label = { Text("分级") },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-              )
-            }
-
-            // ── 演员与导演：可改姓名 / 角色，可删除 ──
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Icon(
-                imageVector = Icons.Default.People,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(18.dp),
-              )
-              Spacer(modifier = Modifier.width(6.dp))
-              Text("演员与导演", style = MaterialTheme.typography.titleSmall)
-            }
-            peopleState.forEachIndexed { index, person ->
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                  value = person.Name ?: "",
-                  onValueChange = { v ->
-                    peopleState = peopleState.toMutableList().also {
-                      it[index] = it[index].copy(Name = v)
-                    }
-                  },
-                  label = { Text("姓名") },
-                  singleLine = true,
-                  modifier = Modifier.weight(1f),
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                OutlinedTextField(
-                  value = person.Role ?: "",
-                  onValueChange = { v ->
-                    peopleState = peopleState.toMutableList().also {
-                      it[index] = it[index].copy(Role = v.ifBlank { null })
-                    }
-                  },
-                  label = { Text("角色") },
-                  singleLine = true,
-                  modifier = Modifier.weight(1f),
-                )
-                IconButton(onClick = {
-                  peopleState = peopleState.toMutableList().also { it.removeAt(index) }
-                }) {
-                  Icon(Icons.Default.Delete, contentDescription = "删除该人员")
-                }
-              }
-            }
-          }
-        },
-        confirmButton = {
-          TextButton(onClick = {
-            if (targetItem != null && targetServer != null) {
-              scope.launch {
-                val ok = viewModel.updateItemMetadata(
-                  targetServer,
-                  targetItem.copy(
-                    Name = nameState.trim().ifBlank { null },
-                    OriginalTitle = originalTitleState.trim().ifBlank { null },
-                    SortName = sortNameState.trim().ifBlank { null },
-                    Overview = overviewState.ifBlank { null },
-                    ProductionYear = yearState.trim().toIntOrNull(),
-                    PremiereDate = premiereState.trim().ifBlank { null },
-                    Genres = parseMetaList(genresState),
-                    Tags = parseMetaList(tagsState),
-                    ProductionLocations = parseMetaList(locationsState),
-                    Studios = parseMetaList(studiosState)
-                      .map { EmbyStudio(Name = it) }
-                      .takeIf { it.isNotEmpty() },
-                    CommunityRating = ratingState.trim().toDoubleOrNull(),
-                    OfficialRating = officialState.trim().ifBlank { null },
-                    People = peopleState.takeIf { it.isNotEmpty() },
-                  ),
-                )
-                Toast.makeText(
-                  context,
-                  if (ok) "已保存元数据" else "保存失败",
-                  Toast.LENGTH_SHORT,
-                ).show()
-              }
-            }
-            showEditMeta = false
-          }) { Text("保存") }
-        },
-        dismissButton = {
-          TextButton(onClick = { showEditMeta = false }) { Text("取消") }
-        },
-      )
-    }
-
-    if (showDeleteConfirm && item != null) {
-      ConfirmDialog(
-        title = "删除媒体",
-        subtitle = "确定要从 Emby 服务器删除「${item?.Name}」吗？\n" +
-          "这会同时删除服务器上的物理文件，且无法撤销。",
-        onConfirm = {
-          showDeleteConfirm = false
-          val current = server
-          if (current != null) {
-            viewModel.deleteItem(current, itemId)
-            backStack.removeLastOrNull()
-          }
-        },
-        onCancel = { showDeleteConfirm = false },
-      )
     }
 
     // ── 「正在打开播放器」整页加载层 ──────────────────────────────
@@ -1259,9 +626,7 @@ data class EmbyDetailScreen(
     // ⇒ 整页居中渲染大加载动画（走统一入口，「外观 → 加载动画」在这里也生效）；
     //   按钮内的小转圈随之撤掉（见 PlayButton），免得两处同时转、互相抢注意力。
     // ⚠️ 挂在**内容 Box 之后**（同一个 Content() 体层级）：后声明的子节点画在
-    //   上层，才盖得住页面内容。这层的对话框（castSheet / externalPlayers /
-    //   identify / refresh / editMeta / deleteConfirm）本来就是挂在这层的 ——
-    //   Dialog 是独立窗口，声明位置只影响组合顺序、不影响层级。
+    //   上层，才盖得住页面内容。
     // ⚠️ 这里**拿不到 BoxScope**（不在内容 Box 的 lambda 里），用不了
     //   `Modifier.align` ⇒ 自己套一个 `Box(contentAlignment = Center)`。
     // ⚠️ 尺寸必须写进 modifier —— AppLoadingIndicator 的 `size` 参数只在
@@ -1282,6 +647,7 @@ data class EmbyDetailScreen(
         )
       }
     }
+    }
   }
 }
 
@@ -1300,37 +666,18 @@ private fun DetailBody(
   showRecommendations: Boolean,
   backdropUrl: String?,
   posterUrl: String?,
-  /** resumeSeconds = 续播秒数（0 = 从头）；reverseEngine = 用与默认相反的内核（长按） */
-  onPlay: (resumeSeconds: Long, reverseEngine: Boolean) -> Unit,
+  /** resumeSeconds = 续播秒数（0 = 从头）。 */
+  onPlay: (resumeSeconds: Long) -> Unit,
   /**
    * 电视剧专用：从**第一集开头**播放（不受「上次看到哪」影响）。
    *
    * 与 [onPlay] 的区别是「选哪一集」：`onPlay` 会挑有进度的那一集续播，
-   * 而这里固定落在这些集里的第一集、并强制从头。三处联动：
+   * 而这里固定落在这些集里的第一集、并强制从头。两处联动：
    * - 播放按钮旁的小按钮（`PlaySection`）
-   * - 右上角「更多」菜单里的「从头播放」
    * - 分集区展开后的「从头播放本季」
    */
   onPlayFromStart: () -> Unit,
-  onToggleFavorite: () -> Unit,
-  onTogglePlayed: (played: Boolean) -> Unit,
   onBack: () -> Unit,
-  onDelete: () -> Unit,
-  onDownload: () -> Unit,
-  onCast: () -> Unit,
-  /** 交给系统里别的播放器打开（不进 App 自己的播放页） */
-  onPlayExternal: () -> Unit,
-  /**
-   * 让**服务器转码**后播放。
-   *
-   * 默认播放是「直连原文件」，能不能播全看本机解不解得了这个编码。远程 strm 指向的
-   * AVI、AVI + Xvid（MPEG-4 ASP）这类源，手机上硬解不出画面、软解又跟不上，
-   * 换内核也救不了（两条路都用系统解码器）—— 这时让服务器转成 H.264 再下发就通了。
-   */
-  onPlayTranscoded: () -> Unit,
-  onEditMetadata: () -> Unit,
-  onScrapeMetadata: () -> Unit,
-  onRefreshMetadata: () -> Unit,
   /** 点演职员头像：进「演员作品」页（personId / 名字 / 头像 tag） */
   onPersonClick: (personId: String, personName: String, imageTag: String?) -> Unit,
   /**
@@ -1340,21 +687,6 @@ private fun DetailBody(
    * @param filterId 过滤用的 Id（工作室需要；类型 / 标签传空串，按名字过滤）
    */
   onMetaClick: (keyword: String, kind: String, filterId: String) -> Unit,
-  /** 点简介 chip：跳演员作品页等 —— 这里只用到打开详情页 */
-  downloadLabel: String?,
-  /** 当前下载任务状态；null = 没有任务。用来决定按钮是「下载 / 暂停 / 继续 / 已完成」 */
-  downloadStatus: EmbyDownloadStatus?,
-  /** 下载填充进度 0..1；null = 没有下载任务（不画填充） */
-  downloadProgress: Float?,
-  downloadFailed: Boolean,
-  moreMenuExpanded: Boolean,
-  onMoreMenuChange: (Boolean) -> Unit,
-  /** 当前条目是否已标记为「不喜欢」—— 决定菜单项文案与图标 */
-  isDisliked: Boolean,
-  /** 点击「标记为不喜欢 / 取消标记」 */
-  onToggleDislike: () -> Unit,
-  /** 设置页「详情页菜单项」开关。为 false 时整个菜单项不渲染。 */
-  showDislikeInMenu: Boolean,
   /**
    * 两块推荐区的数据。**由 [EmbyDetailScreen] 加载好后传进来**，这里只负责画 ——
    * 请求留在区块内部的话，LazyColumn 回收 / 重组 item 时会被反复触发（见那边的注释）。
@@ -1384,11 +716,8 @@ private fun DetailBody(
   /** 长按某一集：进这一集的详情页 */
   onOpenEpisode: (String, String) -> Unit = { _, _ -> },
   /** 取某一集的离线下载状态（null = 没下过） */
-  downloadStateOf: (EmbyItem) -> EpisodeDownloadState? = { null },
   /** 点分集卡上的下载按钮 */
-  onDownloadEpisode: (EmbyItem) -> Unit = {},
   /** 点「下载本季」：参数是当前季的所有集（由组件按季筛好） */
-  onDownloadSeason: (List<EmbyItem>) -> Unit = {},
   /**
    * 「相关分集」区：同季其它集 / 特别篇 / 同剧其它集。
    *
@@ -1437,18 +766,11 @@ private fun DetailBody(
       // 它的 offset 就是「相对视口的真实 y」，从 0 一路减到 −最大高度，毫无歧义。
       item { Spacer(modifier = Modifier.height(BACKDROP_HEADER_MAX_HEIGHT_DP)) }
 
-      // ── 播放 / 下载 / 投屏（删除在右上角「更多」菜单里）──
+      // ── 播放 ──
       item {
         PlaySection(
           item = item,
           onPlay = onPlay,
-          onDownload = onDownload,
-          onCast = onCast,
-          onPlayExternal = onPlayExternal,
-          downloadLabel = downloadLabel,
-          downloadStatus = downloadStatus,
-          downloadProgress = downloadProgress,
-          downloadFailed = downloadFailed,
           playLaunching = playLaunching,
           selectedMediaSourceId = selectedMediaSourceId,
           onSelectMediaSource = onSelectMediaSource,
@@ -1472,9 +794,6 @@ private fun DetailBody(
               ?.Id,
             onClick = { ep, resume -> onPlayEpisode(ep, resume) },
             onLongClick = { ep -> ep.Id?.let { onOpenEpisode(it, ep.Name ?: "") } },
-            downloadStateOf = downloadStateOf,
-            onDownload = onDownloadEpisode,
-            onDownloadSeason = onDownloadSeason,
           )
         }
       }
@@ -1661,6 +980,7 @@ private fun DetailBody(
                       }
                     }
                     EmbyImage(
+                      server = server,
                       url = avatarUrl,
                       contentDescription = person.Name,
                       modifier = Modifier.fillMaxSize(),
@@ -1774,7 +1094,7 @@ private fun DetailBody(
     TopAppBar(
       title = {
         Text(
-          text = item.Name ?: "",
+          text = item.displayTitle(),
           // 顶栏标题也支持长按复制：片名常有生僻字 / 外文，用户要拿去别处搜
           modifier = Modifier.longPressToCopy(item.Name, "片名"),
           maxLines = 1,
@@ -1792,98 +1112,6 @@ private fun DetailBody(
             contentDescription = "返回",
             tint = barContentColor,
           )
-        }
-      },
-      actions = {
-        IconButton(onClick = { onTogglePlayed(!isPlayed) }) {
-          Icon(
-            imageVector = Icons.Outlined.CheckCircle,
-            contentDescription = if (isPlayed) "标记为未播放" else "标记为已播放",
-            tint = barContentColor.copy(alpha = if (isPlayed) 1f else 0.75f),
-          )
-        }
-        IconButton(onClick = onToggleFavorite) {
-          // 与播放页共用同一套动效：弹跳 + 星光 + 红心渐变（状态驱动，故上面做了乐观更新）
-          FavoriteHeartIcon(
-            isFavorite = isFavorite,
-            isToggling = false,
-            iconSize = 24.dp,
-            idleColor = barContentColor,
-          )
-        }
-        Box {
-          IconButton(onClick = { onMoreMenuChange(true) }) {
-            Icon(
-              Icons.Default.MoreVert,
-              contentDescription = "更多",
-              tint = barContentColor,
-            )
-          }
-          DropdownMenu(
-            expanded = moreMenuExpanded,
-            onDismissRequest = { onMoreMenuChange(false) },
-          ) {
-            DropdownMenuItem(
-              text = { Text(if (isPlayed) "标记为未播放" else "标记为已播放") },
-              onClick = {
-                onMoreMenuChange(false)
-                onTogglePlayed(!isPlayed)
-              },
-            )
-            // 「标记为不喜欢」：单击循环切换（已标记时文案变「取消标记为不喜欢」），
-            // 不在这里弹备注框 —— 详情页不拦播放，且备注入口在播放器里长按即可。
-            // ⚠️ **不要给它加 leadingIcon**：本菜单其余 6 项全是纯文字，
-            //   只有这一项带图标会显得突兀、不像同一个菜单里的东西。
-            //   选中/取消态由**文案本身**表达（「标记为」→「取消标记为」）。
-            if (showDislikeInMenu) {
-              DropdownMenuItem(
-                text = {
-                  Text(if (isDisliked) "取消标记为不喜欢" else "标记为不喜欢")
-                },
-                onClick = {
-                  onMoreMenuChange(false)
-                  onToggleDislike()
-                },
-              )
-            }
-            // 直连播不动时才需要它：本机解不了的老编码（AVI/Xvid、WMV…）、远程 strm 源。
-            // 放菜单里而不是动作行 —— 它是「备用方案」，不该和播放键抢位置。
-            DropdownMenuItem(
-              text = { Text("服务器转码播放") },
-              onClick = {
-                onMoreMenuChange(false)
-                onPlayTranscoded()
-              },
-            )
-            DropdownMenuItem(
-              text = { Text("删除媒体") },
-              onClick = {
-                onMoreMenuChange(false)
-                onDelete()
-              },
-            )
-            DropdownMenuItem(
-              text = { Text("编辑元数据") },
-              onClick = {
-                onMoreMenuChange(false)
-                onEditMetadata()
-              },
-            )
-            DropdownMenuItem(
-              text = { Text("刮削元数据") },
-              onClick = {
-                onMoreMenuChange(false)
-                onScrapeMetadata()
-              },
-            )
-            DropdownMenuItem(
-              text = { Text("刷新元数据") },
-              onClick = {
-                onMoreMenuChange(false)
-                onRefreshMetadata()
-              },
-            )
-          }
         }
       },
       colors = TopAppBarDefaults.topAppBarColors(
@@ -2006,7 +1234,7 @@ private fun BackdropHeader(
       verticalArrangement = Arrangement.Bottom,
     ) {
       Text(
-        text = item.Name ?: "",
+        text = item.displayTitle(),
         style = MaterialTheme.typography.headlineSmall.copy(
           shadow = Shadow(
             color = Color.Black.copy(alpha = 0.65f),
@@ -2095,11 +1323,7 @@ private fun metaChips(item: EmbyItem): List<String> {
 }
 
 /**
- * 播放区：主按钮「播放 / 继续播放 · mm:ss」（占满除动作键以外的宽度）
- * + 右侧下载、投屏两个紧凑动作键。
- *
- * 删除已收进右上角「更多」菜单（那里本来就有确认框），行内不再放第三个图标键 ——
- * 多出来的宽度全部给播放按钮。「从头播放」也只在「更多」菜单里出现（有进度时）。
+ * 播放区：主按钮「播放 / 继续播放 · mm:ss」，电视剧有已看记录时增加「从头播放」。
  *
  * 进度说明**始终显示**：
  * `已观看 24% · 剩余 1小时12分 · 总时长 1小时35分`。
@@ -2107,16 +1331,9 @@ private fun metaChips(item: EmbyItem): List<String> {
 @Composable
 private fun PlaySection(
   item: EmbyItem,
-  /** resumeSeconds = 续播秒数（0 = 从头）；reverseEngine = 用与默认相反的内核（长按） */
-  onPlay: (resumeSeconds: Long, reverseEngine: Boolean) -> Unit,
-  onDownload: () -> Unit,
-  onCast: () -> Unit,
-  onPlayExternal: () -> Unit,
-  downloadLabel: String?,
-  downloadStatus: EmbyDownloadStatus?,
+  /** resumeSeconds = 续播秒数（0 = 从头）。 */
+  onPlay: (resumeSeconds: Long) -> Unit,
   /** 下载填充进度 0..1；null = 没有下载任务（不画填充） */
-  downloadProgress: Float?,
-  downloadFailed: Boolean,
   /** 是否正在拉起播放器：播放键转圈 + 禁点。 */
   playLaunching: Boolean = false,
   /** 多版本媒体：当前选中的版本 Id（null = 默认版本）。 */
@@ -2172,15 +1389,13 @@ private fun PlaySection(
   ) {
     Row(
       modifier = Modifier.fillMaxWidth(),
-      // 这一行现在有四个动作（播放 + 下载 + 投屏 + 外部播放），间距收到 8dp、
-      // 三个图标键收到 48dp，留给播放按钮的宽度才够放「继续播放 · 1:23:45」
+      // 播放（电视剧另有从头播放），8dp 间距，图标键 48dp。
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      // 播放按钮：单击用默认内核（有进度即续播），长按用「另一个」内核（Media3 ↔ mpv）应急。
-      // 不用 Button + 内层 clickable 的写法：内层会把单击吃掉，外层 combinedClickable
-      // 只能收到长按，两者行为对不上。这里直接用 Box + combinedClickable 自己画。
-      // 占满除两个动作键以外的全部宽度（删除键已收进右上角「更多」菜单）。
+      // 播放按钮：有进度即续播，常规播放固定进入 mpv。
+      // 主播放按钮自己绘制，以便叠加观看进度并在拉起期间禁用点击。
+      // 占满除「从头播放」动作键以外的全部宽度。
       PlayButton(
         // Series 自身没有 RunTimeTicks，`hasResume` 恒为 false ⇒ 这里得单独给文案。
         // 「开始播放」比光秃秃的「播放」更能说明「点了会从该看的那一集开始」，
@@ -2190,8 +1405,7 @@ private fun PlaySection(
           hasResume -> "继续播放 · ${formatClock(resumeSeconds)}"
           else -> "播放"
         },
-        onClick = { onPlay(if (hasResume) resumeSeconds else 0, false) },
-        onLongClick = { onPlay(if (hasResume) resumeSeconds else 0, true) },
+        onClick = { onPlay(if (hasResume) resumeSeconds else 0) },
         // 拉起播放器期间：转圈 + 禁点。
         // 单看"转圈"还不够 —— 不挡掉点击的话，用户等得不耐烦会再点，起两个播放页。
         loading = playLaunching,
@@ -2213,8 +1427,7 @@ private fun PlaySection(
       //   「继续看上次那一集」和「回第一集重刷」是并列的两个意图，没有主次。
       //   把「从头」藏进长按或菜单里，用户想重刷时会先点到大按钮被带到第 8 集，
       //   再拖回来 —— 这一趟白走。给它一枚 48dp 的图标键，一眼可见、一指点到。
-      // ⚠️ 图标用 Replay：语义就是「倒回去重放」，和播放键的三角一眼分得开
-      //   （不同于外部播放器的 OpenInNew，那两者是「把内容送出去」，才需要小心区分）。
+      // ⚠️ 图标用 Replay：语义就是「倒回去重放」，和播放键的三角一眼分得开。
       if (seriesFromStartVisible) {
         Box(
           modifier =
@@ -2235,124 +1448,11 @@ private fun PlaySection(
           )
         }
       }
-
-      // 下载：与播放按钮同一行，只保留图标。按钮内部**自下而上**填充一块进度色带 ——
-      //   下载中：跟真实进度走（300ms 平滑过渡，不会一格格跳）
-      //   已暂停：停在当前进度
-      //   已下载：填满整枚按钮 + 图标换成对勾
-      //   排队中：细条填充 + 透明度呼吸，示意「在队列里等」
-      // 这个按钮同时也是「暂停 / 继续」开关：下载中（或排队）点一下暂停、已暂停点一下继续，
-      // 图标随状态换成 暂停 / 播放 箭头，让用户能一眼看出再点会发生什么。
-      // 已完成只弹提示；不用 enabled 置灰（置灰会把整个按钮压成半透明，进度带就看不清了）。
-      if (isDownloadable(item)) {
-        val animatedFill by animateFloatAsState(
-          targetValue = downloadProgress ?: 0f,
-          animationSpec = tween(durationMillis = 300),
-          label = "downloadFill",
-        )
-        val queuedPulse by rememberInfiniteTransition(label = "downloadQueued")
-          .animateFloat(
-            initialValue = 0.25f,
-            targetValue = 0.55f,
-            animationSpec = infiniteRepeatable(tween(durationMillis = 900)),
-            label = "downloadQueuedAlpha",
-          )
-        val isQueued = downloadStatus == EmbyDownloadStatus.QUEUED
-        val fillFraction = when {
-          downloadProgress == null -> 0f
-          isQueued -> 0.06f
-          else -> animatedFill.coerceIn(0f, 1f)
-        }
-        val fillAlpha = if (isQueued) queuedPulse else 1f
-
-        Box(
-          modifier =
-            Modifier
-              .size(48.dp)
-              .clip(RoundedCornerShape(16.dp))
-              .background(
-                if (downloadLabel == null) {
-                  MaterialTheme.colorScheme.primaryContainer
-                } else {
-                  MaterialTheme.colorScheme.surfaceVariant
-                }
-              )
-              .clickable(onClick = onDownload),
-          contentAlignment = Alignment.Center,
-        ) {
-          if (fillFraction > 0f) {
-            // 贴底的填充层：fraction=1 时正好铺满整枚按钮
-            Box(
-              modifier =
-                Modifier
-                  .align(Alignment.BottomCenter)
-                  .fillMaxWidth()
-                  .fillMaxHeight(fillFraction)
-                  .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.45f * fillAlpha)),
-            )
-          }
-          val (downloadIcon, downloadActionLabel) = when (downloadStatus) {
-            EmbyDownloadStatus.RUNNING, EmbyDownloadStatus.QUEUED ->
-              Icons.Default.Pause to "暂停下载"
-
-            EmbyDownloadStatus.PAUSED, EmbyDownloadStatus.FAILED ->
-              Icons.Default.PlayArrow to "继续下载"
-
-            EmbyDownloadStatus.COMPLETED -> Icons.Default.Check to "已下载"
-            null -> Icons.Default.Download to "下载"
-          }
-          Icon(
-            imageVector = downloadIcon,
-            contentDescription = downloadActionLabel,
-            tint = when {
-              downloadFailed -> MaterialTheme.colorScheme.error
-              downloadLabel == null -> MaterialTheme.colorScheme.onPrimaryContainer
-              else -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
-          )
-        }
-      }
-
-      // 投屏：把当前媒体投到 DLNA 设备（与播放 / 下载同一行）
-      Box(
-        modifier =
-          Modifier
-            .size(48.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer)
-            .clickable(onClick = onCast),
-        contentAlignment = Alignment.Center,
-      ) {
-        Icon(
-          imageVector = Icons.Outlined.Cast,
-          contentDescription = "投屏",
-          tint = MaterialTheme.colorScheme.onPrimaryContainer,
-        )
-      }
-
-      // 外部播放器：把流地址交给 MX / VLC 这类第三方播放器。
-      // 用「方框 + 右上角箭头」的 OpenInNew，和旁边的投屏（Cast）区分得开 ——
-      // 两者都是「把内容送出去」，光看图标不会混。
-      Box(
-        modifier =
-          Modifier
-            .size(48.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer)
-            .clickable(onClick = onPlayExternal),
-        contentAlignment = Alignment.Center,
-      ) {
-        Icon(
-          imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-          contentDescription = "用外部播放器打开",
-          tint = MaterialTheme.colorScheme.onPrimaryContainer,
-        )
-      }
     }
 
     // ── 多版本媒体：版本下拉框 ──
     // Emby 把同一个片子的多个版本（4K / 1080P / 不同压制组…）放在 MediaSources 里，
-    // 这里给一个与网页端一致的版本切换入口：选中的版本会用于播放 / 转码 / 投屏 / 外部播放器。
+    // 这里给一个与网页端一致的版本切换入口：选中的版本会用于播放和媒体信息。
     // 只有真的存在多个版本时才渲染 —— 单版本媒体（绝大多数）界面上完全看不出变化。
     if (mediaSources.size > 1) {
       MediaSourceSelector(
@@ -2379,7 +1479,7 @@ private fun PlaySection(
     // 有续播进度时给一个「从头播放」（蓝色主键此时是续播，两者各司其职）。
     // 「继续上次」不单独出现 —— 蓝色主键就是续播，再放一个是冗余的。
     if (hasResume) {
-      FilledTonalButton(onClick = { onPlay(0, false) }) {
+      FilledTonalButton(onClick = { onPlay(0) }) {
         Text("从头播放")
       }
     }
@@ -2436,7 +1536,7 @@ private suspend fun loadVersionResumeSeconds(
  *    前缀，否则会拼出 `MetaTube:JavBus:ACZD-218` 这种双前缀。这就是下面那句
  *    `contains(':')` 判断的由来。
  */
-private fun externalLinkUrl(
+internal fun externalLinkUrl(
   baseUrl: String?,
   providerName: String,
   providerId: String,
@@ -2585,17 +1685,12 @@ private fun MediaSourceSelector(
   }
 }
 /**
- * 主播放按钮：单击 = 默认内核，长按 = 备用内核。
- *
- * 长按的落点是「这片子 mpv 播不动，临时换个内核试试」—— 不用先去设置里改默认内核
- * 再回来点一次。开关关掉（设置 → 长按反选内核）后长按与单击行为一致。
+ * 主播放按钮。常规播放固定进入 mpv。
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PlayButton(
   label: String,
   onClick: () -> Unit,
-  onLongClick: () -> Unit,
   /**
    * 拉起播放器期间为 true：图标换成转圈、并**禁掉点击**。
    *
@@ -2618,10 +1713,9 @@ private fun PlayButton(
       modifier
         .clip(RoundedCornerShape(20.dp))
         .background(MaterialTheme.colorScheme.primary)
-        .combinedClickable(
+        .clickable(
           enabled = !loading,
           onClick = onClick,
-          onLongClick = onLongClick,
         ),
     contentAlignment = Alignment.Center,
   ) {
@@ -2651,7 +1745,7 @@ private fun PlayButton(
         //   **整页居中**的大加载动画（见 EmbyDetailScreen 根 Box 末尾的
         //   `playLaunching` 覆盖层，走「外观 → 加载动画」统一入口）。
         //   按钮这一小块只留文字说明状态 —— 两处同时转会互相抢注意力。
-        //   禁点仍然保留（combinedClickable 的 enabled = !loading）：
+        //   禁点仍然保留（clickable 的 enabled = !loading）：
         //   连点会起两个播放页，这个比转圈更重要。
         Text(
           text = "正在打开播放器…",
@@ -2678,29 +1772,6 @@ private fun PlayButton(
       }
     }
   }
-}
-
-/**
- * 能否下载。
- *
- * Series / Season / 文件夹这类条目本身没有视频文件（真正的内容在子条目上），
- * 点下载只会拿到一个 404 或被服务器当成目录处理，所以直接不给按钮。
- * 支持的类型里最常见的三类就是电影、剧集单集、以及家庭视频。
- */
-private fun isDownloadable(item: EmbyItem): Boolean {
-  val type = item.Type ?: return false
-  return type !in setOf(
-    "Series",
-    "Season",
-    "BoxSet",
-    "Folder",
-    "CollectionFolder",
-    "PhotoAlbum",
-    "MusicAlbum",
-    "MusicArtist",
-    "Playlist",
-    "Photo",
-  )
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -3142,6 +2213,7 @@ private fun RecommendationCard(
         .aspectRatio(2f / 3f),
     ) {
       EmbyImage(
+        server = server,
         url = posterUrl,
         contentDescription = item.Name,
         modifier = Modifier.fillMaxSize(),
@@ -3151,7 +2223,7 @@ private fun RecommendationCard(
     }
     Spacer(modifier = Modifier.height(4.dp))
     Text(
-      text = item.Name ?: "",
+      text = item.displayTitle(),
       style = MaterialTheme.typography.bodySmall,
       maxLines = 2,
       minLines = 2,

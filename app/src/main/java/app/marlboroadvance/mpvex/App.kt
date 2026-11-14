@@ -2,14 +2,13 @@ package app.marlboroadvance.mpvex
 
 import android.app.Application
 import android.util.Log
-import app.marlboroadvance.mpvex.database.repository.VideoMetadataCacheRepository
+import androidx.preference.PreferenceManager
 import app.marlboroadvance.mpvex.di.DatabaseModule
 import app.marlboroadvance.mpvex.di.FileManagerModule
 import app.marlboroadvance.mpvex.di.PreferencesModule
-import app.marlboroadvance.mpvex.domain.network.FOLDER_COVER_CACHE_VERSION
+import app.marlboroadvance.mpvex.preferences.LegacyPlayerPreferenceCleanup
 import app.marlboroadvance.mpvex.presentation.crash.CrashActivity
 import app.marlboroadvance.mpvex.presentation.crash.GlobalExceptionHandler
-import app.marlboroadvance.mpvex.utils.media.MediaLibraryEvents
 import `is`.xyz.mpv.FastThumbnails
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,12 +23,6 @@ import java.io.File
 @OptIn(KoinExperimentalAPI::class)
 class App : Application() {
   private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-  private val metadataCache: VideoMetadataCacheRepository by inject()
-  private val embyServerRepository: app.marlboroadvance.mpvex.database.repository.EmbyServerRepository by inject()
-  private val networkRepository: app.marlboroadvance.mpvex.repository.NetworkRepository by inject()
-  private val dislikeRepository: app.marlboroadvance.mpvex.domain.dislike.DislikeRepository by inject()
-  private val browserPreferences: app.marlboroadvance.mpvex.preferences.BrowserPreferences by inject()
-  private val appearancePreferences: app.marlboroadvance.mpvex.preferences.AppearancePreferences by inject()
 
   companion object {
     private var instance: App? = null
@@ -71,6 +64,17 @@ class App : Application() {
   private fun bootStartedFile(): File = File(getExternalFilesDir(null) ?: filesDir, "boot_started.txt")
   private fun bootOkFile(): File = File(getExternalFilesDir(null) ?: filesDir, "boot_ok.txt")
 
+  private fun cleanupLegacyPlayerPreferences() {
+    val preferences = PreferenceManager.getDefaultSharedPreferences(this)
+    val plan = LegacyPlayerPreferenceCleanup.plan(preferences.all) ?: return
+    val editor = preferences.edit()
+    plan.decoderModeToSeed?.let { editor.putString(LegacyPlayerPreferenceCleanup.DECODER_MODE_KEY, it) }
+    plan.keysToRemove.forEach(editor::remove)
+    editor.putInt(LegacyPlayerPreferenceCleanup.MARKER_KEY, plan.markerVersion)
+    // Synchronous by design: Koin starts immediately after this method returns.
+    check(editor.commit()) { "Failed to persist legacy player preference cleanup" }
+  }
+
   override fun onCreate() {
     instance = this
     trace("App.onCreate start")
@@ -84,6 +88,11 @@ class App : Application() {
     runCatching { File(filesDir, "crash_shown").delete() }
     trace("boot markers written; lastBootStuck=$lastBootStuck")
 
+    // This must complete before Koin constructs preference objects. The plan seeds the replacement
+    // decoder enum before deleting its two legacy booleans, then removes only approved dead keys.
+    cleanupLegacyPlayerPreferences()
+    trace("legacy player preferences cleaned")
+
     try {
       startKoin {
         androidContext(this@App)
@@ -92,7 +101,6 @@ class App : Application() {
           DatabaseModule,
           FileManagerModule,
           app.marlboroadvance.mpvex.di.domainModule,
-          app.marlboroadvance.mpvex.dlna.dlnaModule,
         )
       }
       trace("startKoin done")
@@ -101,10 +109,19 @@ class App : Application() {
       throw e
     }
 
+    val playbackServer: app.marlboroadvance.mpvex.domain.emby.playback.LoopbackPlaybackServer by inject()
+    playbackServer.start()
+    applicationScope.launch {
+      runCatching { playbackServer.awaitReady() }
+        .onSuccess { trace("loopback playback server ready on 127.0.0.1:$it") }
+        .onFailure { trace("loopback playback server failed: ${it.javaClass.simpleName}") }
+    }
+    trace("loopback playback server starting")
+
     Thread.setDefaultUncaughtExceptionHandler(GlobalExceptionHandler(applicationContext, CrashActivity::class.java))
     trace("uncaught handler set")
 
-    // Emby 封面图的磁盘缓存层（TTL 7 天 / 上限 256MB，设置页可查看占用与清除）
+    // Emby 封面图的磁盘缓存层（下载后 30 天新鲜期 / 上限 256MB，读取不续期）
     app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImageLoader.init(this)
 
     // FastThumbnails 会加载 native 库（libmpv 等），在某些设备/ABI 上可能原生崩溃或抛 UnsatisfiedLinkError。
@@ -123,13 +140,6 @@ class App : Application() {
       }
     }
 
-    // Perform cache maintenance on app startup (non-blocking)
-    applicationScope.launch {
-      runCatching {
-        metadataCache.performMaintenance()
-      }
-    }
-
     // 解码能力探测：设置里「自动检测」两档要据此决定走硬解还是软解。
     // MediaCodecList 枚举全机编解码器是几十毫秒量级的活，**不能**等到
     // MPVView.initOptions（主线程）再算，开机就丢到后台预热，播放器侧只读结果。
@@ -138,126 +148,7 @@ class App : Application() {
       app.marlboroadvance.mpvex.ui.player.DecoderCapability.probe(this@App)
     }
 
-    // 凭据加密升级：老版本把 Emby / SMB / FTP / WebDAV 的密码以明文存在库里，
-    // 这里启动后一次性改成 Keystore AES-GCM 密文（幂等，已经是密文的会跳过）。
-    // 放在后台线程、整体 runCatching —— 升级失败不影响任何功能，下次启动会再试。
-    applicationScope.launch {
-      runCatching {
-        val upgraded =
-          embyServerRepository.encryptLegacyPlaintextPasswords() +
-            networkRepository.encryptLegacyPlaintextPasswords()
-        if (upgraded > 0) trace("credential encryption upgrade: $upgraded row(s)")
-      }
-    }
-
-    // 网络文件夹封面缓存的 TTL 清理：删掉 12 小时没刷新过的 L2 行（启动时一次）。
-    // 封面对的是「服务器上文件夹里当前有哪些图」，目录内容会变，
-    // 一直不新鲜的缓存比没有缓存更糟（显示一个早就删掉的封面）。
-    // L1 是进程内的不用管；失败吞掉 —— 少扫一次不过是多留几行旧数据。
-    applicationScope.launch {
-      runCatching { networkRepository.clearStaleFolderCovers() }
-        .onFailure { trace("folder cover TTL cleanup failed: ${it.message}") }
-    }
-
-    // 封面**选择算法**换口径时，把落盘的旧结果整表作废一次（见
-    // FOLDER_COVER_CACHE_VERSION 的说明）。不这么做的话，用户升级后看到的还是旧算法
-    // 挑出来的封面，要等 12 小时 TTL 或手动下拉刷新 —— 表现就是「改了跟没改一样」。
-    applicationScope.launch {
-      runCatching {
-        val stored = browserPreferences.folderCoverCacheVersion
-        if (stored.get() < FOLDER_COVER_CACHE_VERSION) {
-          networkRepository.clearAllFolderCovers()
-          stored.set(FOLDER_COVER_CACHE_VERSION)
-          trace("folder cover cache purged: algo v${stored.get()}")
-        }
-      }.onFailure { trace("folder cover purge failed: ${it.message}") }
-    }
-
-    // 「不喜欢」标记的内存快照：启动时读一次库。
-    // 这是它**唯一**的读库时机 —— 之后所有查询都走内存（O(1)），
-    // 所以播放器切视频时不会因为查状态而掉帧。
-    // 失败必须吞掉：这是个锦上添花的功能，为它让整个 App 起不来是本末倒置。
-    applicationScope.launch {
-      runCatching { dislikeRepository.load() }
-        .onFailure { trace("dislike load failed: ${it.message}") }
-      // 出厂播种：把「不喜欢」按钮写进播放器控件布局（**只做一次**，见方法注释）。
-      // 必须排在 load() 之后是刻意的：两者都碰同一批偏好/库，串起来跑省得并发。
-      runCatching { seedDislikeButtonIntoPlayerLayout() }
-        .onFailure { trace("dislike layout seed failed: ${it.stackTraceToString()}") }
-    }
-
-    // Trigger media scan on app launch to detect new videos
-    applicationScope.launch {
-      runCatching {
-        triggerMediaScanOnLaunch()
-      }
-    }
     trace("App.onCreate done")
   }
 
-  /**
-   * 出厂播种：把「标记为不喜欢」按钮加进播放器控件布局。
-   *
-   * ## 为什么必须有这一步
-   *
-   * mpv 播放页的按钮**不是硬编码的**，它是把控件簇的 CSV（如 `top_right_controls`）
-   * 解析成按钮列表后渲染的（见 `PlayerControlsShared`）。而「播放器按钮」开关的语义是
-   * 「关 ⇒ 从布局里清掉；开 ⇒ 只置开关、不主动加回」—— 这个语义成立的前提是
-   * **出厂时按钮已经在布局里**。
-   *
-   * 第一版漏了播种，结果：开关默认「开」、设置页显示「已开启」，
-   * 但 mpv 播放器里**到处都找不到入口**，看上去像开关坏了。
-   *
-   * ## 为什么只播一次
-   *
-   * 用户有权把按钮从所有控件簇里删掉（那就是他的布局决定）。每次启动都塞回去
-   * 等于反复撤销用户的操作，所以播完置 `dislike_layout_seeded`，之后永不再动。
-   *
-   * ## 为什么不能只改偏好默认值
-   *
-   * 控件簇的 CSV 一旦被读过就写进了本地存储，改 `getString` 的默认值对**已安装用户
-   * 完全无效**（`AppearancePreferences` 里 v2/v3 换 key 的注释就是这个教训）。
-   * 默认值那道保险只覆盖全新用户，老用户靠这里。
-   */
-  private fun seedDislikeButtonIntoPlayerLayout() {
-    // ⚠️ 版本**必须随 [DislikeLayoutSync.SEED_CLUSTERS] 一起涨**：
-    //  只改簇列表不改版本号的话，已经播过旧版本的用户会被跳过，新加的簇永远补不上。
-    val targetVersion = 2
-    if (browserPreferences.dislikeLayoutSeedVersion.get() >= targetVersion) return
-
-    val sync = app.marlboroadvance.mpvex.ui.preferences.DislikeLayoutSync
-    val prefs = sync.clusterPrefs(appearancePreferences)
-    val plan = sync.planSeed(current = sync.readClusters(prefs))
-    if (plan.writes.isNotEmpty()) {
-      sync.writeClusters(prefs, plan.writes)
-      trace("dislike layout seeded to v$targetVersion: ${plan.writes}")
-    }
-    // 不管这次有没有真的写入都要落版本号：
-    // 已经齐了的就别再算一遍，缺的这次补完，下次也不必再算。
-    browserPreferences.dislikeLayoutSeedVersion.set(targetVersion)
-  }
-
-  /**
-   * Trigger a media scan on app launch to ensure MediaStore is up-to-date
-   * This helps detect videos added by external apps while the app was closed
-   */
-  private fun triggerMediaScanOnLaunch() {
-    try {
-      val externalStorage = android.os.Environment.getExternalStorageDirectory()
-
-      android.media.MediaScannerConnection.scanFile(
-        this,
-        arrayOf(externalStorage.absolutePath),
-        null, // Let MediaScanner detect all media types
-      ) { path, uri ->
-        android.util.Log.d("App", "Launch media scan completed for: $path")
-        // Notify the app that media library may have changed
-        MediaLibraryEvents.notifyChanged()
-      }
-
-      android.util.Log.d("App", "Triggered media scan on app launch")
-    } catch (e: Exception) {
-      android.util.Log.e("App", "Failed to trigger media scan on launch", e)
-    }
-  }
 }

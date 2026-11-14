@@ -1,16 +1,13 @@
 package app.marlboroadvance.mpvex.ui.player
-import app.marlboroadvance.mpvex.ui.player.engine.EngineKind
 import app.marlboroadvance.mpvex.ui.player.engine.PlayerLib
 import app.marlboroadvance.mpvex.ui.player.engine.VideoCrop
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ActivityInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.Settings
-import android.util.DisplayMetrics
 import android.util.Log
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
@@ -24,14 +21,13 @@ import app.marlboroadvance.mpvex.preferences.AudioPreferences
 import app.marlboroadvance.mpvex.preferences.GesturePreferences
 import app.marlboroadvance.mpvex.preferences.PlayerPreferences
 import app.marlboroadvance.mpvex.preferences.SubtitlesPreferences
-import app.marlboroadvance.mpvex.utils.media.ChecksumUtils
-import app.marlboroadvance.mpvex.utils.media.MediaInfoParser
 import `is`.xyz.mpv.MPVLib
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
@@ -47,23 +43,14 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
-import androidx.documentfile.provider.DocumentFile
-import app.marlboroadvance.mpvex.preferences.AdvancedPreferences
+import kotlin.math.roundToInt
 import kotlin.properties.ReadOnlyProperty
 import kotlin.reflect.KProperty
 
-
-enum class RepeatMode {
-  OFF,      // No repeat
-  ONE,      // Repeat current file
-  ALL       // Repeat all (playlist)
-}
 
 class PlayerViewModelProviderFactory(
   private val host: PlayerHost,
@@ -89,7 +76,6 @@ class PlayerViewModel(
   private val gesturePreferences: GesturePreferences by inject()
   private val audioPreferences: AudioPreferences by inject()
   private val subtitlesPreferences: SubtitlesPreferences by inject()
-  private val advancedPreferences: AdvancedPreferences by inject()
   private val json: Json by inject()
 
   /**
@@ -100,6 +86,10 @@ class PlayerViewModel(
    * 不需要驱动重组。
    */
   var seriesKey: String? = null
+
+  /** Bound by the host to the actual playback row; never the globally selected server. */
+  @Volatile
+  var subtitleServer: app.marlboroadvance.mpvex.domain.emby.EmbyServer? = null
 
   /**
    * 自动连播下一集前的倒计时剩余秒数；0 表示不显示卡片。
@@ -132,18 +122,6 @@ class PlayerViewModel(
    * 自动跳过开着时这里恒为 null（不需要用户动手）。
    */
   val skipSegmentLabel = MutableStateFlow<String?>(null)
-  private val playbackStateDao: app.marlboroadvance.mpvex.database.dao.PlaybackStateDao by inject()
-
-  // Playlist items for the playlist sheet
-  private val _playlistItems = kotlinx.coroutines.flow.MutableStateFlow<List<app.marlboroadvance.mpvex.ui.player.controls.components.sheets.PlaylistItem>>(emptyList())
-  val playlistItems: kotlinx.coroutines.flow.StateFlow<List<app.marlboroadvance.mpvex.ui.player.controls.components.sheets.PlaylistItem>> = _playlistItems.asStateFlow()
-
-  // Cache for video metadata to avoid re-extracting — LruCache handles bounds + thread-safety
-  private val metadataCache = object : android.util.LruCache<String, Pair<String, String>>(100) {}
-
-  private fun updateMetadataCache(key: String, value: Pair<String, String>) {
-    metadataCache.put(key, value)
-  }
 
   // MPV properties with efficient collection
   val paused by PlayerLib.propBoolean["pause"].collectAsState(viewModelScope)
@@ -183,7 +161,7 @@ class PlayerViewModel(
   /**
    * 当前视频的网络加载速度（字节/秒），约 1 秒刷新一次。
    *
-   * null = 指示器整体隐藏：非 mpv 内核、或当前流不是网络流（本地文件上
+   * null = 指示器整体隐藏：当前流不是网络流（本地文件上
    * 显示「0 KB/s」只会造成困惑）。值为 0 表示「缓冲已满 / 暂停中，没有在下载」，
    * 此时指示器显示 0 KB/s 而不是消失 —— 数值归零是诚实的，忽隐忽现反而让人以为坏了。
    */
@@ -192,6 +170,9 @@ class PlayerViewModel(
   // High-precision position and duration for smooth seekbar
   private val _precisePosition = MutableStateFlow(0f)
   val precisePosition = _precisePosition.asStateFlow()
+
+  private val _cacheTimelineNode = MutableStateFlow<`is`.xyz.mpv.MPVNode?>(null)
+  val cacheTimelineNode = _cacheTimelineNode.asStateFlow()
 
   /** mpv 自己报的 `duration`（秒）。> 0 才可信，见 [preciseDuration]。 */
   private val _preciseDuration = MutableStateFlow(0f)
@@ -328,6 +309,10 @@ class PlayerViewModel(
 
   // Audio state
   val currentVolume = MutableStateFlow(host.audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+  val volumeGestureFraction = MutableStateFlow(
+    currentVolume.value.toFloat() / host.audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1),
+  )
+  private val systemVolumeWrites = Channel<Int>(Channel.CONFLATED)
   private val volumeBoostCap by PlayerLib.propInt["volume-max"].collectAsState(viewModelScope)
 
   init {
@@ -359,6 +344,12 @@ class PlayerViewModel(
       }
     }
 
+    viewModelScope.launch {
+      PlayerLib.propNode["demuxer-cache-state"].collect { node ->
+        if (node != null) _cacheTimelineNode.value = node
+      }
+    }
+
     // ── 暂停写入的**单槽串行**通道 ──
     // 这里必须串行：以前每个 pause()/unpause() 各起一个 IO 协程去写 mpv 属性，
     // **同一个文件上「暂停 → 恢复」的落地顺序没有任何保证**。进度条松手时会先
@@ -387,7 +378,6 @@ class PlayerViewModel(
       while (isActive) {
         val paused = PlayerLib.getPropertyBoolean("pause") == true
         _netSpeedBytesPerSec.value = MpvNetSpeedSampler.sample(
-          isMpv = PlayerLib.kind == EngineKind.MPV,
           isPaused = paused,
         )
         delay(NET_SPEED_POLL_INTERVAL_MS)
@@ -397,18 +387,19 @@ class PlayerViewModel(
 
   val maxVolume = host.audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
 
-  /**
-   * 全部轨道。mpv 从 `track-list` 这个 MPVNode 反序列化；GSY 没有 MPVNode，
-   * 走门面里由 GsyBackend 直接构造好的 [PlayerLib.gsyTrackNodes]。
-   */
-  private val allTracks: StateFlow<List<TrackNode>> =
-    if (PlayerLib.kind == EngineKind.MPV) {
-      PlayerLib.propNode["track-list"]
-        .map { node -> node?.toObject<List<TrackNode>>(json) ?: emptyList() }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    } else {
-      PlayerLib.gsyTrackNodes.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+  init {
+    viewModelScope.launch(Dispatchers.IO) {
+      for (step in systemVolumeWrites) {
+        host.audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, step, 0)
+      }
     }
+  }
+
+  /** 全部轨道，由 mpv 的 `track-list` 反序列化。 */
+  private val allTracks: StateFlow<List<TrackNode>> =
+    PlayerLib.propNode["track-list"]
+      .map { node -> node?.toObject<List<TrackNode>>(json) ?: emptyList() }
+      .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
   val subtitleTracks: StateFlow<List<TrackNode>> =
     allTracks
@@ -419,13 +410,6 @@ class PlayerViewModel(
     allTracks
       .map { list -> list.filter { it.isAudio }.toImmutableList() }
       .stateIn(viewModelScope, SharingStarted.Lazily, persistentListOf())
-
-  val chapters: StateFlow<List<dev.vivvvek.seeker.Segment>> =
-    PlayerLib.propNode["chapter-list"]
-      .map { node ->
-        node?.toObject<List<ChapterNode>>(json)?.map { it.toSegment() }?.toImmutableList()
-          ?: persistentListOf()
-      }.stateIn(viewModelScope, SharingStarted.Lazily, persistentListOf())
 
   // UI state
   private val _controlsShown = MutableStateFlow(false)
@@ -456,6 +440,9 @@ class PlayerViewModel(
   /** 换片 / 重新加载时把「首帧已出」打回 false，让加载层重新出现。 */
   fun onLoadingNewFile() {
     _firstFrameRendered.value = false
+    _cacheTimelineNode.value = null
+    _precisePosition.value = 0f
+    horizontalSeekPreview.value = null
     // 换片后 mpv 的 `pause` 会被 loadfile 重置，留在通道里的旧意图（多半是 `true`）
     // 已经不代表事实了 —— 不清的话 [beginSeekPause] 会拿它当「当前已暂停」，
     // 于是换片后的第一次拖动不会暂停（只是解码更吃力，不会卡住播放，但要修掉）。
@@ -524,36 +511,6 @@ class PlayerViewModel(
   private val _isSeekingForwards = MutableStateFlow(false)
   val isSeekingForwards: StateFlow<Boolean> = _isSeekingForwards.asStateFlow()
 
-  // Frame navigation
-  private val _currentFrame = MutableStateFlow(0)
-  val currentFrame: StateFlow<Int> = _currentFrame.asStateFlow()
-
-  private val _totalFrames = MutableStateFlow(0)
-  val totalFrames: StateFlow<Int> = _totalFrames.asStateFlow()
-
-  private val _isFrameNavigationExpanded = MutableStateFlow(false)
-  val isFrameNavigationExpanded: StateFlow<Boolean> = _isFrameNavigationExpanded.asStateFlow()
-
-  private val _isSnapshotLoading = MutableStateFlow(false)
-  val isSnapshotLoading: StateFlow<Boolean> = _isSnapshotLoading.asStateFlow()
-
-  // Video zoom
-  private val _videoZoom = MutableStateFlow(0f)
-  val videoZoom: StateFlow<Float> = _videoZoom.asStateFlow()
-
-  // Video aspect ratio (now persisted via preferences)
-  private val _videoAspect = MutableStateFlow(playerPreferences.defaultVideoAspect.get())
-  val videoAspect: StateFlow<VideoAspect> = _videoAspect.asStateFlow()
-
-  // Current aspect ratio value (for custom ratios and tracking)
-  private val _currentAspectRatio = MutableStateFlow(playerPreferences.defaultCustomAspectRatio.get())
-  val currentAspectRatio: StateFlow<Double> = _currentAspectRatio.asStateFlow()
-
-  // Timer
-  private var timerJob: Job? = null
-  private val _remainingTime = MutableStateFlow(0)
-  val remainingTime: StateFlow<Int> = _remainingTime.asStateFlow()
-
   // Media title for subtitle association
   var currentMediaTitle: String = ""
   private var lastAutoSelectedMediaTitle: String? = null
@@ -565,38 +522,9 @@ class PlayerViewModel(
   // Mapping from mpv internal path/URI to the original source URI (resolves deletion issues)
   private val mpvPathToUriMap = mutableMapOf<String, String>()
 
-  // Repeat and Shuffle state
-  private val _repeatMode = MutableStateFlow(RepeatMode.OFF)
-  val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow()
-
-  private val _shuffleEnabled = MutableStateFlow(false)
-  val shuffleEnabled: StateFlow<Boolean> = _shuffleEnabled.asStateFlow()
-
-  // A-B Loop state
-  private val _abLoopA = MutableStateFlow<Double?>(null)
-  val abLoopA: StateFlow<Double?> = _abLoopA.asStateFlow()
-
-  private val _abLoopB = MutableStateFlow<Double?>(null)
-  val abLoopB: StateFlow<Double?> = _abLoopB.asStateFlow()
-
-  private val _isABLoopExpanded = MutableStateFlow(false)
-  val isABLoopExpanded: StateFlow<Boolean> = _isABLoopExpanded.asStateFlow()
-
-  // Mirroring state
-  private val _isMirrored = MutableStateFlow(false)
-  val isMirrored: StateFlow<Boolean> = _isMirrored.asStateFlow()
-
-  // Vertical flip state
-  private val _isVerticalFlipped = MutableStateFlow(false)
-  val isVerticalFlipped: StateFlow<Boolean> = _isVerticalFlipped.asStateFlow()
-
   init {
     // Track selection is now handled by TrackSelector in PlayerActivity
     
-    // Restore repeat mode and shuffle state from preferences
-    _repeatMode.value = playerPreferences.repeatMode.get()
-    _shuffleEnabled.value = playerPreferences.shuffleEnabled.get()
-
     // Observe volume boost cap changes to enforce limits dynamically (in PiP)
     viewModelScope.launch {
       audioPreferences.volumeBoostCap.changes().collect { cap ->
@@ -615,29 +543,6 @@ class PlayerViewModel(
       }
     }
 
-    // Monitor duration and AB loop changes to automatically enable precise seeking
-    viewModelScope.launch {
-      combine(
-        PlayerLib.propInt["duration"],
-        abLoopA,
-        abLoopB
-      ) { duration, loopA, loopB ->
-        Triple(duration, loopA, loopB)
-      }.collect { (duration, loopA, loopB) ->
-        val videoDuration = duration ?: 0
-        
-        // Only override hr-seek when duration is actually known and stable
-        if (videoDuration > 0) {
-          // Use precise seeking for videos shorter than 2 minutes, or if AB loop is active, or if preference is enabled
-          val isLoopActive = loopA != null || loopB != null
-          val shouldUsePreciseSeeking = playerPreferences.usePreciseSeeking.get() || videoDuration < 120 || isLoopActive
-          
-          // Update hr-seek settings dynamically
-          PlayerLib.setPropertyString("hr-seek", if (shouldUsePreciseSeeking) "yes" else "no")
-          PlayerLib.setPropertyString("hr-seek-framedrop", if (shouldUsePreciseSeeking) "no" else "yes")
-        }
-      }
-    }
   }
 
   // Cached values
@@ -701,49 +606,9 @@ class PlayerViewModel(
       )
   }
 
-  // ==================== Timer ====================
-
-  fun startTimer(seconds: Int) {
-    timerJob?.cancel()
-    _remainingTime.value = seconds
-    if (seconds < 1) return
-
-    timerJob =
-      viewModelScope.launch {
-        for (time in seconds downTo 0) {
-          _remainingTime.value = time
-          delay(1000)
-        }
-        PlayerLib.setPropertyBoolean("pause", true)
-        showToast(host.context.getString(R.string.toast_sleep_timer_ended))
-      }
-  }
-
   // ==================== Decoder ====================
 
   // ==================== Audio/Subtitle Management ====================
-
-  fun addAudio(uri: Uri) {
-    viewModelScope.launch(Dispatchers.IO) {
-      runCatching {
-        val path =
-          uri.resolveUri(host.context)
-            ?: return@launch withContext(Dispatchers.Main) {
-              showToast("加载音轨失败：地址无效")
-            }
-
-        PlayerLib.command("audio-add", path, "cached")
-        withContext(Dispatchers.Main) {
-          showToast("已添加音轨")
-        }
-      }.onFailure { e ->
-        withContext(Dispatchers.Main) {
-          showToast("加载音轨失败：${e.message}")
-        }
-        android.util.Log.e("PlayerViewModel", "Error adding audio", e)
-      }
-    }
-  }
 
   /**
    * mpv 加载新文件时清空外挂字幕跟踪表。
@@ -758,8 +623,9 @@ class PlayerViewModel(
 
   /** 用户主动添加外挂字幕（即发即忘）。要「加完再选中」请用 [loadSubtitle]。 */
   fun addSubtitle(uri: Uri, select: Boolean = true, silent: Boolean = false) {
+    val server = subtitleServer
     viewModelScope.launch(Dispatchers.IO) {
-      loadSubtitle(uri, select, silent)
+      loadSubtitle(uri, select, silent, server)
     }
   }
 
@@ -773,10 +639,15 @@ class PlayerViewModel(
    *
    * 注意：命令下发 ≠ 轨道已就绪。mpv 挂轨道是异步的，之后还要 [awaitTrackCountAtLeast] 等一拍。
    */
-  internal suspend fun loadSubtitle(uri: Uri, select: Boolean, silent: Boolean) {
+  internal suspend fun loadSubtitle(
+    uri: Uri,
+    select: Boolean,
+    silent: Boolean,
+    server: app.marlboroadvance.mpvex.domain.emby.EmbyServer? = subtitleServer,
+  ) {
     val uriString = uri.toString()
     if (_externalSubtitles.contains(uriString)) {
-      Log.d("PlayerViewModel", "Subtitle already tracked, skipping: $uriString")
+      Log.d("PlayerViewModel", "Subtitle already tracked, skipping")
       return
     }
 
@@ -801,9 +672,10 @@ class PlayerViewModel(
         }
       }
 
-      val mpvPath = uri.resolveUri(host.context) ?: uri.toString()
+      val mpvPath = app.marlboroadvance.mpvex.utils.media.SubtitleOps.readablePath(host.context, uri, server)
+        ?: return@runCatching
 
-      // Store mapping for reliable physical deletion later
+      // Track the source so detaching a subtitle never deletes its document.
       mpvPathToUriMap[mpvPath] = uriString
 
       PlayerLib.command("sub-add", mpvPath, if (select) "select" else "auto")
@@ -835,106 +707,15 @@ class PlayerViewModel(
     }
   }
 
-  private fun scanLocalSubtitles(mediaTitle: String) {
-    viewModelScope.launch(Dispatchers.IO) {
-      val saveFolderUri = subtitlesPreferences.subtitleSaveFolder.get()
-      if (saveFolderUri.isBlank()) return@launch
-      
-      try {
-        val sanitizedTitle = MediaInfoParser.parse(mediaTitle).title
-        val fullTitle = mediaTitle.substringBeforeLast(".")
-        val checksumTitle = ChecksumUtils.getCRC32(mediaTitle)
-        val parentDir = DocumentFile.fromTreeUri(host.context, Uri.parse(saveFolderUri)) ?: return@launch
-        
-        // Scan potential folder names for compatibility: checksum, full, and sanitized
-        listOf(checksumTitle, fullTitle, sanitizedTitle).distinct().forEach { folderName ->
-          val movieDir = parentDir.findFile(folderName) ?: return@forEach
-          if (movieDir.isDirectory) {
-            movieDir.listFiles().forEach { file ->
-              if (file.isFile && isValidSubtitleFile(file.name ?: "")) {
-                withContext(Dispatchers.Main) {
-                  // Don't auto-select during scan, just make available
-                  addSubtitle(file.uri, select = false, silent = true)
-                }
-              }
-            }
-          }
-        }
-      } catch (e: Exception) {
-        android.util.Log.e("PlayerViewModel", "Error scanning local subtitles: ${e.message}", e)
-      }
-    }
-  }
-
   fun setMediaTitle(mediaTitle: String) {
     if (currentMediaTitle != mediaTitle) {
       currentMediaTitle = mediaTitle
       lastAutoSelectedMediaTitle = null
       // Clear external subtitles when media changes
       _externalSubtitles.clear()
-      // Scan for previously downloaded/added subtitles
-      scanLocalSubtitles(mediaTitle)
-
-      // 1. Reset Aspect Ratio to saved preference
-      val savedAspect = playerPreferences.defaultVideoAspect.get()
-      val savedCustomRatio = playerPreferences.defaultCustomAspectRatio.get()
-      
-      if (savedCustomRatio > 0) {
-        // Apply saved custom aspect ratio
-        _currentAspectRatio.value = savedCustomRatio
-        runCatching {
-          PlayerLib.setPropertyDouble("panscan", 0.0)
-          PlayerLib.setPropertyDouble("video-aspect-override", savedCustomRatio)
-        }
-      } else {
-        // Apply saved standard aspect mode (Fit, Crop, or Stretch)
-        _videoAspect.value = savedAspect
-        _currentAspectRatio.value = -1.0
-        runCatching {
-          when (savedAspect) {
-            VideoAspect.Fit -> {
-              PlayerLib.setPropertyDouble("panscan", 0.0)
-              PlayerLib.setPropertyDouble("video-aspect-override", -1.0)
-            }
-            VideoAspect.Crop -> {
-              PlayerLib.setPropertyDouble("video-aspect-override", -1.0)
-              PlayerLib.setPropertyDouble("panscan", 1.0)
-            }
-            VideoAspect.Stretch -> {
-              @Suppress("DEPRECATION")
-              val dm = DisplayMetrics()
-              @Suppress("DEPRECATION")
-              host.hostWindowManager.defaultDisplay.getRealMetrics(dm)
-              val rotate = PlayerLib.getPropertyInt("video-params/rotate") ?: 0
-              val isVideoRotated = (rotate % 180 == 90)
-              val screenRatio = if (isVideoRotated) {
-                dm.heightPixels.toDouble() / dm.widthPixels.toDouble()
-              } else {
-                dm.widthPixels.toDouble() / dm.heightPixels.toDouble()
-              }
-              PlayerLib.setPropertyDouble("video-aspect-override", screenRatio)
-              PlayerLib.setPropertyDouble("panscan", 0.0)
-            }
-          }
-        }
-      }
-
-      // 2. Reset Video Zoom
-      if (_videoZoom.value != 0f) {
-          _videoZoom.value = 0f
-          runCatching { PlayerLib.setPropertyDouble("video-zoom", 0.0) }
-      }
-
-      // 3. Reset Video Pan
-      if (_videoPanX.value != 0f || _videoPanY.value != 0f) {
-          _videoPanX.value = 0f
-          _videoPanY.value = 0f
-          runCatching {
-              PlayerLib.setPropertyDouble("video-pan-x", 0.0)
-              PlayerLib.setPropertyDouble("video-pan-y", 0.0)
-          }
-      }
-      // ---------------------------------------------------
+      // A pinch zoom is session-only. Reset it for the next media item without restoring any
+      // removed zoom/pan/aspect preference chain.
+      PlayerLib.setPropertyDouble("video-zoom", 0.0)
     }
   }
 
@@ -1218,12 +999,36 @@ class PlayerViewModel(
   // ── 拖动节流（v217）──
   // 一条在途的绝对 seek（单飞：新的取消旧的，避免乱序落地）
   private var scrubSeekJob: Job? = null
-  // 上次真正下发拖动 seek 的时刻（毫秒）
+  private var scrubThrottleJob: Job? = null
+  // 上次真正下发拖动 seek 的时刻（单调时钟）
   private var lastScrubCommitAt = 0L
   // 拖动的最新目标（手指当前指向的位置），松手时用它保证最终落点
-  private var lastScrubTarget = -1
+  private var lastScrubTarget = -1.0
   // 最近一次已经发给 mpv 的拖动目标（避免收尾重复下发同一位置）
-  private var lastDispatchedScrub = -1
+  private var lastDispatchedScrub = -1.0
+
+  /** Numeric preview target rendered immediately, independent of throttled native position updates. */
+  val horizontalSeekPreview = MutableStateFlow<PlayerUpdates.HorizontalSeek?>(null)
+
+  fun updateHorizontalSeekPreview(startSeconds: Float, targetSeconds: Float, durationSeconds: Float) {
+    horizontalSeekPreview.value = PlayerUpdates.HorizontalSeek(startSeconds, targetSeconds, durationSeconds)
+  }
+
+  fun finishHorizontalSeekPreview(delayMillis: Long = 300L) {
+    val preview = horizontalSeekPreview.value ?: return
+    viewModelScope.launch {
+      delay(delayMillis)
+      if (horizontalSeekPreview.value === preview) {
+        horizontalSeekPreview.value = null
+        hideSeekBar()
+      }
+    }
+  }
+
+  fun clearHorizontalSeekPreview() {
+    horizontalSeekPreview.value = null
+    hideSeekBar()
+  }
 
   fun seekBy(offset: Int) {
     coalesceSeek(offset)
@@ -1231,7 +1036,7 @@ class PlayerViewModel(
 
   fun seekTo(position: Int) {
     renewSeekPauseSafetyNet()
-    dispatchAbsoluteSeek(position)
+    dispatchAbsoluteSeek(position.toDouble(), preview = false)
   }
 
   /**
@@ -1249,29 +1054,46 @@ class PlayerViewModel(
    * 「最后一条 onValueChange 恰好是最终位置」—— 并发协程下顺序不保证，
    * 停错位置就是这么来的。
    */
-  fun scrubTo(position: Int) {
+  fun scrubTo(position: Float) {
     renewSeekPauseSafetyNet()
-    lastScrubTarget = position
-    val now = System.currentTimeMillis()
-    if (now - lastScrubCommitAt < SCRUB_SEEK_INTERVAL_MS) return
-    lastScrubCommitAt = now
-    lastDispatchedScrub = position
-    dispatchAbsoluteSeek(position)
+    val duration = effectiveDurationSeconds().takeIf { it > 0f }
+      ?: PlayerLib.getPropertyDouble("duration")?.toFloat()?.takeIf { it > 0f }
+      ?: return
+    lastScrubTarget = position.coerceIn(0f, duration).toDouble()
+    scheduleScrubDispatch()
   }
 
-  /**
-   * 松手（或手势收尾）时保证落在最终目标上：节流窗口没到也强制下发一次。
-   * 与 [endSeekPause] 一样幂等 —— 没拖过（`lastScrubTarget` 还是 -1）时是 no-op。
-   */
+  private fun scheduleScrubDispatch() {
+    val elapsed = android.os.SystemClock.elapsedRealtime() - lastScrubCommitAt
+    if (lastScrubCommitAt == 0L || elapsed >= SCRUB_SEEK_INTERVAL_MS) {
+      dispatchLatestScrub()
+      return
+    }
+    if (scrubThrottleJob?.isActive == true) return
+    scrubThrottleJob = viewModelScope.launch {
+      delay(SCRUB_SEEK_INTERVAL_MS - elapsed)
+      dispatchLatestScrub()
+    }
+  }
+
+  private fun dispatchLatestScrub() {
+    val target = lastScrubTarget
+    if (target < 0.0 || target == lastDispatchedScrub) return
+    lastScrubCommitAt = android.os.SystemClock.elapsedRealtime()
+    lastDispatchedScrub = target
+    dispatchAbsoluteSeek(target, preview = true)
+  }
+
+  /** Force the final pointer target; exact seeking is reserved for this commit. */
   fun commitScrubSeek() {
     val target = lastScrubTarget
-    lastScrubTarget = -1
+    lastScrubTarget = -1.0
     lastScrubCommitAt = 0L
-    if (target < 0) return
-    // 刚下发过同一个目标（且还在途）：别重复发，mpv 的 seek 队列里它就是最新一条
-    if (target == lastDispatchedScrub) return
+    scrubThrottleJob?.cancel()
+    scrubThrottleJob = null
+    if (target < 0.0) return
     lastDispatchedScrub = target
-    dispatchAbsoluteSeek(target)
+    dispatchAbsoluteSeek(target, preview = false)
   }
 
   /**
@@ -1279,7 +1101,7 @@ class PlayerViewModel(
    */
   private fun renewSeekPauseSafetyNet() {
     if (seekPauseApplied) {
-      val now = System.currentTimeMillis()
+      val now = android.os.SystemClock.elapsedRealtime()
       if (now - seekPauseRenewedAt > SEEK_PAUSE_RENEW_INTERVAL_MS) {
         seekPauseRenewedAt = now
         armSeekPauseSafetyNet()
@@ -1291,30 +1113,22 @@ class PlayerViewModel(
    * 真正把绝对定位发给 mpv（IO 线程，单飞：新 seek 取消旧的）。
    * [seekTo]（跳章节、跳过片头这类单点跳转）与拖动节流共用这一条路。
    */
-  private fun dispatchAbsoluteSeek(position: Int) {
+  private fun dispatchAbsoluteSeek(position: Double, preview: Boolean) {
     scrubSeekJob?.cancel()
     scrubSeekJob =
       viewModelScope.launch(Dispatchers.IO) {
-        val maxDuration = PlayerLib.getPropertyInt("duration") ?: 0
-        var clampedPosition = position.coerceIn(0, maxDuration)
+        val maxDuration = effectiveDurationSeconds().toDouble().takeIf { it > 0.0 }
+          ?: PlayerLib.getPropertyDouble("duration")?.takeIf { it > 0.0 }
+          ?: return@launch
+        val clampedPosition = position.coerceIn(0.0, maxDuration)
 
-        // Clamp within AB loop if active
-        val loopA = _abLoopA.value
-        val loopB = _abLoopB.value
-        if (loopA != null && loopB != null) {
-          val min = minOf(loopA.toInt(), loopB.toInt())
-          val max = maxOf(loopA.toInt(), loopB.toInt())
-          clampedPosition = clampedPosition.coerceIn(min, max)
-        }
-
-        if (clampedPosition !in 0..maxDuration) return@launch
 
         // Cancel pending relative seek before absolute seek
         seekCoalesceJob?.cancel()
         pendingSeekOffset = 0
 
-        // Use precise seeking for videos shorter than 2 minutes (120 seconds) or if preference is enabled
-        val shouldUsePreciseSeeking = playerPreferences.usePreciseSeeking.get() || maxDuration < 120
+        val shouldUsePreciseSeeking = !preview &&
+          (playerPreferences.usePreciseSeeking.get() || maxDuration < 120.0)
         val seekMode = if (shouldUsePreciseSeeking) "absolute+exact" else "absolute+keyframes"
         PlayerLib.command("seek", clampedPosition.toString(), seekMode)
       }
@@ -1402,14 +1216,18 @@ class PlayerViewModel(
 
   // ==================== Brightness & Volume ====================
 
-  fun changeBrightnessTo(brightness: Float) {
+  fun changeBrightnessTo(brightness: Float, persist: Boolean = true) {
     val coercedBrightness = brightness.coerceIn(0f, 1f)
     host.hostWindow.attributes =
       host.hostWindow.attributes.apply {
         screenBrightness = coercedBrightness
       }
     currentBrightness.value = coercedBrightness
+    if (persist) persistBrightness(coercedBrightness)
+  }
 
+  fun persistBrightness(brightness: Float = currentBrightness.value) {
+    val coercedBrightness = brightness.coerceIn(0f, 1f)
     // Save brightness to preferences if enabled
     if (playerPreferences.rememberBrightness.get()) {
       playerPreferences.defaultBrightness.set(coercedBrightness)
@@ -1426,6 +1244,12 @@ class PlayerViewModel(
   fun displayBrightnessSlider() {
     isBrightnessSliderShown.value = true
     brightnessSliderTimestamp.value = System.currentTimeMillis()
+  }
+
+  fun synchronizeSystemVolume(step: Int) {
+    val normalizedStep = step.coerceIn(0, maxVolume)
+    currentVolume.value = normalizedStep
+    volumeGestureFraction.value = normalizedStep.toFloat() / maxVolume.coerceAtLeast(1)
   }
 
   fun changeVolumeBy(change: Int) {
@@ -1446,8 +1270,18 @@ class PlayerViewModel(
 
   fun changeVolumeTo(volume: Int) {
     val newVolume = volume.coerceIn(0..maxVolume)
-    host.audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-    currentVolume.value = newVolume
+    updateVolumeGesture(newVolume.toFloat() / maxVolume.coerceAtLeast(1))
+  }
+
+  /** UI remains continuous; only the rounded Android stream step crosses the Binder boundary. */
+  fun updateVolumeGesture(fraction: Float) {
+    val normalized = fraction.coerceIn(0f, 1f)
+    volumeGestureFraction.value = normalized
+    val step = (normalized * maxVolume).roundToInt().coerceIn(0, maxVolume)
+    if (step != currentVolume.value) {
+      currentVolume.value = step
+      systemVolumeWrites.trySend(step)
+    }
   }
 
   fun changeMPVVolumeTo(volume: Int) {
@@ -1459,102 +1293,11 @@ class PlayerViewModel(
     volumeSliderTimestamp.value = System.currentTimeMillis()
   }
 
-  // ==================== Video Aspect ====================
-
-  fun changeVideoAspect(
-    aspect: VideoAspect,
-    showUpdate: Boolean = true,
-  ) {
-    when (aspect) {
-      VideoAspect.Fit -> {
-        // To FIT: Reset both properties to their defaults.
-        PlayerLib.setPropertyDouble("panscan", 0.0)
-        PlayerLib.setPropertyDouble("video-aspect-override", -1.0)
-      }
-      VideoAspect.Crop -> {
-        // To CROP: Reset aspect override first, then set panscan
-        PlayerLib.setPropertyDouble("video-aspect-override", -1.0)
-        PlayerLib.setPropertyDouble("panscan", 1.0)
-      }
-      VideoAspect.Stretch -> {
-        // To STRETCH: Calculate screen ratio accounting for video rotation
-        @Suppress("DEPRECATION")
-        val dm = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        host.hostWindowManager.defaultDisplay.getRealMetrics(dm)
-        
-        // Get video rotation from metadata
-        val rotate = PlayerLib.getPropertyInt("video-params/rotate") ?: 0
-        val isVideoRotated = (rotate % 180 == 90) // 90° or 270° rotation
-        
-        // Calculate screen ratio, inverting if video is rotated
-        val screenRatio = if (isVideoRotated) {
-          // Video is rotated, so invert the screen ratio
-          dm.heightPixels.toDouble() / dm.widthPixels.toDouble()
-        } else {
-          // Video is not rotated, use normal screen ratio
-          dm.widthPixels.toDouble() / dm.heightPixels.toDouble()
-        }
-
-        // Set aspect override first, then reset panscan
-        // This prevents the brief flash of Fit mode
-        PlayerLib.setPropertyDouble("video-aspect-override", screenRatio)
-        PlayerLib.setPropertyDouble("panscan", 0.0)
-      }
-    }
-
-    // Update the state and persist to preferences
-    _videoAspect.value = aspect
-    _currentAspectRatio.value = -1.0 // Reset custom ratio when using standard modes
-    playerPreferences.defaultVideoAspect.set(aspect)
-    playerPreferences.defaultCustomAspectRatio.set(-1.0)
-
-    // Notify the UI
-    if (showUpdate) {
-      playerUpdate.value = PlayerUpdates.AspectRatio
-    }
-  }
-
-  fun setCustomAspectRatio(ratio: Double) {
-    PlayerLib.setPropertyDouble("panscan", 0.0)
-    PlayerLib.setPropertyDouble("video-aspect-override", ratio)
-    _currentAspectRatio.value = ratio
-    playerPreferences.defaultCustomAspectRatio.set(ratio)
-    playerUpdate.value = PlayerUpdates.AspectRatio
-  }
-
   // ==================== Screen Rotation ====================
 
-  /**
-   * 本次播放会话中用户通过旋转按钮手动指定的屏幕方向。
-   *
-   * null 表示未手动覆盖，跟随偏好设置。切集（playNext / playPrevious）时沿用该值，
-   * 避免用户手动转到的方向被偏好设置强制拉回。
-   */
-  private var manualOrientationOverride: Int? = null
-
-  /** 当前生效的手动方向覆盖值；null 表示未覆盖（应跟随偏好设置） */
-  val manualOrientationOverrideValue: Int?
-    get() = manualOrientationOverride
-
+  /** Rotate to the opposite fixed orientation and suppress further automatic decisions. */
   fun cycleScreenRotations() {
-    // 临时切换方向但**不修改偏好设置**：偏好仍是持久化的事实来源，
-    // 但本次会话内会记住用户的选择，切集时沿用而不是回退到偏好。
-    val next =
-      when (host.hostRequestedOrientation) {
-        ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
-        ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
-        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
-        -> {
-          ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-        }
-        else -> {
-          ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        }
-      }
-
-    manualOrientationOverride = next
-    host.hostRequestedOrientation = next
+    host.rotatePlayerScreen()
   }
 
   // ==================== Gesture Handling ====================
@@ -1642,619 +1385,25 @@ class PlayerViewModel(
     }
   }
 
-  // ==================== Video Zoom ====================
-
-  fun setVideoZoom(zoom: Float) {
-    _videoZoom.value = zoom
+  /** Applies the visible pinch gesture as a session-only command; it is never persisted. */
+  fun applyPinchZoom(zoom: Float) {
     PlayerLib.setPropertyDouble("video-zoom", zoom.toDouble())
   }
 
-  // Video pan (for pan & zoom feature)
-  private val _videoPanX = MutableStateFlow(0f)
-  val videoPanX: StateFlow<Float> = _videoPanX.asStateFlow()
+  // ==================== Internal playback queue navigation ====================
 
-  private val _videoPanY = MutableStateFlow(0f)
-  val videoPanY: StateFlow<Float> = _videoPanY.asStateFlow()
-
-  fun setVideoPan(x: Float, y: Float) {
-    _videoPanX.value = x
-    _videoPanY.value = y
-    PlayerLib.setPropertyDouble("video-pan-x", x.toDouble())
-    PlayerLib.setPropertyDouble("video-pan-y", y.toDouble())
-  }
-
-  fun resetVideoPan() {
-    setVideoPan(0f, 0f)
-  }
-
-  fun resetVideoZoom() {
-    setVideoZoom(0f)
-  }
-
-  // ==================== Frame Navigation ====================
-
-  fun updateFrameInfo() {
-    _currentFrame.value = PlayerLib.getPropertyInt("estimated-frame-number") ?: 0
-
-    val durationValue = PlayerLib.getPropertyDouble("duration") ?: 0.0
-    val fps =
-      PlayerLib.getPropertyDouble("container-fps")
-        ?: PlayerLib.getPropertyDouble("estimated-vf-fps")
-        ?: 0.0
-
-    _totalFrames.value =
-      if (durationValue > 0 && fps > 0) {
-        (durationValue * fps).toInt()
-      } else {
-        0
-      }
-  }
-
-  fun toggleFrameNavigationExpanded() {
-    val wasExpanded = _isFrameNavigationExpanded.value
-    _isFrameNavigationExpanded.update { !it }
-    // Update frame info and pause when expanding (going from false to true)
-    if (!wasExpanded) {
-      // Pause the video if it's playing
-      if (paused != true) {
-        pauseUnpause()
-      }
-      updateFrameInfo()
-      showFrameInfoOverlay()
-      resetFrameNavigationTimer()
-    } else {
-      // Cancel timer when manually collapsing
-      frameNavigationCollapseJob?.cancel()
-    }
-  }
-
-  private fun showFrameInfoOverlay() {
-    playerUpdate.value = PlayerUpdates.FrameInfo(_currentFrame.value, _totalFrames.value)
-  }
-
-  fun frameStepForward() {
-    viewModelScope.launch(Dispatchers.IO) {
-      if (paused != true) {
-        pauseUnpause()
-        delay(50)
-      }
-      PlayerLib.command("no-osd", "frame-step")
-      delay(100)
-      updateFrameInfo()
-      withContext(Dispatchers.Main) {
-        showFrameInfoOverlay()
-        // Reset the inactivity timer
-        resetFrameNavigationTimer()
-      }
-    }
-  }
-
-  fun frameStepBackward() {
-    viewModelScope.launch(Dispatchers.IO) {
-      if (paused != true) {
-        pauseUnpause()
-        delay(50)
-      }
-      PlayerLib.command("no-osd", "frame-back-step")
-      delay(100)
-      updateFrameInfo()
-      withContext(Dispatchers.Main) {
-        showFrameInfoOverlay()
-        // Reset the inactivity timer
-        resetFrameNavigationTimer()
-      }
-    }
-  }
-
-  private var frameNavigationCollapseJob: Job? = null
-
-  fun resetFrameNavigationTimer() {
-    frameNavigationCollapseJob?.cancel()
-    frameNavigationCollapseJob = viewModelScope.launch {
-      delay(10000) // 10 seconds
-      if (_isFrameNavigationExpanded.value) {
-        _isFrameNavigationExpanded.value = false
-      }
-    }
-  }
-
-  fun takeSnapshot(context: Context) {
-    viewModelScope.launch(Dispatchers.IO) {
-      _isSnapshotLoading.value = true
-      try {
-        val includeSubtitles = playerPreferences.includeSubtitlesInSnapshot.get()
-
-        // Generate filename with timestamp
-        val timestamp =
-          java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())
-        val filename = "mpv_snapshot_$timestamp.png"
-
-        // Create a temporary file first
-        val tempFile = File(context.cacheDir, filename)
-
-        // Take screenshot using MPV to temp file, with or without subtitles
-        if (includeSubtitles) {
-          PlayerLib.command("screenshot-to-file", tempFile.absolutePath, "subtitles")
-        } else {
-          PlayerLib.command("screenshot-to-file", tempFile.absolutePath, "video")
-        }
-
-        // Wait a bit for MPV to finish writing the file
-        delay(200)
-
-        // Check if file was created
-        if (!tempFile.exists() || tempFile.length() == 0L) {
-          withContext(Dispatchers.Main) {
-            Toast.makeText(context, "截图失败", Toast.LENGTH_SHORT).show()
-          }
-          return@launch
-        }
-
-        // Use different methods based on Android version
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-          // Android 10+ - Use MediaStore with RELATIVE_PATH
-          val contentValues =
-            android.content.ContentValues().apply {
-              put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, filename)
-              put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
-              put(
-                android.provider.MediaStore.Images.Media.RELATIVE_PATH,
-                "${android.os.Environment.DIRECTORY_PICTURES}/mpvSnaps",
-              )
-              put(android.provider.MediaStore.Images.Media.IS_PENDING, 1)
-            }
-
-          val resolver = context.contentResolver
-          val imageUri =
-            resolver.insert(
-              android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-              contentValues,
-            )
-
-          if (imageUri != null) {
-            // Copy temp file to MediaStore
-            resolver.openOutputStream(imageUri)?.use { outputStream ->
-              tempFile.inputStream().use { inputStream ->
-                inputStream.copyTo(outputStream)
-              }
-            }
-
-            // Mark as finished
-            contentValues.clear()
-            contentValues.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(imageUri, contentValues, null, null)
-
-            // Delete temp file
-            tempFile.delete()
-
-            // Show success toast
-            withContext(Dispatchers.Main) {
-              Toast
-                .makeText(
-                  context,
-                  context.getString(R.string.player_sheets_frame_navigation_snapshot_saved),
-                  Toast.LENGTH_SHORT,
-                ).show()
-            }
-          } else {
-            throw Exception("Failed to create MediaStore entry")
-          }
-        } else {
-          // Android 9 and below - Use legacy external storage
-          val picturesDir =
-            android.os.Environment.getExternalStoragePublicDirectory(
-              android.os.Environment.DIRECTORY_PICTURES,
-            )
-          val snapshotsDir = File(picturesDir, "mpvSnaps")
-
-          // Create directory if it doesn't exist
-          if (!snapshotsDir.exists()) {
-            val created = snapshotsDir.mkdirs()
-            if (!created && !snapshotsDir.exists()) {
-              throw Exception("Failed to create mpvSnaps directory")
-            }
-          }
-
-          val destFile = File(snapshotsDir, filename)
-          tempFile.copyTo(destFile, overwrite = true)
-          tempFile.delete()
-
-          // Notify media scanner about the new file
-          android.media.MediaScannerConnection.scanFile(
-            context,
-            arrayOf(destFile.absolutePath),
-            arrayOf("image/png"),
-            null,
-          )
-
-          withContext(Dispatchers.Main) {
-            Toast
-              .makeText(
-                context,
-                context.getString(R.string.player_sheets_frame_navigation_snapshot_saved),
-                Toast.LENGTH_SHORT,
-              ).show()
-          }
-        }
-      } catch (e: Exception) {
-        withContext(Dispatchers.Main) {
-          Toast.makeText(context, "保存截图失败：${e.message}", Toast.LENGTH_LONG).show()
-        }
-      } finally {
-        _isSnapshotLoading.value = false
-      }
-    }
-  }
-
-  // ==================== Playlist Management ====================
-
-  fun hasPlaylistSupport(): Boolean {
-    val playlistModeEnabled = playerPreferences.playlistMode.get()
-    return playlistModeEnabled && ((host as? PlayerActivity)?.playlist?.isNotEmpty() ?: false)
-  }
+  /** Queue capability is independent of the removed playlist panel and its old preference. */
+  fun hasPlaybackQueue(): Boolean = (host as? PlayerActivity)?.hasPlaylistItems() == true
 
   fun getPlaylistInfo(): String? {
     val activity = host as? PlayerActivity ?: return null
     if (activity.playlist.isEmpty()) return null
 
-    val totalCount = getPlaylistTotalCount()
+    val totalCount = activity.playlist.size
     return "${activity.playlistIndex + 1}/$totalCount"
   }
 
-  fun isPlaylistM3U(): Boolean {
-    val activity = host as? PlayerActivity ?: return false
-    return activity.isCurrentPlaylistM3U()
-  }
-
-  fun getPlaylistTotalCount(): Int {
-    val activity = host as? PlayerActivity ?: return 0
-    return activity.playlist.size
-  }
-
-  fun getPlaylistData(): List<app.marlboroadvance.mpvex.ui.player.controls.components.sheets.PlaylistItem>? {
-    val activity = host as? PlayerActivity ?: return null
-    if (activity.playlist.isEmpty()) return null
-
-    // Get current video progress
-    val currentPos = pos ?: 0
-    val currentDuration = duration ?: 0
-    val currentProgress = if (currentDuration > 0) {
-      ((currentPos.toFloat() / currentDuration.toFloat()) * 100f).coerceIn(0f, 100f)
-    } else 0f
-
-    return activity.playlist.mapIndexed { index, uri ->
-      val title = activity.getPlaylistItemTitle(uri, index)
-      // Path is not used for thumbnail loading - thumbnails are loaded directly from URI
-      // Keep it for cache key compatibility
-      val path = uri.toString()
-      val isCurrentlyPlaying = index == activity.playlistIndex
-
-      // Try to get from cache first (synchronized access)
-      val cacheKey = uri.toString()
-      val (durationStr, resolutionStr) = synchronized(metadataCache) { metadataCache[cacheKey] } ?: ("" to "")
-
-      app.marlboroadvance.mpvex.ui.player.controls.components.sheets.PlaylistItem(
-        uri = uri,
-        title = title,
-        index = index,
-        isPlaying = isCurrentlyPlaying,
-        path = path,
-        progressPercent = if (isCurrentlyPlaying) currentProgress else 0f,
-        isWatched = isCurrentlyPlaying && currentProgress >= 95f,
-        duration = durationStr,
-        resolution = resolutionStr,
-        // Emby 播放源：用背景图作列表缩略图（本地文件 / strm 直链没有该模式，留空）
-        thumbnailUrl = embyBackdropUrl(uri) ?: "",
-      )
-    }
-  }
-
-  /**
-   * 从 Emby 播放流地址派生背景图地址，作播放列表缩略图。
-   *
-   * 流地址形如 `http(s)://host[:port]/emby/Videos/{itemId}/stream?...&api_key=...`，
-   * 图片地址就是同源下的 `/emby/Items/{itemId}/Images/Backdrop`（api_key 原样带上，
-   * static 等视频参数丢弃）。strm 指向的 CDN 直链解析不出该模式时返回 null ——
-   * 走原有的本地缩略图 / 占位图标路径，不会对 CDN 发起任何多余请求。
-   */
-  private fun embyBackdropUrl(uri: Uri): String? {
-    if (uri.scheme != "http" && uri.scheme != "https") return null
-    val match = EMBY_STREAM_PATH_REGEX.find(uri.path ?: return null) ?: return null
-    val itemId = match.groupValues[1]
-    val builder =
-      uri
-        .buildUpon()
-        .path("/emby/Items/$itemId/Images/Backdrop")
-        .query(null)
-        .appendQueryParameter("maxWidth", "512")
-        .appendQueryParameter("quality", "90")
-    uri.getQueryParameter("api_key")?.let { builder.appendQueryParameter("api_key", it) }
-    return builder.build().toString()
-  }
-
-  private fun getVideoMetadata(uri: Uri): Pair<String, String> {
-    // Skip metadata extraction for network streams and M3U playlists
-    if (uri.scheme?.startsWith("http") == true || uri.scheme == "rtmp" || uri.scheme == "ftp" || uri.scheme == "rtsp" || uri.scheme == "mms") {
-      return "" to ""
-    }
-
-    // Skip M3U/M3U8 files
-    val uriString = uri.toString().lowercase()
-    if (uriString.contains(".m3u8") || uriString.contains(".m3u")) {
-      return "" to ""
-    }
-
-    // Try MediaStore first (much faster - uses cached values)
-    val mediaStoreMetadata = getVideoMetadataFromMediaStore(uri)
-    if (mediaStoreMetadata != null) {
-      return mediaStoreMetadata
-    }
-
-    // Fallback to MediaMetadataRetriever only if MediaStore fails
-    val retriever = android.media.MediaMetadataRetriever()
-    return try {
-      // For file:// URIs, use the path directly (faster)
-      if (uri.scheme == "file") {
-        retriever.setDataSource(uri.path)
-      } else {
-        // For content:// URIs, use context
-        retriever.setDataSource(host.context, uri)
-      }
-
-      // Get duration
-      val durationMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-      val durationStr = if (durationMs != null) {
-        formatDuration(durationMs.toLong())
-      } else ""
-
-      // Get resolution
-      val width = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-      val height = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-      val resolutionStr = if (width != null && height != null) {
-        "${width}x${height}"
-      } else ""
-
-      durationStr to resolutionStr
-    } catch (e: Exception) {
-      android.util.Log.e("PlayerViewModel", "Failed to get video metadata for $uri", e)
-      "" to ""
-    } finally {
-      try {
-        retriever.release()
-      } catch (e: Exception) {
-        // Ignore release errors
-      }
-    }
-  }
-
-  /**
-   * Get video metadata from MediaStore (fast - uses cached system values).
-   * Returns null if the video is not found in MediaStore.
-   */
-  private fun getVideoMetadataFromMediaStore(uri: Uri): Pair<String, String>? {
-    return try {
-      val projection = arrayOf(
-        android.provider.MediaStore.Video.Media.DURATION,
-        android.provider.MediaStore.Video.Media.WIDTH,
-        android.provider.MediaStore.Video.Media.HEIGHT,
-        android.provider.MediaStore.Video.Media.DATA
-      )
-
-      // Determine the query URI based on the input URI scheme
-      val queryUri = when (uri.scheme) {
-        "content" -> {
-          // If it's already a content URI, use it directly
-          if (uri.toString().startsWith(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI.toString())) {
-            uri
-          } else {
-            // Try to find by path if available
-            null
-          }
-        }
-        "file" -> {
-          // For file:// URIs, query by path
-          null
-        }
-        else -> null
-      }
-
-      // Query by URI if we have a content URI
-      if (queryUri != null) {
-        host.context.contentResolver.query(
-          queryUri,
-          projection,
-          null,
-          null,
-          null
-        )?.use { cursor ->
-          if (cursor.moveToFirst()) {
-            val durationColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.DURATION)
-            val widthColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.WIDTH)
-            val heightColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.HEIGHT)
-
-            val durationMs = if (durationColumn >= 0) cursor.getLong(durationColumn) else 0L
-            val width = if (widthColumn >= 0) cursor.getInt(widthColumn) else 0
-            val height = if (heightColumn >= 0) cursor.getInt(heightColumn) else 0
-
-            val durationStr = formatDuration(durationMs)
-
-            val resolutionStr = if (width > 0 && height > 0) {
-              "${width}x${height}"
-            } else ""
-
-            return durationStr to resolutionStr
-          }
-        }
-      }
-
-      // Query by file path if we have a file:// URI or content URI without direct match
-      val filePath = when (uri.scheme) {
-        "file" -> uri.path
-        "content" -> {
-          // Try to get the file path from content URI
-          host.context.contentResolver.query(
-            uri,
-            arrayOf(android.provider.MediaStore.Video.Media.DATA),
-            null,
-            null,
-            null
-          )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-              val dataColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.DATA)
-              if (dataColumn >= 0) cursor.getString(dataColumn) else null
-            } else null
-          }
-        }
-        else -> null
-      }
-
-      if (filePath != null) {
-        val selection = "${android.provider.MediaStore.Video.Media.DATA} = ?"
-        val selectionArgs = arrayOf(filePath)
-
-        host.context.contentResolver.query(
-          android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-          projection,
-          selection,
-          selectionArgs,
-          null
-        )?.use { cursor ->
-          if (cursor.moveToFirst()) {
-            val durationColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.DURATION)
-            val widthColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.WIDTH)
-            val heightColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.HEIGHT)
-
-            val durationMs = if (durationColumn >= 0) cursor.getLong(durationColumn) else 0L
-            val width = if (widthColumn >= 0) cursor.getInt(widthColumn) else 0
-            val height = if (heightColumn >= 0) cursor.getInt(heightColumn) else 0
-
-            val durationStr = formatDuration(durationMs)
-
-            val resolutionStr = if (width > 0 && height > 0) {
-              "${width}x${height}"
-            } else ""
-
-            return durationStr to resolutionStr
-          }
-        }
-      }
-
-      null
-    } catch (e: Exception) {
-      android.util.Log.w("PlayerViewModel", "Failed to get metadata from MediaStore for $uri, will try MediaMetadataRetriever", e)
-      null
-    }
-  }
-
-  /**
-   * Format duration in milliseconds to hh:mm:ss or mm:ss format
-   */
-  private fun formatDuration(durationMs: Long): String {
-    if (durationMs <= 0) return ""
-    
-    val totalSeconds = durationMs / 1000
-    val hours = totalSeconds / 3600
-    val minutes = (totalSeconds % 3600) / 60
-    val seconds = totalSeconds % 60
-    
-    return if (hours > 0) {
-      String.format("%d:%02d:%02d", hours, minutes, seconds)
-    } else {
-      String.format("%d:%02d", minutes, seconds)
-    }
-  }
-  
-  
-
-  fun playPlaylistItem(index: Int) {
-    val activity = host as? PlayerActivity ?: return
-    activity.playPlaylistItem(index)
-  }
-
-  /**
-   * Refreshes the playlist items to update the currently playing indicator.
-   * Called when a new video starts playing to update the playlist UI.
-   */
-  fun refreshPlaylistItems() {
-    viewModelScope.launch(Dispatchers.IO) {
-      val updatedItems = getPlaylistData()
-      if (updatedItems != null) {
-        // Clear cache if playlist size changed
-        if (_playlistItems.value.size != updatedItems.size) {
-          metadataCache.evictAll()
-        }
-
-        _playlistItems.value = updatedItems
-
-        // Load metadata asynchronously in the background
-        loadPlaylistMetadataAsync(updatedItems)
-      }
-    }
-  }
-
-  /**
-   * Loads metadata for all playlist items asynchronously in the background.
-   * Updates the playlist items as metadata becomes available.
-   * Uses batched updates to avoid O(n²) complexity with large playlists.
-   * Skips metadata extraction for M3U playlists (network streams).
-   */
-  private fun loadPlaylistMetadataAsync(items: List<app.marlboroadvance.mpvex.ui.player.controls.components.sheets.PlaylistItem>) {
-    viewModelScope.launch(Dispatchers.IO) {
-      // Skip metadata extraction for M3U playlists
-      val activity = host as? PlayerActivity
-      if (activity?.isCurrentPlaylistM3U() == true) {
-        Log.d(TAG, "Skipping metadata extraction for M3U playlist")
-        return@launch
-      }
-
-      // Limit concurrent metadata extraction to avoid overwhelming resources
-      val batchSize = 5
-      items.chunked(batchSize).forEach { batch ->
-        val updates = mutableMapOf<String, Pair<String, String>>()
-
-        // Extract metadata for the batch
-        batch.forEach { item ->
-          val cacheKey = item.uri.toString()
-
-          // Skip if already in cache (LruCache is thread-safe)
-          if (metadataCache.get(cacheKey) == null) {
-            // Extract metadata
-            val (durationStr, resolutionStr) = getVideoMetadata(item.uri)
-
-            // Update cache and track update
-            updateMetadataCache(cacheKey, durationStr to resolutionStr)
-            updates[cacheKey] = durationStr to resolutionStr
-          }
-        }
-
-        // Apply all batched updates at once (single playlist update)
-        if (updates.isNotEmpty()) {
-          _playlistItems.value = _playlistItems.value.map { currentItem ->
-            val cacheKey = currentItem.uri.toString()
-            val (durationStr, resolutionStr) = updates[cacheKey] ?: return@map currentItem
-            currentItem.copy(duration = durationStr, resolution = resolutionStr)
-          }
-        }
-      }
-    }
-  }
-
   fun hasNext(): Boolean = (host as? PlayerActivity)?.hasNext() ?: false
-
-  /** 队列内拖动排序：[to] 是移动之后的目标下标（见 PlayerActivity.movePlaylistItem）。 */
-  fun movePlaylistItem(
-    from: Int,
-    to: Int,
-  ) {
-    (host as? PlayerActivity)?.movePlaylistItem(from, to)
-  }
-
-  /**
-   * 从队列移除一条。
-   *
-   * @return 是否移除成功 —— 队列只剩一条时会拒绝（返回 false），由 UI 决定怎么提示。
-   */
-  fun removePlaylistItem(index: Int): Boolean = (host as? PlayerActivity)?.removePlaylistItem(index) ?: false
 
   fun hasPrevious(): Boolean = (host as? PlayerActivity)?.hasPrevious() ?: false
 
@@ -2264,144 +1413,6 @@ class PlayerViewModel(
 
   fun playPrevious() {
     (host as? PlayerActivity)?.playPrevious()
-  }
-
-  // ==================== Repeat and Shuffle ====================
-
-  fun applyPersistedShuffleState() {
-    if (_shuffleEnabled.value) {
-      val activity = host as? PlayerActivity
-      activity?.onShuffleToggled(true)
-    }
-  }
-
-  fun cycleRepeatMode() {
-    val hasPlaylist = (host as? PlayerActivity)?.playlist?.isNotEmpty() == true
-
-    _repeatMode.value = when (_repeatMode.value) {
-      RepeatMode.OFF -> RepeatMode.ONE
-      RepeatMode.ONE -> if (hasPlaylist) RepeatMode.ALL else RepeatMode.OFF
-      RepeatMode.ALL -> RepeatMode.OFF
-    }
-
-    // Persist the repeat mode
-    playerPreferences.repeatMode.set(_repeatMode.value)
-
-    // Show overlay update instead of toast
-    playerUpdate.value = PlayerUpdates.RepeatMode(_repeatMode.value)
-  }
-
-  /**
-   * 直接设置循环模式（「更多」面板里的「循环播放」开关走这条路径）。
-   *
-   * 与 [cycleRepeatMode] 的区别：这里是「置为指定值」而不是「下一档」，
-   * 开关的两态（开 / 关）才能和循环模式一一对应；同样会持久化并弹出浮层提示。
-   */
-  fun setRepeatMode(mode: RepeatMode) {
-    if (_repeatMode.value == mode) return
-    _repeatMode.value = mode
-    playerPreferences.repeatMode.set(mode)
-    playerUpdate.value = PlayerUpdates.RepeatMode(mode)
-  }
-
-  fun toggleShuffle() {
-    _shuffleEnabled.value = !_shuffleEnabled.value
-    val activity = host as? PlayerActivity
-
-    // Persist the shuffle state
-    playerPreferences.shuffleEnabled.set(_shuffleEnabled.value)
-
-    // Notify activity to handle shuffle state change
-    activity?.onShuffleToggled(_shuffleEnabled.value)
-
-    // Show overlay update instead of toast
-    playerUpdate.value = PlayerUpdates.Shuffle(_shuffleEnabled.value)
-  }
-
-  fun shouldRepeatCurrentFile(): Boolean {
-    return _repeatMode.value == RepeatMode.ONE ||
-      (_repeatMode.value == RepeatMode.ALL && (host as? PlayerActivity)?.playlist?.isEmpty() == true)
-  }
-
-  fun shouldRepeatPlaylist(): Boolean {
-    return _repeatMode.value == RepeatMode.ALL && (host as? PlayerActivity)?.playlist?.isNotEmpty() == true
-  }
-
-  // ==================== A-B Loop ====================
-
-  fun toggleABLoopExpanded() {
-    _isABLoopExpanded.update { !it }
-  }
-
-  fun setLoopA() {
-    if (_abLoopA.value != null) {
-      // Toggle off - clear point A
-      _abLoopA.value = null
-      PlayerLib.setPropertyString("ab-loop-a", "no")
-      return
-    }
-
-    val currentPos = PlayerLib.getPropertyDouble("time-pos") ?: return
-    _abLoopA.value = currentPos
-    PlayerLib.setPropertyDouble("ab-loop-a", currentPos)
-  }
-
-  fun setLoopB() {
-    if (_abLoopB.value != null) {
-      // Toggle off - clear point B
-      _abLoopB.value = null
-      PlayerLib.setPropertyString("ab-loop-b", "no")
-      return
-    }
-
-    val currentPos = PlayerLib.getPropertyDouble("time-pos") ?: return
-    _abLoopB.value = currentPos
-    PlayerLib.setPropertyDouble("ab-loop-b", currentPos)
-  }
-
-  fun clearABLoop() {
-    val hadLoop = _abLoopA.value != null || _abLoopB.value != null
-    _abLoopA.value = null
-    _abLoopB.value = null
-    PlayerLib.setPropertyString("ab-loop-a", "no")
-    PlayerLib.setPropertyString("ab-loop-b", "no")
-  }
-
-  fun formatTimestamp(seconds: Double): String {
-    val totalSec = seconds.toInt()
-    val h = totalSec / 3600
-    val m = (totalSec % 3600) / 60
-    val s = totalSec % 60
-    return if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
-  }
-
-  // ==================== Mirroring ====================
-
-  fun toggleMirroring() {
-    val newMirrorState = !_isMirrored.value
-    _isMirrored.value = newMirrorState
-    
-    // Use labeled video filter for mirroring to avoid state desync
-    if (newMirrorState) {
-      PlayerLib.command("vf", "add", "@mpvex_hflip:hflip")
-    } else {
-      PlayerLib.command("vf", "remove", "@mpvex_hflip")
-    }
-    playerUpdate.value = PlayerUpdates.ShowText(if (newMirrorState) "水平翻转：开" else "水平翻转：关")
-  }
-
-  fun toggleVerticalFlip() {
-    val newState = !_isVerticalFlipped.value
-    _isVerticalFlipped.value = newState
-
-    // Use labeled video filter for vflip to avoid state desync
-    if (newState) {
-      PlayerLib.command("vf", "add", "@mpvex_vflip:vflip")
-    } else {
-      PlayerLib.command("vf", "remove", "@mpvex_vflip")
-    }
-
-    playerUpdate.value = PlayerUpdates.ShowText(if (newState) "垂直翻转：开" else "垂直翻转：关")
   }
 
   // ==================== 黑边自动裁切（cropdetect） ====================
@@ -2489,155 +1500,6 @@ class PlayerViewModel(
     _isAutoCropped.value = false
   }
 
-  // ==================== GIF 片段录制 ====================
-
-  /** 录制进度（0f..1f）；null 表示当前没有在录。 */
-  private val _gifProgress = MutableStateFlow<Float?>(null)
-  val gifProgress: StateFlow<Float?> = _gifProgress.asStateFlow()
-
-  /** 当前录制任务；用来实现「取消录制」。 */
-  private var gifJob: Job? = null
-
-  /**
-   * 录制一段 GIF 并存入相册。
-   *
-   * 整个流程（取帧 → 编码 → 入库）都在协程里跑，UI 只订阅 [gifProgress]。
-   * 重复点击会被忽略（[gifProgress] 非 null 时直接返回），避免两次录制互相抢帧。
-   *
-   * 开录前若视频是暂停的会**自动继续播放**：取帧是跟着画面实时走的，暂停状态下
-   * 每一帧都长得一样，录出来是一张静图。
-   */
-  fun startGifRecording(durationSec: Int) {
-    if (_gifProgress.value != null) return
-    if (PlayerLib.getPropertyBoolean("pause") == true) {
-      // 走和 unpause() 一样的路径（申请音频焦点 + 置 pause=no），这里同步执行，
-      // 保证第一帧取到时画面已经在动了。
-      host.requestAudioFocus()
-      PlayerLib.setPropertyBoolean("pause", false)
-    }
-    gifJob = viewModelScope.launch {
-      _gifProgress.value = 0f
-      var clip: GifRecorder.GifClip? = null
-      try {
-        // 采集是「跟着视频实时走」的，固定花掉 durationSec 秒；编码耗时则随分辨率增长。
-        // 进度条把前 60% 给采集、后 40% 给编码：否则高分辨率下进度会先走满，
-        // 然后一动不动地卡在 100% 干等编码，看着像卡死。
-        val captureShare = 0.6f
-        val captured =
-          GifRecorder.captureFrames(
-            host.context,
-            durationSec,
-            targetWidth = playerPreferences.gifWidth.get(),
-          ) { progress ->
-            _gifProgress.value = progress * captureShare
-          }
-        clip = captured
-        if (captured == null) {
-          showToast(host.context.getString(R.string.player_gif_failed))
-          return@launch
-        }
-        val saved =
-          saveGifToGallery(host.context, captured) { progress ->
-            _gifProgress.value = captureShare + progress * (1f - captureShare)
-          }
-        showToast(
-          host.context.getString(
-            if (saved) R.string.player_gif_saved else R.string.player_gif_failed,
-          ),
-        )
-      } catch (t: Throwable) {
-        Log.w("PlayerViewModel", "GIF recording failed", t)
-        showToast(host.context.getString(R.string.player_gif_failed))
-      } finally {
-        // 截图临时目录在这里统一清；采集帧现在留在磁盘上，不清会在 cache 里堆积
-        clip?.cleanup()
-        _gifProgress.value = null
-        gifJob = null
-      }
-    }
-  }
-
-  /**
-   * 取消正在进行的录制。
-   *
-   * 协程被取消后 `finally` 照跑：进度归零、临时帧目录删掉（采集侧自己也会在异常路径
-   * 清一遍），所以取消后不会在 cache 里留下一堆截图。
-   */
-  fun cancelGifRecording() {
-    gifJob?.cancel()
-    gifJob = null
-    _gifProgress.value = null
-  }
-
-  /**
-   * 把采集到的帧编码成 GIF 并写入系统相册。
-   *
-   * Android 10+ 走 MediaStore + RELATIVE_PATH（无需存储权限）；更低版本回落到
-   * 公共 Pictures 目录 + 手动触发媒体扫描。
-   *
-   * 帧本身由 [GifRecorder.encode] 在磁盘上逐帧流式处理、编完即弃，所以这里不再需要
-   * 「回收位图」；要清的只有那个临时 GIF 文件（截图目录归调用方的 cleanup 管）。
-   */
-  private suspend fun saveGifToGallery(
-    context: Context,
-    clip: GifRecorder.GifClip,
-    onProgress: (Float) -> Unit,
-  ): Boolean {
-    val name =
-      "cineisle_${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.gif"
-    val tempFile = File(context.cacheDir, name)
-    return try {
-      java.io.FileOutputStream(tempFile).use { out ->
-        GifRecorder.encode(clip, out, onProgress)
-      }
-      if (!tempFile.exists() || tempFile.length() == 0L) {
-        return false
-      }
-
-      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-        val values =
-          android.content.ContentValues().apply {
-            put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/gif")
-            put(
-              android.provider.MediaStore.Images.Media.RELATIVE_PATH,
-              "${android.os.Environment.DIRECTORY_PICTURES}/CineIsle",
-            )
-            put(android.provider.MediaStore.Images.Media.IS_PENDING, 1)
-          }
-        val uri =
-          context.contentResolver.insert(
-            android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            values,
-          ) ?: return false
-        context.contentResolver.openOutputStream(uri)?.use { output ->
-          tempFile.inputStream().use { input -> input.copyTo(output) }
-        }
-        values.clear()
-        values.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0)
-        context.contentResolver.update(uri, values, null, null)
-      } else {
-        @Suppress("DEPRECATION")
-        val dir =
-          android.os.Environment.getExternalStoragePublicDirectory(
-            android.os.Environment.DIRECTORY_PICTURES,
-          )
-        val target = File(dir, "CineIsle").apply { mkdirs() }
-        val dest = File(target, name)
-        tempFile.copyTo(dest, overwrite = true)
-        android.media.MediaScannerConnection.scanFile(context, arrayOf(dest.absolutePath), null, null)
-      }
-
-      true
-    } catch (t: Throwable) {
-      Log.w("PlayerViewModel", "Failed to save GIF", t)
-      false
-    } finally {
-      // 成功时已经拷进相册、失败时它是垃圾，两条路都不留
-      tempFile.delete()
-    }
-  }
-
   // ==================== Utility ====================
 
   fun showToast(message: String) {
@@ -2648,9 +1510,6 @@ class PlayerViewModel(
     super.onCleared()
   }
 }
-
-/** Emby 播放流地址里的 itemId（`/emby/Videos/{id}/stream`），用于派生图片地址 */
-private val EMBY_STREAM_PATH_REGEX = Regex("/emby/Videos/([^/?]+)/stream", RegexOption.IGNORE_CASE)
 
 // Extension functions
 fun Float.normalize(

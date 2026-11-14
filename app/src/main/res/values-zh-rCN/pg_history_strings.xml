@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pg_history_refresh">刷新播放历史</string>
+    <string name="pg_history_total">共 %1$d 条记录</string>
+    <string name="pg_history_filters">筛选</string>
+    <string name="pg_history_all_servers">全部服务器</string>
+    <string name="pg_history_missing_server">不可用服务器</string>
+    <string name="pg_history_series_filter">剧名</string>
+    <string name="pg_history_item_filter">集名 / 影片名</string>
+    <string name="pg_history_query">查询</string>
+    <string name="pg_history_reset">重置筛选</string>
+    <string name="pg_history_retry">重试</string>
+    <string name="pg_history_empty">没有符合条件的播放记录。</string>
+    <string name="pg_history_mark_conflict">记录已被其他客户端修改，请刷新后重试。</string>
+    <string name="pg_history_mark_unknown">未能确认保存结果，请先核对数据库中的标记，不要重复提交。</string>
+    <string name="pg_history_mark_source_changed">数据库连接已变化，无法使用原来源继续操作。</string>
+    <string name="pg_history_mark_failed">播放历史标记保存失败。</string>
+    <string name="pg_history_verify">核对结果</string>
+    <string name="pg_history_verifying">正在核对保存后的标记…</string>
+    <string name="pg_history_close">关闭提示</string>
+    <string name="pg_history_server_unverified">尚未验证服务器配置，请刷新服务器列表。</string>
+    <string name="pg_history_server_unavailable">此服务器不可用或已停用，历史记录仍保留。</string>
+    <string name="pg_history_previous">上一页</string>
+    <string name="pg_history_next">下一页</string>
+    <string name="pg_history_page">%1$d / %2$d</string>
+    <string name="pg_history_pin">置顶播放记录</string>
+    <string name="pg_history_hide">标记为隐藏</string>
+    <string name="pg_history_normal">取消标记</string>
+    <string name="pg_history_duration">播放时长：%1$s</string>
+    <string name="pg_history_pinned">已置顶</string>
+    <string name="pg_history_hidden">已标记隐藏 · 记录保留</string>
+    <string name="pg_history_mark_checked">已重新读取数据库中的历史标记。</string>
+    <string name="pg_history_ordinary">普通</string>
+    <string name="pg_history_reconciled">已核对数据库，当前标记：%1$s。无法确认先前提交是否成功。</string>
+    <string name="pg_history_reconciled_missing">已核对数据库，这条历史记录已不存在。</string>
+</resources>

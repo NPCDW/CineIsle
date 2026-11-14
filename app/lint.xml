@@ -28,8 +28,7 @@
       必须在出包前拦住。
     -->
 
-    <!-- 资源问题：找不到 drawable/string、缺 contentDescription 等 -->
-    <issue id="MissingResources" severity="error" />
+    <!-- 资源问题 -->
     <issue id="MissingTranslation" severity="ignore" />
     <issue id="ExtraTranslation" severity="ignore" />
     <issue id="Typos" severity="error" />
@@ -89,8 +88,6 @@
 
     <!-- 正确性但本项目基本不涉及 -->
     <issue id="AutoboxingStateCreation" severity="warning" />
-    <issue id="UnreachableCode" severity="error" />
-    <issue id="EqualsWithHashCodeExist" severity="error" />
     <issue id="Instantiatable" severity="warning" />
     <issue id="WrongConstant" severity="error" />
 
@@ -105,10 +102,8 @@
     <issue id="SyntheticAccessor" severity="ignore" />
     <issue id="GradleDependency" severity="ignore" />
     <issue id="AndroidGradlePluginVersion" severity="ignore" />
-    <issue id="GradleOlderVersion" severity="ignore" />
 
-    <!-- 注释里的 TODO / 过期 SDK 提示：本项目 TODO 是有意留的施工清单 -->
-    <issue id="Todo" severity="ignore" />
+    <!-- 过期 SDK 提示 -->
     <issue id="OldTargetApi" severity="ignore" />
 
 </lint>

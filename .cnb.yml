@@ -1,0 +1,42 @@
+$:
+  vscode:
+    - docker:
+        image: docker.cnb.cool/my-codespace/dev-image-build/android:latest
+      runner:
+        cpus: 16
+      services:
+        - vscode
+        - docker
+      imports: https://cnb.cool/my-codespace/envs/-/blob/main/loemby-updater.yml
+      # 开发环境启动后会执行的任务
+      stages:
+        # 参考项目
+        - name: prject
+          script: |
+            cd /root/
+            git clone https://cnb.cool/my-codespace/loemby
+            git clone https://cnb.cool/my-codespace/uosc
+        # 配置keystore
+        - name: keystore
+          script: |
+            cd /workspace/
+            echo "keyAlias=${ANDROID_KEY_ALIAS}" > keystore.properties
+            echo "keyPassword=${ANDROID_KEY_PASSWORD}" >> keystore.properties
+            echo "${ANDROID_KEY_BASE64}" | base64 -d > /root/keystore.jks
+            echo "storeFile=/root/keystore.jks" >> keystore.properties
+            echo "storePassword=${ANDROID_KEY_PASSWORD}" >> keystore.properties
+      # 开发环境销毁前会执行该任务
+      endStages:
+        - name: end stage
+          script: echo "end stage"
+
+  push:
+    - imports: https://cnb.cool/my-codespace/envs/-/blob/main/github-secret.yml
+      stages:
+        - name: sync to github
+          image: tencentcom/git-sync
+          settings:
+            target_url: https://github.com/NPCDW/loembyA.git
+            auth_type: https
+            username: ${GITHUB_USERNAME}
+            password: ${GITHUB_ACCESS_TOKEN}

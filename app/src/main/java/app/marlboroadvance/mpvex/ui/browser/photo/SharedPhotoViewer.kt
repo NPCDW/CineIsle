@@ -85,10 +85,7 @@ import kotlin.math.abs
 /**
  * 一张照片在共享浏览器里需要的**最小信息**。
  *
- * 两个入口（Emby 媒体库 / 网络位置）的数据模型完全不同（[app.marlboroadvance.mpvex
- * .domain.emby.EmbyItem] vs [app.marlboroadvance.mpvex.domain.network.NetworkFile]），
- * 但它们对**外壳**的要求是同一套：一个稳定 key、一个标题、一行附加信息。
- * 把这三样收在这里，外壳就不需要知道数据来自哪个协议。
+ * 数据来源的模型不需要渗透到共享外壳：这里只需要稳定 key、标题和一行附加信息。
  *
  * @param key pager / 胶片条的稳定 key（Emby 用条目 Id，网络用 path）
  * @param title 信息栏第一行 + 无障碍描述（文件名）

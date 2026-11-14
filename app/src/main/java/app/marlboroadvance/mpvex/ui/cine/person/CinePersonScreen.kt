@@ -1,5 +1,9 @@
 package app.marlboroadvance.mpvex.ui.cine.person
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -116,6 +120,7 @@ fun CinePersonScreen(
   val app = context.applicationContext as Application
   val viewModel: EmbyViewModel = viewModel(factory = EmbyViewModel.factory(app))
   val server by viewModel.currentServer.collectAsState()
+  CompositionLocalProvider(LocalEmbyImageServer provides server) {
   val scope = rememberCoroutineScope()
   val prefs = koinInject<BrowserPreferences>()
   val gridColumns by prefs.embyLibraryGridColumns.collectAsState()
@@ -263,13 +268,13 @@ fun CinePersonScreen(
     gridState = gridState,
   )
 
-  val mediaUi: List<CineMediaUi> = remember(server?.id, sorted) {
+  val mediaUi: List<CineMediaUi> = remember(server, sorted) {
     val current = server ?: return@remember emptyList()
     sorted.map { viewModel.toCineMedia(current, it) }
   }
 
   val isFavorite = personItem?.UserData?.IsFavorite == true
-  val avatarUrl = remember(server?.id, personImageTag) {
+  val avatarUrl = remember(server, personImageTag) {
     val current = server ?: return@remember null
     val person = EmbyItem(
       Id = personId,
@@ -416,26 +421,6 @@ fun CinePersonScreen(
       onBack = { backStack.removeLastOrNull() },
       actions = {
         CineIconButton(
-          icon = if (isFavorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-          contentDescription = if (isFavorite) "取消收藏" else "收藏",
-          tint = if (isFavorite) colors.sectionAction else colors.onSurfaceVariant,
-          onClick = {
-            val current = server ?: return@CineIconButton
-            val target = personItem ?: return@CineIconButton
-            scope.launch {
-              val result = viewModel.toggleFavorite(current, target, !isFavorite)
-              result.getOrNull()?.let { nowFavorite ->
-                personItem = target.copy(
-                  UserData = (target.UserData ?: EmbyUserData()).copy(IsFavorite = nowFavorite),
-                )
-              }
-              if (result.isFailure) {
-                Toast.makeText(context, "操作失败，请稍后再试", Toast.LENGTH_SHORT).show()
-              }
-            }
-          },
-        )
-        CineIconButton(
           icon = Icons.Outlined.Search,
           contentDescription = "搜索作品",
           tint = if (searchOpen) colors.sectionAction else colors.onSurfaceVariant,
@@ -579,6 +564,7 @@ fun CinePersonScreen(
         }
       }
     }
+  }
   }
 }
 

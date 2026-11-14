@@ -6,11 +6,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import app.marlboroadvance.mpvex.database.MpvExDatabase
 import app.marlboroadvance.mpvex.database.repository.PlaybackStateRepositoryImpl
-import app.marlboroadvance.mpvex.database.repository.PlaylistRepository
-import app.marlboroadvance.mpvex.database.repository.RecentlyPlayedRepositoryImpl
 import app.marlboroadvance.mpvex.domain.playbackstate.repository.PlaybackStateRepository
-import app.marlboroadvance.mpvex.domain.recentlyplayed.repository.RecentlyPlayedRepository
-import app.marlboroadvance.mpvex.domain.thumbnail.ThumbnailRepository
 import kotlinx.serialization.json.Json
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.singleOf
@@ -507,9 +503,8 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
  * （对比 `app/schemas/…/10.json` 与 `11.json`：表、列、索引逐条一致）。
  * 但 Room 的迁移是靠 `addMigrations` 里注册的相邻版本对来串路径的，
  * **不会因为 schema 没变就自动跳过** —— 缺了 10→11 这一段，
- * v10 的用户升到 v12 时找不到完整路径，会落到
- * `fallbackToDestructiveMigration(true)`：**整库删表重建**，
- * Emby 服务器配置、播放列表、播放进度、最近播放全部丢失。
+ * v10 的用户升到 v12 时找不到完整路径，数据库会拒绝打开。
+ * v22 起已移除 destructive fallback，迁移缺口不得再被静默删库掩盖。
  *
  * 所以哪怕 migrate 体是空的，也必须注册，Room 会在事务里自己把
  * `user_version` 递到 11，再由 [MIGRATION_11_12] 建 search_history。
@@ -562,9 +557,8 @@ val MIGRATION_11_12 = object : Migration(11, 12) {
  *   已下载的文件本身不会因为这次迁移消失（文件在 Download 目录里，跟数据库无关）。
  * - `emby_downloaded_media`：已落盘内容的离线元数据，首次建表。
  *
- * 列名与 [app.marlboroadvance.mpvex.database.entities.EmbyDownloadEntity] /
- * [app.marlboroadvance.mpvex.database.entities.DownloadedMediaEntity] 严格一致 ——
- * 少一列或多一列 Room 会在运行时抛 IllegalStateException（schema 校验失败）。
+ * 这些列与 v13 历史 schema 严格一致；对应实体已在 v22 删除，
+ * 但这段历史迁移必须原样保留，供旧版本数据库逐段升级。
  * ⚠️ 索引名是 Room 自动生成的 `index_emby_download_tasks_serverId` 这类，
  * 建表语句里必须照抄，改名会导致校验失败。
  */
@@ -654,8 +648,8 @@ val MIGRATION_12_13 = object : Migration(12, 13) {
  * → 新增「标记为不喜欢」表。
  *
  * 纯新增表，不动任何已有表 ⇒ 老用户的服务器配置 / 播放列表 / 播放进度都不受影响。
- * 语句与 [app.marlboroadvance.mpvex.database.entities.DislikedMediaEntity] 的声明**必须逐字对应**
- * （列名、类型、复合主键），否则 Room 启动时的 schema 校验会直接抛异常。
+ * 语句与 v14 历史 schema 严格一致（列名、类型、复合主键）；
+ * 对应实体已在 v22 删除，但历史迁移仍必须保留。
  */
 val MIGRATION_13_14 = object : Migration(13, 14) {
   override fun migrate(db: SupportSQLiteDatabase) {
@@ -797,9 +791,8 @@ val MIGRATION_16_17 = object : Migration(16, 17) {
  * → 新建「聚合库」表 `aggregate_libraries`（清单：本地聚合多个同类型媒体库）。
  *
  * 纯新增表、不动任何既有列 ⇒ 老用户的服务器配置 / 播放进度 / 收藏原样保留。
- * ⚠️ 列定义必须与 [app.marlboroadvance.mpvex.database.entities.AggregateLibraryEntity]
- * 逐字段一致（Room 启动时会校验 schema，差一个默认值都会抛异常）。
- * Room 把 Kotlin 可空引用存成可空列，所以 `collectionType` 一列不带 NOT NULL。
+ * ⚠️ 列定义必须与 v18 历史 schema 逐字段一致；对应实体已在 v22 删除，
+ * 但历史迁移仍必须保留。`collectionType` 是可空列，不带 NOT NULL。
  */
 val MIGRATION_17_18 = object : Migration(17, 18) {
   override fun migrate(db: SupportSQLiteDatabase) {
@@ -913,10 +906,8 @@ val MIGRATION_18_19 = object : Migration(18, 19) {
  *
  * 纯新增表，不动任何既有表，所以这条迁移只 `CREATE TABLE`。
  *
- * ⚠️ 列的**顺序 / 类型 / 主键声明**必须与 Room 由 [app.marlboroadvance.mpvex.database.entities.FavoriteMarkEntity]
- * 生成的建表语句逐字一致 —— 差一个字符，Room 打开库时校验就会失败，
- * 而本项目挂着 `fallbackToDestructiveMigration`，后果是**整库重建**
- * （服务器配置 / 播放进度 / 播放列表全丢）。改实体时这条 SQL 必须跟着改。
+ * ⚠️ 列的**顺序 / 类型 / 主键声明**必须与当时 Room schema 严格一致。
+ * v22 已删除该表，但 19→20 历史迁移仍必须原样保留，供旧版本数据库逐段升级。
  */
 val MIGRATION_19_20 = object : Migration(19, 20) {
   override fun migrate(db: SupportSQLiteDatabase) {
@@ -949,9 +940,8 @@ val DatabaseModule =
       Room
         .databaseBuilder(context, MpvExDatabase::class.java, "mpvex.db")
         .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-        // ⚠️ 迁移链必须**逐段连续**（1→2→…→19），少一段就会退化成
-        // fallbackToDestructiveMigration = 整库删表重建（服务器配置 / 播放列表 / 播放进度全丢）。
-        // 任何一次改 @Database version 都要在这里补一对新的 Migration，别指望 Room 兜底。
+        // 迁移链必须逐段连续（1→2→…→22）；少一段时 Room 应拒绝打开，禁止静默删库。
+        // 任何一次改 @Database version 都要在这里补一对新的 Migration。
         .addMigrations(
           MIGRATION_1_2,
           MIGRATION_2_3,
@@ -972,16 +962,14 @@ val DatabaseModule =
           MIGRATION_17_18,
           MIGRATION_18_19,
           MIGRATION_19_20,
+          app.marlboroadvance.mpvex.database.migrations.MIGRATION_20_21,
+          app.marlboroadvance.mpvex.database.migrations.MIGRATION_21_22,
         )
-        .fallbackToDestructiveMigration(true) // 最后兜底：迁移链有洞时至少不崩 App
         .build()
     }
 
-    // Emby 服务器配置 DAO
-    single { get<MpvExDatabase>().embyServerDao() }
-
-    // 收藏目录 DAO（networkConnectionDao 的注册在下面 NetworkRepository 旁）
-    single { get<MpvExDatabase>().networkFavoriteDao() }
+    // 仅本机身份映射；旧 Emby 配置 DAO 不再注入业务层。
+    single { get<MpvExDatabase>().embyServerIdentityDao() }
 
     // 搜索历史 DAO + 仓库（首页全库搜索与媒体库搜索共用）
     single { get<MpvExDatabase>().searchHistoryDao() }
@@ -995,36 +983,20 @@ val DatabaseModule =
     // Emby 服务器配置仓库
     single {
       app.marlboroadvance.mpvex.database.repository.EmbyServerRepository(
-        dao = get(),
+        executor = get(),
+        identities = get<app.marlboroadvance.mpvex.database.dao.EmbyServerIdentityDao>(),
       )
     }
+
+    // Source-bound read snapshot and explicitly typed automatic playback writes only.
+    single { app.marlboroadvance.mpvex.domain.postgres.PlaybackConfigurationRepository(get()) }
+    single { app.marlboroadvance.mpvex.domain.postgres.PostgresAutomaticPlaybackWriter(get()) }
 
     // Emby 业务仓库（封装 API 调用）
     single {
       app.marlboroadvance.mpvex.domain.emby.EmbyRepository(
         serverRepo = get(),
         context = androidContext(),
-        // 单条收藏的时间戳在仓库这一层落账（详情页 / 播放器控件 / 视界流三条路都经过它）
-        favoriteClock = get(),
-      )
-    }
-
-    // 显示偏好服务端同步（清单 #16）。单例即可：它本身无状态，
-    // 状态全在 BrowserPreferences 里。
-    single {
-      app.marlboroadvance.mpvex.ui.browser.emby.displayprefs.EmbyDisplayPrefsSync(
-        repository = get(),
-        preferences = get(),
-      )
-    }
-
-    // GSY 内核的章节数据源（清单 #19）。**单例是必须的**，不是随手选的：
-    // 它内部持有「itemId → 章节」的缓存，做成多实例的话每进一次播放页就是一个新缓存，
-    // 章节会被反复拉取。缓存只在切集时按条目清（见 GsyChapterRepository.invalidate），
-    // 所以单个单例活到进程结束是安全的。
-    single {
-      app.marlboroadvance.mpvex.ui.player.gsy.GsyChapterRepository(
-        repository = get(),
       )
     }
 
@@ -1034,81 +1006,8 @@ val DatabaseModule =
     // 所以整个 App 共用这一个实例，谁需要谁 collect。
     single { app.marlboroadvance.mpvex.utils.network.NetworkMonitor(androidContext()) }
 
-    // 清单 4.2：下载任务表 + 已下载内容表
-    single { get<MpvExDatabase>().embyDownloadDao() }
-    single { get<MpvExDatabase>().downloadedMediaDao() }
-
-    // 「标记为不喜欢」：**必须单例** —— 它内部持有一份全量内存快照，
-    // 做成多实例的话播放器标记完，详情页读的还是另一个空快照，
-    // 表现为"标记了立刻又变回未标记"。单例是这套"快照即真相"设计的前提。
-    single { get<MpvExDatabase>().dislikeDao() }
-    single { app.marlboroadvance.mpvex.domain.dislike.DislikeRepository(dao = get()) }
-
-    // 「聚合库」：定义只有一份（管理页 / 首页 / 聚合页共用），DAO 与仓库都单例
-    single { get<MpvExDatabase>().aggregateLibraryDao() }
-
-    single {
-      app.marlboroadvance.mpvex.database.repository.AggregateLibraryRepository(
-        dao = get(),
-      )
-    }
-
-    // 「收藏时间」账本：Emby 侧没有收藏时间戳（见 FavoriteMarkEntity 的 KDoc），
-    // 只能客户端点红心时自己记。写入点收敛在 EmbyViewModel 的收藏两个入口，
-    // 单例是必须的 —— 收藏页读的同时播放器可能正在写，多实例没有共享状态也无所谓，
-    // 但省一次 Room 查询总归是好的。
-    single { get<MpvExDatabase>().favoriteMarkDao() }
-    single { app.marlboroadvance.mpvex.domain.emby.FavoriteClock(dao = get()) }
-
-    // 清单 4.2：离线内容仓库（纯 Room 读，断网可用）
-    single { app.marlboroadvance.mpvex.domain.emby.DownloadedMediaRepository(dao = get()) }
-
-    // Emby 离线下载管理器（支持暂停/续传，落盘到公共 Download/CineIsle）
-    single {
-      app.marlboroadvance.mpvex.domain.emby.EmbyDownloadManager(
-        context = androidContext(),
-        // 下载完成要按需回清服务器播放进度（可开关），需要按 serverId 找回服务器配置
-        serverRepo = get(),
-        preferenceStore = get(),
-        // 任务持久化走 Room（原来是 SharedPreferences 的 JSON，见 MIGRATION_12_13）
-        downloadDao = get(),
-        // 已落盘内容的离线元数据；离线内容页的数据源
-        downloadedMediaDao = get(),
-      )
-    }
-
     singleOf(::PlaybackStateRepositoryImpl).bind(PlaybackStateRepository::class)
 
-    single<RecentlyPlayedRepository> {
-      RecentlyPlayedRepositoryImpl(get<MpvExDatabase>().recentlyPlayedDao())
-    }
 
-    single { ThumbnailRepository(androidContext()) }
 
-    single {
-      app.marlboroadvance.mpvex.database.repository.VideoMetadataCacheRepository(
-        context = androidContext(),
-        dao = get<MpvExDatabase>().videoMetadataDao(),
-      )
-    }
-
-    // MediaFileRepository is a singleton object - no DI needed
-
-    single {
-      get<MpvExDatabase>().networkConnectionDao()
-    }
-
-    single {
-      app.marlboroadvance.mpvex.repository.NetworkRepository(
-        dao = get(),
-        favoriteDao = get(),
-        coverCacheDao = get<MpvExDatabase>().folderCoverCacheDao(),
-      )
-    }
-
-    single {
-      PlaylistRepository(
-        playlistDao = get<MpvExDatabase>().playlistDao(),
-      )
-    }
   }

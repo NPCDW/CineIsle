@@ -19,6 +19,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.activity.compose.LocalActivity
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,13 +39,18 @@ fun <T> GenericTracksSheet(
   modifier: Modifier = Modifier,
   lazyListState: LazyListState? = null,
   customMaxWidth: androidx.compose.ui.unit.Dp? = null,
+  landscapeSide: Boolean = false,
   header: @Composable () -> Unit = {},
   track: @Composable (T) -> Unit = {},
   footer: @Composable () -> Unit = {},
 ) {
   val listState = lazyListState ?: rememberLazyListState()
   
-  PlayerSheet(onDismissRequest, customMaxWidth = customMaxWidth) {
+  PlayerSheet(
+    onDismissRequest,
+    customMaxWidth = customMaxWidth,
+    landscapeSide = landscapeSide,
+  ) {
     Column(modifier) {
       header()
       LazyColumn(state = listState) {
@@ -102,6 +109,10 @@ fun AddTrackRow(
 fun getTrackTitle(
   track: TrackNode,
 ): String {
+  val activity = LocalActivity.current as? app.marlboroadvance.mpvex.ui.player.PlayerActivity
+  val state = activity?.loembyPlaybackState?.collectAsState()?.value
+  val type = if (track.isAudio) "audio" else if (track.isSubtitle) "sub" else "video"
+  state?.trackTitles?.get("$type:${track.id}")?.takeIf { it.isNotBlank() }?.let { return it }
   // Handle external subtitles and audio tracks
   if ((track.isSubtitle || track.isAudio) && track.external == true && track.externalFilename != null) {
     val decoded = Uri.decode(track.externalFilename)

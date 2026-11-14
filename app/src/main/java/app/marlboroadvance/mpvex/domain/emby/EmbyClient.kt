@@ -1,5 +1,6 @@
 package app.marlboroadvance.mpvex.domain.emby
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,7 +29,7 @@ import java.util.concurrent.TimeUnit
  * ```
  * val client = EmbyClient
  * val auth = client.authenticateByName(server, "user", "pass")
- * client.saveCredentials(server.id, auth)  // 由 Repository 处理
+ * // Repository keeps new credentials only in its process session overlay.
  * val libs = client.getVirtualFolders(server)  // 媒体库列表
  * val items = client.getItems(server, parentId = libs[0].Id, startIndex = 0, limit = 50)
  * ```
@@ -55,34 +56,123 @@ object EmbyClient {
    */
   internal val httpClient: OkHttpClient = EmbyHttp.shared
 
-  private val jsonMedia = "application/json; charset=utf-8".toMediaType()
+  private val jsonMedia = "application/json; charset=UTF-8".toMediaType()
 
-  /**
-   * 无参数 POST 的请求体。
-   *
-   * 不能直接发空字符串：Emby 走的是 ServiceStack，对 Content-Type 为 json、
-   * body 却是空的 POST 有概率返回 400，请求压根没到业务逻辑。发一个空对象最稳。
-   */
-  private const val EMPTY_JSON_BODY = "{}"
+  /** These two Episode-only writes never use the shared 401/transport replay policy. */
+  private val episodeWriteClient by lazy {
+    httpClient.newBuilder().apply { interceptors().clear() }
+      .retryOnConnectionFailure(false)
+      .followRedirects(false)
+      .followSslRedirects(false)
+      .addInterceptor { chain ->
+        val requested = requireNotNull(chain.request().tag(EmbyServer::class.java))
+        val fresh = EmbyHttp.sessionServer(requested)
+        if (!fresh.isLoggedIn || fresh.userId != requested.userId) {
+          throw EmbyEpisodeOperationException("登录身份已变化，请刷新后重试")
+        }
+        chain.proceed(EmbyRequestHeaders.route(chain.request(), fresh))
+      }.build()
+  }
 
-  /** 无 body 的 POST（OkHttp 的 post 必须给 body，给空串就是 content-length=0，跟 Web 端一致） */
-  private val EMPTY_BODY = "".toRequestBody(null)
+  internal fun requireUserStateMedia(item: EmbyItem): String {
+    val id = item.Id
+    val supported = item.Type.equals("Episode", ignoreCase = true) || item.Type.equals("Movie", ignoreCase = true)
+    if (!supported || id.isNullOrBlank() || id.any { it.isWhitespace() || it in "/?#\\" || it.code < 32 }) {
+      throw EmbyEpisodeOperationException("仅支持有效电影或单集的收藏和已看状态操作")
+    }
+    return id
+  }
 
-  /**
-   * 收藏 / 已播放等开关型请求附带的客户端标识 query 参数。
-   *
-   * 与 Emby Web 请求一致：该服务端上
-   * 历史上出现过不带这几个参数时「回 200 但收藏没落库」的假成功 —— 请求形态与
-   * Web 完全一致后写入才真正生效。X-Emby-* 是 Emby 的标准客户端标识参数，
-   * 所有服务端都接受，带上没有副作用。
-   */
-  private val WEB_CLIENT_QUERY: Map<String, String> = mapOf(
-    "X-Emby-Client" to "Emby Web",
-    "X-Emby-Device-Name" to "Chrome Windows",
-    "X-Emby-Device-Id" to "ca3b0a8f-2ff0-46ea-aa02-a6abf72f0061",
-    "X-Emby-Client-Version" to "4.10.1.0",
-    "X-Emby-Language" to "zh-cn",
-  )
+  fun setMediaFavorite(server: EmbyServer, item: EmbyItem, enabled: Boolean): EmbyUserData =
+    setMediaUserData(server, item, enabled, "FavoriteItems", "IsFavorite")
+
+  fun setMediaPlayed(server: EmbyServer, item: EmbyItem, enabled: Boolean): EmbyUserData =
+    setMediaUserData(server, item, enabled, "PlayedItems", "Played")
+
+  private fun setMediaUserData(
+    server: EmbyServer, item: EmbyItem, enabled: Boolean, endpoint: String, field: String,
+  ): EmbyUserData {
+    val itemId = requireUserStateMedia(item)
+    val itemType = item.Type.orEmpty()
+    val target = EmbyHttp.sessionServer(server)
+    if (!target.isLoggedIn || target.userId.any { it.isWhitespace() || it in "/?#\\" || it.code < 32 }) {
+      throw EmbyEpisodeOperationException("请先登录后再操作")
+    }
+    val request = authedRequest(target, "/Users/${target.userId}/$endpoint/$itemId").apply {
+      if (enabled) post(jsonBody("{}")) else delete()
+    }.build()
+    var uncertain = false
+    val responseData = try {
+      episodeWriteClient.newCall(request).execute().use { response ->
+        if (!response.isSuccessful) {
+          if (response.code in 400..499 && response.code !in setOf(408, 429)) {
+            throw EmbyEpisodeOperationException(when (response.code) {
+              401 -> "登录已失效，请刷新后重试"
+              403 -> "没有修改媒体状态的权限"
+              404 -> "媒体不存在，请刷新后重试"
+              else -> "媒体状态修改失败（HTTP ${response.code}）"
+            })
+          }
+          uncertain = true
+          null
+        } else {
+          val body = response.body.string()
+          // Only an explicit boolean is authoritative; DTO defaults cannot prove a write.
+          runCatching {
+            val raw = json.parseToJsonElement(body) as? JsonObject
+            val value = raw?.get(field) as? kotlinx.serialization.json.JsonPrimitive
+            if (value != null && !value.isString && value.content in setOf("true", "false")) {
+              json.decodeFromString<EmbyUserData>(body)
+            } else null
+          }.getOrNull()
+        }
+      }
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (failure: EmbyEpisodeOperationException) {
+      throw failure
+    } catch (_: Exception) {
+      uncertain = true
+      null
+    }
+    fun checkedIdentity() {
+      val fresh = EmbyHttp.sessionServer(target)
+      if (!fresh.isLoggedIn || fresh.userId != target.userId) {
+        throw EmbyEpisodeOperationException("登录身份已变化，请刷新后核对状态")
+      }
+    }
+    checkedIdentity()
+    if (responseData != null) return responseData
+    // Empty success or an unknown outcome gets one readback, never another POST/DELETE.
+    val data = try {
+      val detail = getItem(target, itemId)
+      if (detail.Id != itemId || !detail.Type.equals(itemType, ignoreCase = true)) null else detail.UserData
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (_: Exception) { null }
+    checkedIdentity()
+    if (data == null || (uncertain && (if (field == "IsFavorite") data.IsFavorite else data.Played) != enabled)) {
+      throw EmbyEpisodeOperationException("操作结果暂未确认，请刷新核对状态；未自动重试写入")
+    }
+    return data
+  }
+
+  /** ServiceStack expects a JSON object even when a POST has no payload. */
+  internal fun jsonBody(payload: String?) = payload?.takeUnless { it.isBlank() }
+    .orEmpty().ifEmpty { "{}" }.toRequestBody(jsonMedia)
+
+
+  private fun headerValue(value: String): String {
+    if (value.any { it.code < 32 || it.code > 126 }) throw EmbyApiException(0, "客户端身份配置无效")
+    return value.replace("\\", "\\\\").replace("\"", "\\\"")
+  }
+
+  internal fun authorizationHeader(identity: EmbyAuthIdentity): String =
+    "MediaBrowser Client=\"${headerValue(identity.client)}\", Device=\"${headerValue(identity.device)}\", " +
+      "DeviceId=\"${headerValue(identity.deviceId)}\", Version=\"${headerValue(identity.clientVersion)}\""
+
+  internal fun identityRequest(server: EmbyServer, url: String): Request.Builder =
+    EmbyRequestHeaders.request(server, url)
 
   /**
    * 拉流时统一使用的 User-Agent。
@@ -179,23 +269,6 @@ object EmbyClient {
    */
   private const val COUNT_FULL_SCAN_MAX = 3_000
 
-  // ── 「服务器转码」的默认参数（见 [transcodeStreamUrl]）──
-
-  /**
-   * 转码目标：H.264 + AAC。
-   *
-   * 这两个是**所有 Android 设备都硬解得了**的编码，转完就再没有兼容性问题。
-   * 不用 HEVC 是因为它虽然更省码率，但老设备 / 低端机的硬解支持参差不齐，
-   * 转码本来就是为了兼容，没有必要在这里引入新的不确定性。
-   */
-  private const val TRANSCODE_VIDEO_CODEC = "h264"
-  private const val TRANSCODE_AUDIO_CODEC = "aac"
-
-  /** 转码分辨率上限：1080p 封顶。源多半是 480p/720p，再高只是白烧服务器 CPU */
-  private const val TRANSCODE_MAX_HEIGHT = 1080
-  private const val TRANSCODE_VIDEO_BITRATE = 6_000_000
-  private const val TRANSCODE_AUDIO_BITRATE = 192_000
-
   // ─── 内部工具 ───
 
   internal fun authedRequest(
@@ -203,19 +276,15 @@ object EmbyClient {
     path: String,
     extraQuery: Map<String, String?> = emptyMap(),
   ): Request.Builder {
-    val sb = StringBuilder("${EmbyEndpoints.hostUrl(server)}/emby$path")
+    val server = EmbyHttp.sessionServer(server)
+    val sb = StringBuilder("${EmbyEndpoints.apiBaseUrl(server)}$path")
     if (extraQuery.isNotEmpty()) {
       sb.append('?')
       extraQuery.entries.filter { it.value != null }.joinTo(sb, "&") { (k, v) ->
         "$k=${java.net.URLEncoder.encode(v!!, "UTF-8")}"
       }
     }
-    val b = Request.Builder().url(sb.toString())
-    if (server.apiToken.isNotEmpty()) {
-      // 已登录：用 X-Emby-Token header（也可用 ?api_key=，二选一即可）
-      b.header("X-Emby-Token", server.apiToken)
-    }
-    return b
+    return EmbyRequestHeaders.request(server, sb.toString())
   }
 
   internal fun authedRequestWithApiKey(
@@ -224,6 +293,7 @@ object EmbyClient {
     extraQuery: Map<String, String?> = emptyMap(),
   ): Request.Builder {
     // 带 api_key query 参数（用于 stream/images，便于直接拼 URL 给 PlayerActivity）
+    val server = EmbyHttp.sessionServer(server)
     val withKey = extraQuery.toMutableMap()
     if (server.apiToken.isNotEmpty()) withKey["api_key"] = server.apiToken
     return authedRequest(server, path, withKey)
@@ -246,12 +316,14 @@ object EmbyClient {
       }
     } finally {
       val ms = (System.nanoTime() - startedAt) / 1_000_000
-      val line = "${ms}ms ${request.method} ${request.url.encodedPath}"
+      val line = "${ms}ms ${request.method}"
       // 慢的单独按 warn 标出：这标签本身是诊断用的（`adb logcat -s EmbyDiag`），
       // 一屏能刷很多行，慢请求要能一眼挑出来。
       if (ms >= SLOW_REQUEST_MS) EmbyLog.warn("慢请求 $line") else EmbyLog.info(line)
     }
   }
+
+  internal inline fun <reified T> decodeResponseJson(body: String): T = json.decodeFromString(body)
 
   internal inline fun <reified T> execJson(request: Request): T {
     val body = execString(request)
@@ -260,22 +332,10 @@ object EmbyClient {
       @Suppress("UNCHECKED_CAST")
       return when (T::class) {
         Unit::class -> Unit as T
-        else -> json.decodeFromString(body.ifBlank { "null" })
+        else -> decodeResponseJson(body.ifBlank { "null" })
       }
     }
-    return json.decodeFromString(body)
-  }
-
-  internal inline fun <reified T> postJson(
-    server: EmbyServer,
-    path: String,
-    bodyJson: String,
-    query: Map<String, String?> = emptyMap(),
-  ): T {
-    val req = authedRequest(server, path, query)
-      .post(bodyJson.toRequestBody(jsonMedia))
-      .build()
-    return execJson(req)
+    return decodeResponseJson(body)
   }
 
   internal inline fun <reified T> getJson(
@@ -284,19 +344,17 @@ object EmbyClient {
     query: Map<String, String?> = emptyMap(),
   ): T {
     val req = authedRequest(server, path, query).get().build()
-    return execJson(req)
+    val result: T = execJson(req)
+    // Apply policy only to item DTOs; authentication, images and other JSON stay untouched.
+    @Suppress("UNCHECKED_CAST")
+    return when (result) {
+      is EmbyItemsResult -> EmbyItemPolicy.filterSupported(result) as T
+      is EmbyItem -> EmbyItemPolicy.requireSupported(result) as T
+      else -> result
+    }
   }
 
-  internal inline fun <reified T> deleteJson(
-    server: EmbyServer,
-    path: String,
-    query: Map<String, String?> = emptyMap(),
-  ): T {
-    val req = authedRequest(server, path, query).delete().build()
-    return execJson(req)
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
+   // ════════════════════════════════════════════════════════════════════════
   // 1. 认证 / 服务器信息
   // ════════════════════════════════════════════════════════════════════════
 
@@ -306,15 +364,16 @@ object EmbyClient {
    * Emby 要求 X-Emby-Authorization header，格式：
    *   MediaBrowser Client="mpvEx", Device="Android", DeviceId="<uuid>", Version="1.0"
    */
+  @Serializable
+  internal data class LoginPayload(val Username: String, val Pw: String)
+
+  internal fun loginJson(username: String, password: String): String =
+    json.encodeToString(LoginPayload(username, password))
+
   fun authenticateByName(server: EmbyServer, username: String, password: String): EmbyAuthResult {
-    val body = """{"Username":"$username","Pw":"$password"}"""
-    val deviceId = androidDeviceId(server.host)
-    val authHeader =
-      """MediaBrowser Client="mpvEx", Device="Android", DeviceId="$deviceId", Version="1.0.0""""
-    val req = Request.Builder()
-      .url("${EmbyEndpoints.hostUrl(server)}/emby/Users/AuthenticateByName")
-      .header("X-Emby-Authorization", authHeader)
-      .post(body.toRequestBody(jsonMedia))
+    val body = loginJson(username, password)
+    val req = identityRequest(server, "${EmbyEndpoints.apiBaseUrl(server)}/Users/AuthenticateByName")
+      .post(jsonBody(body))
       .build()
     return execJson(req)
   }
@@ -322,45 +381,7 @@ object EmbyClient {
   /** 拉取服务器公开信息（无需登录）。 */
   fun getPublicSystemInfo(server: EmbyServer): EmbySystemInfo = getJson(server, "/System/Info/Public")
 
-  /**
-   * 探活：这台服务器此刻通不通。
-   *
-   * 三条口径，缺一条都会让「主备切换」判错：
-   * · 走 [EmbyHttp.health]（**无重试** + 秒级超时）：重试会把一次失败拖成十几秒，
-   *   探活自己就变成了卡顿源；
-   * · 只打 `System/Info/Public`：不碰媒体、不跟随 302 —— Emby 库只存 strm，
-   *   真媒体在网盘 CDN 上，探活绝不能顺手往 CDN 打一发；
-   * · 2xx/3xx 都算通：反代改写 `/emby` 前缀时可能回 302，能应答就说明服务活着。
-   *
-   * ⚠️ 阻塞调用（OkHttp `execute`），调用方必须切到 IO 线程。
-   */
-  fun probeAlive(server: EmbyServer): Boolean =
-    runCatching {
-      val req = authedRequest(server, "/System/Info/Public").get().build()
-      EmbyHttp.health.newCall(req).execute().use { it.code in 200..399 }
-    }.getOrDefault(false)
-
-  /**
-   * 探活某个**指定的**入口（不经过地址解析）。
-   *
-   * 「同一台服务器两个入口，谁先通就用谁」要靠它 —— 必须能显式指定地址，
-   * 否则两个探测都会走解析器的当前值，永远只探同一个地址。
-   *
-   * 口径与 [probeAlive] 一致：只打 `System/Info/Public`、无重试、2xx/3xx 都算通；
-   * 区别只是超时压到 [EmbyHttp.probe] 那一档（竞速等不起 6 秒）。
-   */
-  fun probeAlive(endpoint: EmbyEndpoint, token: String): Boolean =
-    runCatching {
-      val req =
-        Request.Builder()
-          .url("${endpoint.baseUrl}/emby/System/Info/Public")
-          .apply { if (token.isNotEmpty()) header("X-Emby-Token", token) }
-          .get()
-          .build()
-      EmbyHttp.probe.newCall(req).execute().use { it.code in 200..399 }
-    }.getOrDefault(false)
-
-  // ════════════════════════════════════════════════════════════════════════
+   // ════════════════════════════════════════════════════════════════════════
   // 2. 媒体库（VirtualFolders） / 媒体浏览
   // ════════════════════════════════════════════════════════════════════════
 
@@ -453,7 +474,7 @@ object EmbyClient {
     parentId: String? = null,
     limit: Int = 16,
     includeItemTypes: List<String>? = listOf("Movie", "Series"),
-  ): List<EmbyItem> = getJson<List<EmbyItem>>(
+  ): List<EmbyItem> = EmbyItemPolicy.filterSupported(getJson<List<EmbyItem>>(
     server,
     "/Users/${server.userId}/Items/Latest",
     mapOf(
@@ -465,7 +486,7 @@ object EmbyClient {
       "EnableUserData" to "true",
       "ImageTypeLimit" to "1",
     ),
-  )
+  ))
 
   /**
    * 通用分页查询。可用于：库内媒体、收藏夹、随机播放、按类型筛选等。
@@ -580,7 +601,7 @@ object EmbyClient {
     // 只传其中一个都会漏 —— 第三方服务端对 ExcludeItemTypes 的支持尤其参差。
     isFolder?.let { q["IsFolder"] = it.toString() }
     includeItemTypes?.takeIf { it.isNotEmpty() }?.let { q["IncludeItemTypes"] = it.joinToString(",") }
-    excludeItemTypes?.takeIf { it.isNotEmpty() }?.let { q["ExcludeItemTypes"] = it.joinToString(",") }
+    q["ExcludeItemTypes"] = EmbyItemPolicy.queryExclusions(excludeItemTypes).joinToString(",")
     genres?.takeIf { it.isNotEmpty() }?.let { q["Genres"] = it.joinToString("|") }
     tags?.takeIf { it.isNotEmpty() }?.let { q["Tags"] = it.joinToString("|") }
     // 按 Id 筛（优先）：官方推荐、且不碰会 500 的 Genres 列。逗号分隔。
@@ -744,63 +765,6 @@ object EmbyClient {
   }
 
   /**
-   * 直播电视频道列表（`/LiveTv/Channels`）。
-   *
-   * 返回体的 `Items[]` 结构与 `/Items` 一致（同一个 `EmbyItemsResult`），
-   * 频道条目的 `Type` 是 `TvChannel`，封面照旧从 `ImageTags["Primary"]` 取。
-   *
-   * ⚠️ 失败返回空列表（与 [nameList] 同款处理）：服务端没开直播电视时这个端点会 404 / 500，
-   * 那属于「这台服务器没有这个功能」，不该让页面报错。
-   */
-  fun getLiveTvChannels(server: EmbyServer): List<EmbyItem> =
-    runCatching {
-      val q = LinkedHashMap<String, String?>()
-      q["UserId"] = server.userId
-      getJson<EmbyItemsResult>(server, "/LiveTv/Channels", q).Items
-    }.onFailure {
-      EmbyLog.warn("getLiveTvChannels 失败：${it.message} —— 该服务器可能未启用直播电视", it)
-    }.getOrDefault(emptyList())
-
-  /**
-   * 直播电视节目单（`GET /LiveTv/Programs`，a2 + c1）。
-   *
-   * 两种用法：
-   *  · 不带 [channelId]：返回**所有频道**在 [startTime]~[endTime] 窗口内的节目。
-   *    频道网格的「正在播出」走这条 —— 一次请求覆盖全部频道，
-   *    ⚠️ 不要按频道逐个拉（N 个频道 = N 个请求，进页面先卡一波）。
-   *  · 带 [channelId]：只返回该频道的节目（频道详情页的时间轴列表走这条）。
-   *
-   * 时间参数用 ISO 8601 UTC 字符串（ServiceStack 的日期绑定 ISO / ticks 都吃，
-   * ISO 是 Web 端引导区的用法）。节目**不依赖服务端排序** —— 客户端按
-   * [EmbyItem.StartDate] 自己排，这个端点对排序不做保证。
-   *
-   * ⚠️ 失败返回空列表：服务端没开直播电视 / 没接 EPG 数据源时这个端点会
-   * 404 / 500 / 空数据，都属于「没有节目单」，页面按空态显示，不该报错。
-   *
-   * 节目→频道的归属看节目的 `ParentId`（= 频道 Id），不需要额外字段。
-   */
-  fun getLiveTvPrograms(
-    server: EmbyServer,
-    channelId: String? = null,
-    startTime: String,
-    endTime: String,
-    limit: Int = 500,
-  ): List<EmbyItem> =
-    runCatching {
-      val q = LinkedHashMap<String, String?>()
-      q["UserId"] = server.userId
-      channelId?.let { q["ChannelId"] = it }
-      q["StartTime"] = startTime
-      q["EndTime"] = endTime
-      q["Limit"] = limit.toString()
-      // Overview 是节目简介，Emby 对该端点默认不回，得显式要
-      q["Fields"] = "Overview"
-      getJson<EmbyItemsResult>(server, "/LiveTv/Programs", q).Items
-    }.onFailure {
-      EmbyLog.warn("getLiveTvPrograms 失败：${it.message} —— 该服务器可能没有节目单数据", it)
-    }.getOrDefault(emptyList())
-
-  /**
    * 取「Id + 名字」的聚合端点（/Persons、/Studios）。
    *
    * 和 [nameList] 的区别是这里要留下 Id —— 演员同名很常见，只有 Id 能唯一确定一个人。
@@ -914,7 +878,7 @@ object EmbyClient {
     // 按 Id 去重：服务端若忽略 StartIndex 反复给同一批，没有这层会死循环
     val seen = HashSet<String>()
     var start = 0
-    while (out.size < maxItems) {
+    while (out.size < maxItems && start < maxItems) {
       val q = LinkedHashMap<String, String?>()
       q["UserId"] = server.userId
       q["Recursive"] = "true"
@@ -926,7 +890,7 @@ object EmbyClient {
       q["StartIndex"] = start.toString()
       q["Limit"] = PERSON_PAGE_SIZE.toString()
       val page = getJson<EmbyItemsResult>(server, "/Persons", q)
-      if (page.Items.isEmpty()) break
+      if (page.consumedCount == 0) break
       var fresh = 0
       page.Items.forEach { item ->
         val id = item.Id ?: return@forEach
@@ -936,8 +900,8 @@ object EmbyClient {
         out.add(item.copy(Type = "Person", Name = name))
       }
       // 一条新的都没有 = 服务端在重复给同一批，收手（这也是防死循环的硬闸门）
-      if (fresh == 0) break
-      start += page.Items.size
+      if (fresh == 0 && page.Items.isNotEmpty()) break
+      start += page.consumedCount
       if (page.TotalRecordCount > 0 && start >= page.TotalRecordCount) break
     }
     out.take(maxItems)
@@ -1126,17 +1090,17 @@ object EmbyClient {
         favTotal = page.TotalRecordCount
         found = page.Items.firstOrNull { it.Id == personId }
         if (found == null) {
-          if (page.Items.isEmpty()) break
+          if (page.consumedCount == 0) break
           // 终止条件两条腿走路：TotalRecordCount 说了算（服务端若忽略 Limit、按自己的
           // 默认上限分页时，「页不满」不代表拉完，会漏掉后面页里的人）；拿不到总数
           // （服务端不回传）才退化看页是否不满
           val total = page.TotalRecordCount.takeIf { it > 0 }
           if (total != null) {
-            if (start + page.Items.size >= total) break
-          } else if (page.Items.size < limit) {
+            if (start + page.consumedCount >= total) break
+          } else if (page.consumedCount < limit) {
             break
           }
-          start += page.Items.size
+          start += page.consumedCount
           // 兜底防无限翻页：收藏的人员不可能有这个量级
           if (start >= 10_000) break
         }
@@ -1227,8 +1191,9 @@ object EmbyClient {
           return@runCatching emptyMap()
         }
         // 本页一条新的都没有 = 服务端在重复给同一批，收手
-        if (fresh == 0 || page.Items.size < COUNT_PAGE_SIZE) break
-        start += COUNT_PAGE_SIZE
+        if (page.consumedCount == 0 || (fresh == 0 && page.Items.isNotEmpty())) break
+        start += page.consumedCount
+        if (page.TotalRecordCount > 0 && start >= page.TotalRecordCount) break
         if (start >= COUNT_MAX_ITEMS) break
       }
       counts
@@ -1434,29 +1399,6 @@ object EmbyClient {
     "$ITEM_FIELDS_CORE,ExternalUrls,SiblingIds"
 
   /**
-   * 拉取条目的章节表。
-   *
-   * 对应 SDK：`ItemsServiceApi.getItemsByIdChapters` → `GET /Items/{Id}/Chapters`。
-   *
-   * ## 为什么 GSY 内核要靠这个端点（清单 #19）
-   *
-   * mpv 侧的章节来自容器内嵌章节表（`chapter-list` property，由 demuxer 解析），
-   * 所以本地文件也有章节。而 GSYVideoPlayer **没有任何章节 API** ——
-   * ExoPlayer 只认 mp4 的 `ChapterFrame`、IJK 的 `getMediaMeta()` 不保证有，
-   * 都不是可靠来源。唯一稳定的通道就是 Emby 侧这份元数据。
-   *
-   * ⚠️ 由此产生一条**必须说清的能力边界**（也写进了 [EngineFeature.CHAPTERS] 的 KDoc）：
-   * 同一个文件在两个内核下章节数量可能不同 —— mpv 从容器解析得到（本地文件也有），
-   * GSY 从 Emby 拿（纯本地文件没有）。这不是 bug，是两条数据来源的固有差异。
-   *
-   * 服务端没有章节时返回**空数组**（不是 404），所以正常路径下不会抛异常。
-   * [EmbyChapter.Name] 允许为空：不少刮削器只写了时间点没写标题，
-   * 这种情况在 UI 上按「第 N 章 / 时间」兜底展示（见 `GsyChapterSheet`）。
-   */
-  fun getItemChapters(server: EmbyServer, itemId: String): List<EmbyChapter> =
-    getJson(server, "/Items/$itemId/Chapters")
-
-  /**
    * 拉取条目的片头 / 片尾分段（Emby 4.7+ 原生 Intro Skip）。
    *
    * 对应端点：`GET /Users/{UserId}/Items/{Id}/Intros`。
@@ -1476,6 +1418,52 @@ object EmbyClient {
    * @param includeItemTypes 限定类型，传 null 表示不限（Emby 默认只搜部分类型，
    *                         传入 Movie/Series/Episode 等可精确控制）
    */
+  /** Failure-preserving, cancellable search API. Never routes through legacy actor fallbacks. */
+  suspend fun searchMediaPage(
+    server: EmbyServer,
+    term: String,
+    includeItemTypes: List<String>,
+    limit: Int = 80,
+  ): EmbyItemsResult {
+    require(term.isNotBlank())
+    val request = authedRequest(server, "/Users/${server.userId}/Items", mapOf(
+      "SearchTerm" to term.trim().take(200),
+      "Recursive" to "true",
+      "IncludeItemTypes" to includeItemTypes.joinToString(","),
+      "StartIndex" to "0",
+      "Limit" to limit.coerceIn(1, 120).toString(),
+      "SortBy" to "SortName",
+      "Fields" to "BasicSyncInfo,ProductionYear,CommunityRating",
+      "EnableImages" to "true",
+      "ImageTypeLimit" to "1",
+    )).get().build()
+    return EmbyItemPolicy.filterSupported(json.decodeFromString<EmbyItemsResult>(EmbySearchHttp.body(request)))
+  }
+
+  /** A single bounded /Persons request: no full-library fetch or per-actor work-count requests. */
+  suspend fun searchPersonPage(server: EmbyServer, term: String, limit: Int = 40): EmbyItemsResult {
+    require(term.isNotBlank())
+    val request = authedRequest(server, "/Persons", mapOf(
+      "UserId" to server.userId,
+      "SearchTerm" to term.trim().take(200),
+      "Recursive" to "true",
+      "StartIndex" to "0",
+      "Limit" to limit.coerceIn(1, 40).toString(),
+      "SortBy" to "SortName",
+      "EnableImages" to "true",
+      "ImageTypeLimit" to "1",
+    )).get().build()
+    val page = json.decodeFromString<EmbyItemsResult>(EmbySearchHttp.body(request))
+    return page.copy(Items = page.Items.filter { !it.Id.isNullOrBlank() && !it.Name.isNullOrBlank() }
+      .map { it.copy(Type = "Person") })
+  }
+
+  internal suspend fun authenticateForSearch(server: EmbyServer): EmbyAuthResult {
+    val request = identityRequest(server, "${EmbyEndpoints.apiBaseUrl(server)}/Users/AuthenticateByName")
+      .post(jsonBody(loginJson(server.username, server.password))).build()
+    return json.decodeFromString(EmbySearchHttp.body(request))
+  }
+
   fun searchItems(
     server: EmbyServer,
     term: String,
@@ -1562,22 +1550,6 @@ object EmbyClient {
     ),
   )
 
-  /** 播放历史：按最近播放时间倒序（只统计视频类媒体） */
-  fun getPlayedHistory(
-    server: EmbyServer,
-    limit: Int = 60,
-    startIndex: Int = 0,
-    mediaTypes: List<String>? = listOf(VIDEO_MEDIA_TYPE),
-  ): EmbyItemsResult = getItems(
-    server,
-    sortBy = "DatePlayed",
-    sortOrder = "Descending",
-    filters = listOf("IsPlayed"),
-    mediaTypes = mediaTypes,
-    startIndex = startIndex,
-    limit = limit,
-  )
-
   /**
    * 收藏夹列表（用户标过 IsFavorite 的项）。
    *
@@ -1605,6 +1577,7 @@ object EmbyClient {
     startIndex: Int = 0,
     limit: Int = 100,
     mediaTypes: List<String>? = listOf(VIDEO_MEDIA_TYPE),
+    includeItemTypes: List<String>? = null,
     sortBy: String? = null,
     sortOrder: String? = null,
   ): EmbyItemsResult = getItems(
@@ -1613,6 +1586,7 @@ object EmbyClient {
     sortOrder = sortOrder ?: "Ascending",
     filters = listOf("IsFavorite"),
     mediaTypes = mediaTypes,
+    includeItemTypes = includeItemTypes,
     startIndex = startIndex,
     limit = limit,
     // 收藏页要按年份 / 评分 / 添加时间做**本地排序**，这几个字段必须显式索取
@@ -1800,281 +1774,7 @@ object EmbyClient {
   // 3. 收藏 / 删除
   // ════════════════════════════════════════════════════════════════════════
 
-  /**
-   * 加入 / 取消收藏。返回服务器回传的 UserData（含 IsFavorite），用来确认真实状态。
-   */
-  fun setFavorite(server: EmbyServer, itemId: String, favorite: Boolean): EmbyUserData? =
-    toggleUserState(server, "/Users/${server.userId}/FavoriteItems/$itemId", favorite)
-
-  /** 标记已看 / 未看。返回服务器回传的 UserData（含 Played）。 */
-  fun setPlayed(server: EmbyServer, itemId: String, played: Boolean): EmbyUserData? =
-    toggleUserState(server, "/Users/${server.userId}/PlayedItems/$itemId", played)
-
-  /**
-   * a8：**一次写多项** UserData —— 标记已看 / 未看的同时把播放进度归零。
-   *
-   * `POST /Users/{uid}/Items/{id}/UserData` 是 Emby 的「用户数据直写」端点，
-   * body 是部分更新语义（同 [clearPlaybackPosition] 已经验证过的用法），
-   * 所以「已看 + 进度」两项可以合成**一个**请求发出去。
-   *
-   * 为什么值得单开一个方法：旧路径 `PlayedItems` 只翻 Played 一个位，
-   * 看完 42 分钟标记已看后，服务端仍挂着 `PlaybackPositionTicks=42min`
-   * —— 部分兼容服务端的「继续观看」因此不清不爽，Emby Web 的同一动作
-   * 本来就是两个字段一起写的。
-   *
-   * 兜底：端点不存在 / 老服务端不认这个路由时，退回 [setPlayed] 的
-   * `PlayedItems` 单字段写法（只是不清进度，动作本身仍然生效）。
-   * 回执解析不出（空 body / 拼接 JSON）时返回 null —— 调用方按
-   * 「无法确认」处理，不下失败结论（同 [toggleUserState] 的口径）。
-   */
-  fun setPlayedWithClearPosition(
-    server: EmbyServer,
-    itemId: String,
-    played: Boolean,
-  ): EmbyUserData? {
-    val path = "/Users/${server.userId}/Items/$itemId/UserData"
-    val body = """{"Played":$played,"PlaybackPositionTicks":0}"""
-    val response =
-      runCatching {
-        execString(
-          authedRequest(server, path, mapOf("X-Emby-Token" to server.apiToken.takeIf { it.isNotEmpty() }))
-            .header("Accept", "application/json")
-            .post(body.toRequestBody(jsonMedia))
-            .build(),
-        )
-      }.getOrNull() ?: return setPlayed(server, itemId, played)
-    return parseUserData(response)
-  }
-
-  /**
-   * 收藏 / 已播放这类「开关型」接口的统一发送。
-   *
-   * 请求形态照 Emby Web 的两种（**不是**官方 OpenAPI 写的那种）：
-   *   打开：`POST /Users/{uid}/FavoriteItems/{id}`
-   *   关闭：`POST /Users/{uid}/FavoriteItems/{id}/Delete` ← 是 POST 到 `/Delete`，不是 DELETE 方法
-   * SmartStrm 这类服务端只认后一种写法，用 DELETE 方法会被拒。
-   *
-   * **请求细节向 Emby Web 的真实请求看齐**（与 Web 端核对过）：
-   *  · `X-Emby-Token` 同时放 **query 参数和 header** —— 个别兼容服务端的这条路由只认 query；
-   *  · 带 `Accept: application/json`，避免内容协商返回非 JSON。
-   *
-   * **响应体本身就是最新的 UserData**（`{"IsFavorite":true,"Played":false,...}`），
-   * 直接解析它就能确认状态 —— 不用再回查一次条目：那台服务器的详情响应
-   * `Content-Length` 比实际 body 长，OkHttp 读不满会抛 unexpected end of stream，
-   * 回查失败就会把「其实已经成功了」误报成失败。
-   * 回执可能不干净（SmartStrm 会把 JSON 重复拼接），所以解析失败后还有一层
-   * 字段级提取兜底，见 [parseUserData]。
-   */
-  private fun toggleUserState(server: EmbyServer, basePath: String, enable: Boolean): EmbyUserData? {
-    val path = if (enable) basePath else "$basePath/Delete"
-    // 客户端标识 + token 一起进 query：与 Emby Web 请求一致（见 [WEB_CLIENT_QUERY]）
-    val clientQuery: Map<String, String?> = buildMap {
-      put("X-Emby-Token", server.apiToken.takeIf { it.isNotEmpty() })
-      putAll(WEB_CLIENT_QUERY)
-    }
-    // 请求构造：token 同时放 query 与 header + Accept: application/json（对齐 Emby Web）
-    val buildRequest: (okhttp3.RequestBody) -> Request = { body ->
-      authedRequest(server, path, clientQuery)
-        .header("Accept", "application/json")
-        .post(body)
-        .build()
-    }
-    // 1) 主：POST + 无 body（Web 端就是这个形态，content-length=0）
-    val first = runCatching { execString(buildRequest(EMPTY_BODY)) }
-    var body = first.getOrNull()
-      // 2) 兜底：空 body 会被部分服务端（ServiceStack 系）判 400，此时改发空对象
-      ?: runCatching { execString(buildRequest(EMPTY_JSON_BODY.toRequestBody(jsonMedia))) }.getOrNull()
-      // 3) 关闭再兜底：老版本只认 DELETE 方法
-      ?: if (!enable) {
-        runCatching { execString(authedRequest(server, basePath, clientQuery).delete().build()) }.getOrNull()
-      } else {
-        null
-      }
-    // 2) 的空对象回执可能把 1) 的干净回执顶掉：优先取「能解析出 IsFavorite」的那份
-    if (body != null && parseUserData(body) == null) {
-      (first.getOrNull())?.takeIf { parseUserData(it) != null }?.let { body = it }
-    }
-    // 三种形态都失败：把第一次的真实原因抛出去（它最接近「实际用的是哪种形态」的问题）
-    if (body == null) throw first.exceptionOrNull() ?: EmbyApiException(0, "请求失败")
-    return parseUserData(body)
-  }
-
-  /**
-   * 取消收藏的「用力」版：在 [toggleUserState] 的几路之外，**再显式补一次标准 DELETE 方法**。
-   *
-   * 为什么要多这一枪：部分兼容服务端对 `POST .../FavoriteItems/{id}/Delete` 会回 200，
-   * 但**并没有真的落库**（收藏演员时踩过同一个坑）。[toggleUserState] 见到 200 就返回了，
-   * 调用方光看回执根本发现不了 —— 表现就是「取消收藏点了没反应 / 红心只能点亮不能取消」。
-   * 取消收藏是「要在服务器上真的抹掉」的动作，宁可多发一次请求：
-   * 两个形态都发，任意一路成功即可。返回值仍然交给调用方回读确认。
-   *
-   * 不在这里抛异常：发不出去也要让调用方走「回读判真值」的流程，避免把软失败误报成硬失败。
-   */
-  fun unfavoriteHard(server: EmbyServer, itemId: String): EmbyUserData? {
-    val base = "/Users/${server.userId}/FavoriteItems/$itemId"
-    // 客户端标识 + token 一起进 query（同 [toggleUserState]，对齐 Emby Web）
-    val clientQuery: Map<String, String?> = buildMap {
-      put("X-Emby-Token", server.apiToken.takeIf { it.isNotEmpty() })
-      putAll(WEB_CLIENT_QUERY)
-    }
-    // 1) 兼容服务端认的写法（POST 到 /Delete）
-    val viaPost = runCatching { toggleUserState(server, base, false) }
-    // 2) 官方标准写法：DELETE 方法
-    val viaDelete =
-      runCatching {
-        execString(
-          authedRequest(server, base, clientQuery)
-            .delete()
-            .build(),
-        )
-      }
-    // 优先取「能解析出 IsFavorite」的那份回执（DELETE 的回执多为空 body，解析不出就返回 null），
-    // 都拿不到状态就返回 null，交给调用方回读判真值 —— 这里不下结论、也不抛异常。
-    return viaDelete.getOrNull()?.let { parseUserData(it) } ?: viaPost.getOrNull()
-  }
-
-  /**
-   * 解析响应体里的 UserData。
-   *
-   * 先做严格 JSON 解析；失败后退回**字段级提取**——SmartStrm 会把回执 JSON
-   * 重复拼接成 `{...}{...}`（不是合法 JSON，但两条里的 IsFavorite 一致），
-   * 这条回执只关心 IsFavorite，正则抠出真值即可。
-   * 解析不了（空 body / 完全没有该字段）返回 null，由调用方回读确认。
-   */
-  private fun parseUserData(body: String): EmbyUserData? {
-    val trimmed = body.trim()
-    if (trimmed.isEmpty()) return null
-    runCatching { return json.decodeFromString<EmbyUserData>(trimmed) }
-    val match = Regex("\"IsFavorite\"\\s*:\\s*(true|false)", RegexOption.IGNORE_CASE)
-      .find(trimmed) ?: return null
-    return EmbyUserData(IsFavorite = match.groupValues[1].equals("true", ignoreCase = true))
-  }
-
-  /**
-   * 删除媒体 —— **物理删除服务器上的文件**，不可逆。
-   *
-   * 用的是 Emby 官方的 `DELETE /Items/{Id}`，其定义就是
-   * 「Deletes an item from the library **and file system**」——
-   * 即同时从媒体库移除**并删除磁盘上的源文件**。这与「取消收藏 / 标未看」
-   * 完全不是一个量级：那两者只改用户数据，这个是销毁内容。
-   *
-   * ⚠️ 需要**管理员权限**。非管理员账号调这个会拿到 403，
-   *   [execString] 会抛 [EmbyApiException]（带服务端原话），调用方据此提示。
-   *   **不要**把它当"操作成功"来展示。
-   */
-  fun deleteItem(server: EmbyServer, itemId: String) {
-    val req = authedRequest(server, "/Items/$itemId").delete().build()
-    execString(req)
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
-  // 3.2 批量操作（收藏 / 已看）
-  // ════════════════════════════════════════════════════════════════════════
-
-  /**
-   * 批量收藏 / 取消收藏。
-   *
-   * Emby 的 `FavoriteItems` 路由**没有**多值 Id 端点（官方 OpenAPI 只有单条
-   * `POST /Users/{uid}/FavoriteItems/{id}`），所以这里在客户端逐条串行发送，
-   * 把所有结果汇总成一个 [EmbyBatchResult] —— 单条失败不中断整批，
-   * 用户最终看到的是「成功 N / 失败 M」而不是一句笼统的失败。
-   *
-   * 串行而非并发：Emby 的收藏写在部分兼容服务端上是「先回 200 再异步落库」，
-   * 并发几十条很容易触发它的写锁竞争，串行慢一点但结果可信。
-   */
-  fun setFavoriteMany(server: EmbyServer, itemIds: List<String>, favorite: Boolean): EmbyBatchResult =
-    runBatch(itemIds) { id -> toggleUserState(server, "/Users/${server.userId}/FavoriteItems/$id", favorite) }
-
-  /**
-   * 批量标记已看 / 未看。
-   *
-   * 与 [setFavoriteMany] 同构：走单条 `PlayedItems` 端点、客户端汇总。
-   */
-  fun setPlayedMany(server: EmbyServer, itemIds: List<String>, played: Boolean): EmbyBatchResult =
-    runBatch(itemIds) { id -> toggleUserState(server, "/Users/${server.userId}/PlayedItems/$id", played) }
-
-  /**
-   * 批量执行的公共壳：逐条跑 [action]，把「抛了异常」或「回传状态与预期不符」计入失败。
-   *
-   * 判定与单条路径保持一致 —— 拿不到回执（null）不下失败结论，只有明确与目标相反才算失败。
-   * 因为 toggleUserState 的语义是「enable=目标值」，回执的 IsFavorite/Played
-   * 只要不是「明确与目标相反」就认为成功。
-   */
-  private fun runBatch(itemIds: List<String>, action: (String) -> EmbyUserData?): EmbyBatchResult {
-    if (itemIds.isEmpty()) return EmbyBatchResult(0, 0, null)
-    var ok = 0
-    var failed = 0
-    var firstError: String? = null
-    for (id in itemIds) {
-      val outcome = runCatching { action(id) }
-      if (outcome.isSuccess) {
-        ok++
-      } else {
-        failed++
-        if (firstError == null) firstError = outcome.exceptionOrNull()?.message
-      }
-    }
-    return EmbyBatchResult(ok, failed, firstError)
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
-  // 3.3 「继续观看」单条清除
-  // ════════════════════════════════════════════════════════════════════════
-
-  /**
-   * 把一条媒体从服务器的「继续观看」列表里移除，并清掉它的播放位置。
-   *
-   * 这是「继续观看」卡片上那项操作的服务器侧实现，和 Emby Web 端
-   * 「从继续观看中移除」是同一个动作。三种形态逐层兜底（不同服务端实现不一）：
-   *
-   *  1. `POST /Users/{uid}/Items/{id}/HideFromResume`，body `{"Hide":true}` —— Emby 官方；
-   *  2. 同上但发空对象 body —— 个别 ServiceStack 服务端拒收带内容的 body；
-   *  3. `DELETE /UserItems/{id}/UserData` —— Jellyfin 系 / 兼容服务端的等价写法。
-   *
-   * 返回 `true` 表示至少有一层被服务端接受。**注意**：返回 true 只代表请求发出去了，
-   * 不代表对方一定落库（兼容服务端有「回 200 不生效」的前科），所以 UI 侧
-   * 仍然做本地乐观移除，不依赖这里做二次回读。
-   */
-  fun hideFromResume(server: EmbyServer, itemId: String): Boolean {
-    val path = "/Users/${server.userId}/Items/$itemId/HideFromResume"
-    runCatching {
-      execString(authedRequest(server, path).post("""{"Hide":true}""".toRequestBody(jsonMedia)).build())
-    }.onSuccess { return true }
-    runCatching {
-      execString(authedRequest(server, path).post(EMPTY_JSON_BODY.toRequestBody(jsonMedia)).build())
-    }.onSuccess { return true }
-    return runCatching {
-      execString(authedRequest(server, "/UserItems/$itemId/UserData").delete().build())
-    }.isSuccess
-  }
-
-  /**
-   * 清除服务器上该条目的**播放进度**（下载完成后顺手调用，见「下载完成后清除服务端播放进度」开关）。
-   *
-   * 只把 PlaybackPositionTicks 归零，**不动已看标记** —— 片子已经落到本地了，
-   * 服务器再挂着「看到第 42 分钟」只会让「继续观看」里多一条没用的记录；
-   * 但「有没有看过」是用户自己的档案，不该被一次下载动作改掉。
-   *
-   * 两种请求形态兜底（不同服务端实现认的不一样）：
-   * 1. `POST /Users/{uid}/Items/{id}/UserData` + `{"PlaybackPositionTicks":0}`（官方形态）；
-   * 2. 退回 `DELETE /UserItems/{id}/UserData`（部分兼容层只认这条，代价是连已看一起清）。
-   * 两者都失败返回 false —— 调用方静默忽略，下载本身早已成功，不该因此报错。
-   */
-  fun clearPlaybackPosition(server: EmbyServer, itemId: String): Boolean {
-    val path = "/Users/${server.userId}/Items/$itemId/UserData"
-    runCatching {
-      execString(
-        authedRequest(server, path)
-          .post("""{"PlaybackPositionTicks":0}""".toRequestBody(jsonMedia))
-          .build(),
-      )
-    }.onSuccess { return true }
-    return runCatching {
-      execString(authedRequest(server, "/UserItems/$itemId/UserData").delete().build())
-    }.isSuccess
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
+  // 3.4 Read-only stream URL resolution
   // 3.4 直链（302）预解析
   // ════════════════════════════════════════════════════════════════════════
 
@@ -2130,7 +1830,6 @@ object EmbyClient {
   fun resolveStreamUrl(
     server: EmbyServer,
     itemId: String,
-    static: Boolean = true,
     attempts: Int = 2,
     /**
      * 多版本媒体要指定的版本（`MediaSources[i].Id`）。null = 不指定，由服务端挑默认版本。
@@ -2150,17 +1849,16 @@ object EmbyClient {
      */
     callTimeoutMs: Long = STREAM_PROBE_CALL_TIMEOUT_MS,
   ): StreamProbe {
-    val original = videoStreamUrl(server, itemId, static = static, mediaSourceId = mediaSourceId)
+    val original = videoStreamUrl(server, itemId, mediaSourceId = mediaSourceId)
     repeat(attempts.coerceAtLeast(1)) {
       val outcome = runCatching {
-        val req = Request.Builder()
-          .url(original)
+        val req = identityRequest(server, original)
           // 只取 1 个字节：既让服务端走完整跳转链，又不真的下载内容
           .header("Range", "bytes=0-0")
           // ⚠️ 必须显式带上与播放器一致的 UA。网盘直链（115 这类）的签名常把 UA
           // 算进去：探测用 OkHttp 默认 UA 拿到直链、再交给 mpv 用另一套 UA 去请求，
           // 服务端就会以 403 拒绝 —— 现象是「解析成功、播放必失败」。
-          .header("User-Agent", STREAM_USER_AGENT)
+          .header("User-Agent", server.userAgent)
           .get()
           .build()
         val call = httpClient.newCall(req)
@@ -2193,7 +1891,7 @@ object EmbyClient {
             }
           }
         }
-      }.getOrNull()
+      }.getOrElse { error -> if (error is CancellationException) throw error else null }
 
       // Ok / Denied 都是明确结论，立即返回。
       // Denied 不重试是关键：4xx 重试注定还是 4xx，只会多打一次 CDN。
@@ -2204,89 +1902,6 @@ object EmbyClient {
 
   /** 能把一条流地址判死的 HTTP 状态码（见 [resolveStreamUrl] 的判定口径）。 */
   private val DENIED_STREAM_CODES = setOf(401, 403, 404, 410)
-
-  /**
-   * 预热专用 client：**不跟 302**。
-   *
-   * 这一点是本类最关键的取舍，见 [warmStream]。
-   */
-  private val streamWarmClient: OkHttpClient by lazy {
-    httpClient.newBuilder()
-      .followRedirects(false)
-      .followSslRedirects(false)
-      .build()
-  }
-
-  /**
-   * 后台「预热」一条 stream 地址：让**服务端**先把 strm 的远端源 probe 完并写库。
-   *
-   * ## 它解决的是什么
-   *
-   * strm 条目在服务端还没 probe 过源文件时，`/Videos/{id}/stream` 会先让服务端去读
-   * 远端文件、把大小/时长写进库 —— 这一次能挂到分钟级（v140 的根因）。起播前的
-   * 2 秒探测只能保证「别把播放器界面卡住」，改变不了服务端本来就慢这件事。
-   *
-   * 唯一真正能让「切到下一个」变快的办法，是**在用户还没切之前**把下一条预热掉：
-   * 等用户切过去时服务端已经有缓存，请求秒回。
-   *
-   * ## 为什么不跟 302（这条决定了会不会触发 CDN 风控）
-   *
-   * `followRedirects=false` ⇒ 本次请求**只到我们自己的 Emby 服务器**，拿到那个 302
-   * 就结束。服务端要 probe 远端文件，那是服务端去读网盘/CDN，跟客户端打多少请求无关。
-   * 客户端因此**一个字节都不会打到网盘 CDN 上** —— 这正是「预热不能引发 CDN 风控」
-   * 的硬保证。
-   *
-   * 反过来 [resolveStreamUrl] 必须跟 302（它的目的就是取直链），所以那条路会碰到
-   * CDN，只允许在**起播关键路径、单条、单次**上用（见调用方）。
-   *
-   * ## 使用约束（调用方必须遵守）
-   *
-   * · **串行**：同一时刻只允许一条预热在飞（调用方用单个 Job 控制）；
-   * · **单条**：只预热「下一条」，不做整列表批量预取；
-   * · **可失败**：返回 false 就算了，绝不影响播放（预热是纯优化）。
-   *
-   * @param mediaSourceId 多版本条目要指定与播放一致的版本，否则预热的是另一个版本
-   *   （白打一次，也不会出错）
-   * @return true = 服务端已经应答（含 302），预热完成
-   */
-  fun warmStream(
-    server: EmbyServer,
-    itemId: String,
-    mediaSourceId: String? = null,
-    /**
-     * 预热是后台行为，不占起播关键路径，所以给的预算比探测宽松得多：
-     * 服务端第一次 probe 远端文件可能十几秒，这里让它跑完才有意义。
-     */
-    callTimeoutMs: Long = STREAM_WARM_CALL_TIMEOUT_MS,
-  ): Boolean {
-    val original = videoStreamUrl(server, itemId, static = true, mediaSourceId = mediaSourceId)
-    return runCatching {
-      val req = Request.Builder()
-        .url(original)
-        // 只取 1 个字节：服务端只要开始应答，probe 就已经发生了
-        .header("Range", "bytes=0-0")
-        // 与播放器、与 [resolveStreamUrl] 同一套 UA（理由见那两处注释）
-        .header("User-Agent", STREAM_USER_AGENT)
-        .get()
-        .build()
-      streamWarmClient.newCall(req).apply {
-        timeout().timeout(callTimeoutMs, TimeUnit.MILLISECONDS)
-      }.execute().use { resp ->
-        // 2xx / 3xx 都算预热成功：3xx 就是正常情况下服务端 probe 完给的跳转，
-        // 我们**故意**不跟过去（见上面的说明）。
-        resp.isSuccessful || resp.code in 300..399
-      }
-    }.getOrDefault(false)
-  }
-
-  /**
-   * 预热请求的超时（毫秒）。
-   *
-   * 比 [STREAM_PROBE_CALL_TIMEOUT_MS] 宽得多 —— 它不在任何用户等待路径上，
-   * 给得松才能让「服务端真的把 probe 跑完」这件事发生；超时也只是这一次预热白做，
-   * 下次切到该条时播放器自己再请求一次即可（行为与没有预热时一致）。
-   */
-  private const val STREAM_WARM_CALL_TIMEOUT_MS = 25_000L
 
   /**
    * 302 预解析的**单次调用上限**（毫秒）。
@@ -2330,17 +1945,17 @@ object EmbyClient {
    *         [StreamProbe.Denied] 明确不可播，`message` 是可直接展示给用户的中文原因；
    *         [StreamProbe.Unknown] 探不出来，调用方照旧播放
    */
-  fun probeStreamUrl(url: String): StreamProbe {
+  fun probeStreamUrl(
+    url: String,
+    userAgent: String = STREAM_USER_AGENT,
+    server: EmbyServer? = null,
+  ): StreamProbe {
     // 本地文件 / content:// / 本地 ISO 代理不需要探测，直接放行
     if (!url.startsWith("http://") && !url.startsWith("https://")) return StreamProbe.Ok(url)
     return runCatching {
-      val req =
-        Request.Builder()
-          .url(url)
-          .header("Range", "bytes=0-0")
-          .header("User-Agent", STREAM_USER_AGENT)
-          .get()
-          .build()
+      val builder = if (server == null) Request.Builder().url(url).header("User-Agent", userAgent)
+        else EmbyRequestHeaders.request(server, url)
+      val req = builder.header("Range", "bytes=0-0").get().build()
       val call = httpClient.newCall(req)
       call.timeout().timeout(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
       call.execute().use { resp ->
@@ -2356,108 +1971,16 @@ object EmbyClient {
           else -> StreamProbe.Denied("服务器返回 HTTP $code，无法播放")
         }
       }
-    }.getOrElse { StreamProbe.Unknown }
+    }.getOrElse { error -> if (error is CancellationException) throw error else StreamProbe.Unknown }
   }
 
   // ════════════════════════════════════════════════════════════════════════
   // 3.5 元数据操作（编辑 / 刮削 / 刷新）
   // ════════════════════════════════════════════════════════════════════════
 
-  /**
-   * 刷新 / 扫描：让服务器重新读取本地文件、或从网络刮削。
-   *
-   * @param mode MetadataRefreshMode：Default（只补新增 / 缺失）/ FullRefresh（全量重刮）/
-   *             LatestRefresh（仅补缺失字段）
-   * @param replaceAllMetadata ReplaceAllMetadata：连已存在的片名、简介一起重刮覆盖
-   * @param replaceAllImages ReplaceAllImages：重新下载并替换已有封面、背景图
-   *                         （勾选时图片模式一并提到 FullRefresh，否则服务器可能仍沿用缓存图）
-   */
-  fun refreshItem(
-    server: EmbyServer,
-    itemId: String,
-    mode: String = "Default",
-    replaceAllMetadata: Boolean = false,
-    replaceAllImages: Boolean = false,
-  ) {
-    val req = authedRequest(
-      server,
-      "/Items/$itemId/Refresh",
-      mapOf(
-        "MetadataRefreshMode" to mode,
-        "Recursive" to "true",
-        "ImageRefreshMode" to if (replaceAllImages) "FullRefresh" else "Default",
-        "ReplaceAllMetadata" to replaceAllMetadata.toString(),
-        "ReplaceAllImages" to replaceAllImages.toString(),
-      ),
-    ).post("".toRequestBody(jsonMedia))
-      .build()
-    execString(req)
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
-  // 3.6 图片管理（编辑图片：列出现有图 / 删除 / 本地上传 / 从图源搜图）
-  // ════════════════════════════════════════════════════════════════════════
-
-  /** 条目当前挂着的图片清单（GET /Items/{Id}/Images） */
+  /** Read existing item images. */
   fun getItemImages(server: EmbyServer, itemId: String): List<EmbyImageInfo> =
     execJson(authedRequest(server, "/Items/$itemId/Images").build())
-
-  /** 删除一张图片（封面 / 徽标 / 艺术图 …） */
-  fun deleteItemImage(
-    server: EmbyServer,
-    itemId: String,
-    imageType: String,
-    index: Int = 0,
-  ) {
-    val base = "/Items/$itemId/Images/$imageType/$index"
-    runCatching {
-      // Emby 4.9 起改成了 POST …/{Index}/Delete
-      execString(
-        authedRequest(server, "$base/Delete")
-          .post("".toRequestBody(jsonMedia))
-          .build(),
-      )
-    }.recoverCatching {
-      // 老版本只认 DELETE /Items/{Id}/Images/{Type}/{Index}
-      execString(authedRequest(server, base).delete().build())
-    }.getOrThrow()
-  }
-
-  /**
-   * 上传（更换）一张图片：POST /Items/{Id}/Images/{Type}。
-   *
-   * 这条接口的 body 格式各版本不一致：新版本收**原始二进制**（Content-Type 是图片 mime），
-   * 老版本只认 **base64 文本**（同样配图片 mime）。先按二进制发，被拒了再退回 base64 ——
-   * 两种都试过仍失败才抛，避免「换图一直失败但不知道为什么」。
-   */
-  fun uploadItemImage(
-    server: EmbyServer,
-    itemId: String,
-    imageType: String,
-    bytes: ByteArray,
-    mime: String,
-  ) {
-    val mediaType = mime.toMediaType()
-    val rawError = runCatching {
-      execString(
-        authedRequest(server, "/Items/$itemId/Images/$imageType")
-          .post(bytes.toRequestBody(mediaType))
-          .build(),
-      )
-    }.exceptionOrNull()
-    if (rawError == null) return
-
-    val base64 = java.util.Base64.getEncoder().encodeToString(bytes)
-    runCatching {
-      execString(
-        authedRequest(server, "/Items/$itemId/Images/$imageType")
-          .post(base64.toByteArray().toRequestBody(mediaType))
-          .build(),
-      )
-    }.onFailure {
-      throw rawError
-    }
-  }
 
   /** 可用的远程图源（GET /Items/{Id}/RemoteImages/Providers） */
   fun getRemoteImageProviders(server: EmbyServer, itemId: String): List<EmbyImageProviderInfo> =
@@ -2485,31 +2008,7 @@ object EmbyClient {
       ).build(),
     ).Images
 
-  /** 把远程搜到的那张图下载并挂到条目上（POST /Items/{Id}/RemoteImages/Download） */
-  fun downloadRemoteImage(
-    server: EmbyServer,
-    itemId: String,
-    imageType: String,
-    imageUrl: String,
-    providerName: String? = null,
-  ) {
-    val req = authedRequest(
-      server,
-      "/Items/$itemId/RemoteImages/Download",
-      mapOf(
-        // 4.9 起参数名叫 Type，老版本叫 ImageType —— 两个都带上，各自忽略不认识的那个
-        "Type" to imageType,
-        "ImageType" to imageType,
-        "ImageUrl" to imageUrl,
-        // 必须是「这张图来自哪个图源」（MetaTube / FanArt ...）。写死 Manual 会让服务器
-        // 拿错的图源去取图，MetaTube 这类外链图源基本必失败。留空时服务器自己判断。
-        "ProviderName" to providerName,
-      ),
-    ).post("".toRequestBody(jsonMedia)).build()
-    execString(req)
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
+   // ════════════════════════════════════════════════════════════════════════
   // 3.7 识别 / 刮削（Identify）
   // ════════════════════════════════════════════════════════════════════════
 
@@ -2536,52 +2035,21 @@ object EmbyClient {
     val path = "/Items/RemoteSearch/$searchType"
     // 主请求：ItemId 按字符串发
     val body = json.encodeToString(EmbyRemoteSearchQuery(SearchInfo = lookup, ItemId = itemId))
-    val first = runCatching { postJson<List<EmbyRemoteSearchResult>>(server, path, body) }
+    val first = runCatching { execJson<List<EmbyRemoteSearchResult>>(authedRequest(server, path).post(jsonBody(body)).build()) }
     if (first.isSuccess) return first.getOrThrow()
 
     // 兜底：少数版本只认数字 ItemId（严格按 OpenAPI 生成的那批），换形式再试一次。
     // 两次都失败时抛第一次的错误，它更贴近「实际用的那种形式」的问题。
     val numeric = itemId?.toLongOrNull() ?: throw first.exceptionOrNull()!!
     runCatching {
-      postJson<List<EmbyRemoteSearchResult>>(
-        server,
-        path,
-        json.encodeToString(EmbyRemoteSearchQueryNumeric(SearchInfo = lookup, ItemId = numeric)),
-      )
+      execJson<List<EmbyRemoteSearchResult>>(authedRequest(server, path).post(jsonBody(json.encodeToString(EmbyRemoteSearchQueryNumeric(SearchInfo = lookup, ItemId = numeric)))).build())
     }.getOrElse { throw first.exceptionOrNull()!! }
     // 上一行要么返回、要么抛，这里到不了；写出来是为了让编译器确认返回类型非空
     @Suppress("UNREACHABLE_CODE")
     return emptyList()
   }
 
-  /** 应用识别结果并刷新元数据（POST /Items/RemoteSearch/Apply/{Id}） */
-  fun applyRemoteSearch(
-    server: EmbyServer,
-    itemId: String,
-    result: EmbyRemoteSearchResult,
-    replaceAllImages: Boolean = false,
-  ) {
-    val req = authedRequest(
-      server,
-      "/Items/RemoteSearch/Apply/$itemId",
-      mapOf("ReplaceAllImages" to replaceAllImages.toString()),
-    ).post(json.encodeToString(result).toRequestBody(jsonMedia)).build()
-    execString(req)
-  }
-
-  /**
-   * 更新（编辑）条目元数据：PUT 完整 item 对象。
-   * Emby 以传入对象整体覆盖，因此调用方应传入「带修改后的完整 item」，避免丢字段。
-   */
-  fun updateItem(server: EmbyServer, item: EmbyItem) {
-    val body = json.encodeToString(item)
-    val req = authedRequest(server, "/Items/${item.Id}")
-      .put(body.toRequestBody(jsonMedia))
-      .build()
-    execString(req)
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
+  // Read-only raw metadata and server information
   // 3.8 演职员合并（Person 去重）：整包读写条目 / 管理员探测 / 服务端任务
   // ════════════════════════════════════════════════════════════════════════
 
@@ -2610,36 +2078,6 @@ object EmbyClient {
     )
 
   /**
-   * 回写「整份条目 JSON」。
-   *
-   * 两种形态都试：主用 `POST /Items/{id}`（官方路由，社区脚本用的也是它），
-   * 被拒就退 `PUT /Items/{id}`（本仓库原有的「编辑元数据」走的就是 PUT，在用户的服务端上已证实可用）。
-   * 哪个先由 [preferPut] 决定 —— 合并引擎会在首条做一次回读校验，
-   * 发现 POST 被「回 200 但没落库」时，把整批切到 PUT。
-   *
-   * @return true 表示服务端接受了这次写入（**不代表真的落库**，落库由调用方回读校验）
-   */
-  fun updateItemRawJson(
-    server: EmbyServer,
-    itemId: String,
-    rawJson: String,
-    preferPut: Boolean = false,
-  ): String {
-    val buildRequest = { verb: String ->
-      val builder = authedRequest(server, "/Items/$itemId")
-      val body = rawJson.toRequestBody(jsonMedia)
-      (if (verb == "PUT") builder.put(body) else builder.post(body)).build()
-    }
-    var lastError: Throwable? = null
-    for (verb in if (preferPut) listOf("PUT", "POST") else listOf("POST", "PUT")) {
-      val outcome = runCatching { execString(buildRequest(verb)) }
-      if (outcome.isSuccess) return verb
-      lastError = outcome.exceptionOrNull() ?: lastError
-    }
-    throw (lastError ?: EmbyApiException(0, "更新条目失败"))
-  }
-
-  /**
    * 当前登录账号是不是管理员。
    *
    * 为什么必须先问：改条目元数据（`POST /Items/{id}`）是**管理员操作**，
@@ -2654,7 +2092,7 @@ object EmbyClient {
       getJson<EmbyUserDetailDto>(server, "/Users/${server.userId}").Policy?.IsAdministrator == true
     }.onFailure {
       EmbyLog.warn("fetchIsAdmin 失败：${it.message} —— 保守当作无权限（写作能力会被禁掉）", it)
-    }.getOrDefault(false)
+    }.getOrElse { error -> if (error is CancellationException) throw error else false }
 
   /** 服务端定时任务清单（找「刷新人员」用） */
   fun getScheduledTasks(server: EmbyServer): List<EmbyScheduledTask> =
@@ -2662,26 +2100,7 @@ object EmbyClient {
       .onFailure { EmbyLog.warn("getScheduledTasks 失败：${it.message}", it) }
       .getOrDefault(emptyList())
 
-  /**
-   * 立刻触发一个服务端定时任务。
-   *
-   * 这是「清理孤立演员」的实现方式：**不自己去删 Person**，而是让 Emby 跑它自己的
-   * 「刷新人员」任务去回收已经没有任何作品引用的条目。
-   * 好处是**零风险**（完全走 Emby 自己的逻辑，不会误删有引用的条目），
-   * 代价是**异步** —— 接口立刻返回，实际清理要过一会儿。
-   */
-  fun runScheduledTask(server: EmbyServer, taskId: String): Boolean = runCatching {
-    execString(
-      authedRequest(server, "/ScheduledTasks/Running/$taskId")
-        .post(EMPTY_JSON_BODY.toRequestBody(jsonMedia))
-        .build(),
-    )
-    true
-  }.onFailure {
-    EmbyLog.warn("runScheduledTask($taskId) 失败：${it.message}", it)
-  }.getOrDefault(false)
-
-  // ════════════════════════════════════════════════════════════════════════
+   // ════════════════════════════════════════════════════════════════════════
   // 4. 播放进度上报（Playstate）
   // ════════════════════════════════════════════════════════════════════════
 
@@ -2724,16 +2143,16 @@ object EmbyClient {
           "AutoOpenLiveStream" to false,
           "EnableDirectPlay" to true,
           "EnableDirectStream" to true,
-          "EnableTranscoding" to true,
+          "EnableTranscoding" to false,
         ),
       ).toString()
     val info = runCatching {
       execJson<PlaybackInfoResult>(
-        authedRequest(server, "/Items/$itemId/PlaybackInfo")
-          .post(payload.toRequestBody(jsonMedia))
+        authedRequest(server, "/Items/$itemId/PlaybackInfo", mapOf("DeviceId" to server.deviceId))
+          .post(jsonBody(payload))
           .build(),
       )
-    }.getOrNull() ?: return null
+    }.getOrElse { error -> if (error is CancellationException) throw error else null } ?: return null
     val sessionId = info.PlaySessionId?.takeIf { it.isNotBlank() } ?: return null
     return sessionId to info.MediaSources?.firstOrNull()?.Id
   }
@@ -2771,7 +2190,7 @@ object EmbyClient {
     }
     val body = json.encodeToString(JsonObject.serializer(), jsonObjectOf(obj))
     val req = authedRequest(server, "/Sessions/Playing")
-      .post(body.toRequestBody(jsonMedia))
+      .post(jsonBody(body))
       .build()
     val resp = execString(req)
     // 服务端回显了就用它的（个别版本会）；没回显（204 / 空 JSON，最常见）就用我们自己的。
@@ -2816,7 +2235,7 @@ object EmbyClient {
     }
     val body = json.encodeToString(JsonObject.serializer(), jsonObjectOf(obj))
     val req = authedRequest(server, "/Sessions/Playing/Progress")
-      .post(body.toRequestBody(jsonMedia))
+      .post(jsonBody(body))
       .build()
     execString(req)
   }
@@ -2837,7 +2256,7 @@ object EmbyClient {
     }
     val body = json.encodeToString(JsonObject.serializer(), jsonObjectOf(obj))
     val req = authedRequest(server, "/Sessions/Playing/Stopped")
-      .post(body.toRequestBody(jsonMedia))
+      .post(jsonBody(body))
       .build()
     execString(req)
   }
@@ -2859,7 +2278,10 @@ object EmbyClient {
     tag: String? = null,
     maxWidth: Int = 480,
     maxHeight: Int? = null,
+    imageIndex: Int? = null,
   ): String {
+    require(imageIndex == null || imageIndex >= 0)
+    val server = EmbyHttp.sessionServer(server)
     val q = LinkedHashMap<String, String>()
     if (tag != null) q["tag"] = tag
     q["maxWidth"] = maxWidth.toString()
@@ -2869,7 +2291,8 @@ object EmbyClient {
     val qs = q.entries.joinToString("&") { (k, v) ->
       "$k=${java.net.URLEncoder.encode(v, "UTF-8")}"
     }
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Items/$itemId/Images/$imageType?$qs"
+    val indexPath = imageIndex?.let { "/$it" }.orEmpty()
+    return "${EmbyEndpoints.apiBaseUrl(server)}/Items/$itemId/Images/$imageType$indexPath?$qs"
   }
 
   /**
@@ -2893,6 +2316,7 @@ object EmbyClient {
     maxHeight: Int? = null,
     format: String? = null,
   ): String {
+    val server = EmbyHttp.sessionServer(server)
     val q = LinkedHashMap<String, String>()
     if (tag != null) q["tag"] = tag
     q["maxWidth"] = maxWidth.toString()
@@ -2903,45 +2327,25 @@ object EmbyClient {
     val qs = q.entries.joinToString("&") { (k, v) ->
       "$k=${java.net.URLEncoder.encode(v, "UTF-8")}"
     }
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Items/$itemId/Images/Primary?$qs"
+    return "${EmbyEndpoints.apiBaseUrl(server)}/Items/$itemId/Images/Primary?$qs"
   }
 
   /**
-   * 构造照片**原图下载** URL（`GET /Items/{itemId}/Download`）。
-   *
-   * 用于「保存到相册」：用户要的是相机拍出来的那个文件（含 EXIF 的 HEIC/JPEG），
-   * 而不是服务端缩放/转码后的显示图。走 Download 端点拿到的就是磁盘原文件。
-   *
-   * 注意这个端点**不带任何缩放参数**，保存大图前应提示文件可能较大。
-   */
-  fun photoDownloadUrl(
-    server: EmbyServer,
-    itemId: String,
-  ): String {
-    val q = LinkedHashMap<String, String>()
-    if (server.apiToken.isNotEmpty()) q["api_key"] = server.apiToken
-    val qs = q.entries.joinToString("&") { (k, v) ->
-      "$k=${java.net.URLEncoder.encode(v, "UTF-8")}"
-    }
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Items/$itemId/Download?$qs"
-  }
-
-  /**
-   * 构造视频流 URL（static=true 表示直接转原文件，不转码）。
-   * 适用于大多数情况；只有编码不支持的容器才需要 static=false 触发转码。
+   * 构造静态视频流 URL，直接传输原文件，不请求服务器转码。
    *
    * 调用方把这个 URL 传给 PlayerActivity，作为 mpv 的播放源。
    */
   fun videoStreamUrl(
     server: EmbyServer,
     itemId: String,
-    static: Boolean = true,
     mediaSourceId: String? = null,
     audioStreamIndex: Int? = null,
     subtitleStreamIndex: Int? = null,
   ): String {
+    val server = EmbyHttp.sessionServer(server)
     val q = LinkedHashMap<String, String>()
-    q["static"] = static.toString()
+    q["static"] = "true"
+    q["DeviceId"] = server.deviceId
     mediaSourceId?.let { q["MediaSourceId"] = it }
     audioStreamIndex?.let { q["AudioStreamIndex"] = it.toString() }
     subtitleStreamIndex?.let { q["SubtitleStreamIndex"] = it.toString() }
@@ -2949,7 +2353,7 @@ object EmbyClient {
     val qs = q.entries.joinToString("&") { (k, v) ->
       "$k=${java.net.URLEncoder.encode(v, "UTF-8")}"
     }
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Videos/$itemId/stream?$qs"
+    return "${EmbyEndpoints.apiBaseUrl(server)}/Videos/$itemId/stream?$qs"
   }
 
   /**
@@ -2980,7 +2384,7 @@ object EmbyClient {
       jsonObjectOf(
         mapOf(
           "UserId" to server.userId.takeIf { it.isNotEmpty() },
-          // 只要直连 / 直串流：这条路不希望服务器动数据（要转码另有 [transcodeStreamUrl]）
+          // 只要直连 / 直串流：不让服务器转码
           "EnableDirectPlay" to true,
           "EnableDirectStream" to true,
           "EnableTranscoding" to false,
@@ -2993,11 +2397,11 @@ object EmbyClient {
 
     val info = runCatching {
       execJson<PlaybackInfoResult>(
-        authedRequest(server, "/Items/$itemId/PlaybackInfo")
-          .post(payload.toRequestBody(jsonMedia))
+        authedRequest(server, "/Items/$itemId/PlaybackInfo", mapOf("DeviceId" to server.deviceId))
+          .post(jsonBody(payload))
           .build(),
       )
-    }.getOrNull() ?: return null
+    }.getOrElse { error -> if (error is CancellationException) throw error else null } ?: return null
 
     // ⚠️ 服务端没按 MediaSourceId 给回我们要的那个版本 ⇒ 宁可返回 null 让调用方走原路径。
     // 退回首条会把「默认版本」当成「用户选的版本」播出去 —— 那正是要修的这个 bug，
@@ -3013,139 +2417,23 @@ object EmbyClient {
     q["Static"] = "true"
     q["MediaSourceId"] = source.Id ?: mediaSourceId
     info.PlaySessionId?.let { q["PlaySessionId"] = it }
-    q["DeviceId"] = androidDeviceId(server.id.toString())
+    q["DeviceId"] = server.deviceId
     if (server.apiToken.isNotEmpty()) q["api_key"] = server.apiToken
     val qs = q.entries.joinToString("&") { (k, v) ->
       "$k=${java.net.URLEncoder.encode(v ?: "", "UTF-8")}"
     }
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Videos/$itemId/stream?$qs"
+    return "${EmbyEndpoints.apiBaseUrl(server)}/Videos/$itemId/stream?$qs"
   }
 
   /** 服务器给的 `DirectStreamUrl` 未必带 `api_key`（取决于 `AddApiKeyToDirectStreamUrl`），补上更稳。 */
   private fun ensureApiKey(url: String, server: EmbyServer): String {
-    if (server.apiToken.isEmpty()) return url
+    if (server.apiToken.isEmpty() || !EmbyEndpoints.belongsToServer(server, url)) return url
     if (url.contains("api_key=")) return url
     return url + (if (url.contains("?")) "&" else "?") + "api_key=${server.apiToken}"
   }
 
-  /**
-   * 「让**服务器转码**」后的播放地址 —— 本机解不了的文件走这条路。
-   *
-   * ## 为什么需要它
-   *
-   * [videoStreamUrl] 的 `static=true` 是「原样吐原文件」，服务器一个字节都不动。
-   * 这对「本机能解的编码」最省资源，但遇到下面这些源就一定翻车：
-   *
-   *  · **远程 STRM**：`.strm` 里指向一个远端地址，源文件是 AVI；
-   *  · **AVI + Xvid / DivX（MPEG-4 ASP）**：手机上的 MediaCodec 普遍没有
-   *    `video/mp4v-es` 解码器 —— 硬解直接不出画面，软解又常常跟不上；
-   *  · 其它老旧编码 / 容器：本机解不了，**换内核也没用**（两条路用的都是系统解码器）。
-   *
-   * 这种情况下唯一可靠的办法是**让服务器转**：Emby 侧用 ffmpeg 转成 H.264 + AAC，
-   * 客户端拿到的就是最普通的流。官方客户端、Infuse 那类第三方客户端在同样的片子上能放、
-   * 我们放不了，差别就在这一步 —— 它们会先问服务器 PlaybackInfo，服务器发现
-   * 「这个客户端不支持 mpeg4」就把转码地址给它。
-   *
-   * ## 两步（都是 Emby 官方接口）
-   *
-   * 1. `POST /Items/{id}/PlaybackInfo`，声明「只要转码」，换回 `MediaSources[0].Id`
-   *    （MediaSourceId）与 `PlaySessionId`，响应里通常还会直接给一条 `TranscodingUrl`；
-   * 2. 有 `TranscodingUrl` 就用它（服务器把参数都拼好了，最稳）；没有就自己拼
-   *    `/Videos/{id}/stream?Static=false&...` —— `Static=false` 即触发服务端转码。
-   *
-   * @param startTimeTicks 从哪开始（Emby 的 tick，1 tick = 100ns）；续播时传进来
-   * @return 可直接交给播放器的完整 URL
-   * @throws EmbyApiException 服务器拒绝转码（例如策略里关了视频转码）
-   */
-  suspend fun transcodeStreamUrl(
-    server: EmbyServer,
-    itemId: String,
-    startTimeTicks: Long = 0L,
-    maxHeight: Int = TRANSCODE_MAX_HEIGHT,
-    videoBitrate: Int = TRANSCODE_VIDEO_BITRATE,
-    audioBitrate: Int = TRANSCODE_AUDIO_BITRATE,
-    /**
-     * 多版本媒体要转码的那个版本（`MediaSources[i].Id`）。null = 由服务端挑默认版本。
-     * 不指定的话，服务器会转码它自己认定的默认源 —— 用户在详情页选了 4K 却拿到 1080P 的转码。
-     */
-    mediaSourceId: String? = null,
-  ): String {
-    // ── 1. 向服务器要一份「只转码」的播放方案 ──
-    val payload =
-      jsonObjectOf(
-        mapOf(
-          "UserId" to server.userId.takeIf { it.isNotEmpty() },
-          // 三个开关是本方法的核心：禁掉直连、禁掉直接串流、只留转码
-          "EnableDirectPlay" to false,
-          "EnableDirectStream" to false,
-          "EnableTranscoding" to true,
-          "AllowVideoStreamCopy" to false,
-          "AllowAudioStreamCopy" to false,
-          "MaxStreamingBitrate" to (videoBitrate + audioBitrate),
-          // 指定版本：服务器据此返回对应 MediaSource 的转码方案
-          "MediaSourceId" to mediaSourceId,
-        ),
-      ).toString()
-
-    val info =
-      execJson<PlaybackInfoResult>(
-        authedRequest(server, "/Items/$itemId/PlaybackInfo")
-          .post(payload.toRequestBody(jsonMedia))
-          .build(),
-      )
-
-    // 优先取用户选中的那个版本；服务端没按 MediaSourceId 过滤时退回首条
-    val source = (mediaSourceId?.let { id -> info.MediaSources?.firstOrNull { it.Id == id } }
-      ?: info.MediaSources?.firstOrNull())
-      ?: throw EmbyApiException(0, info.ErrorCode ?: "服务器没有返回可播放的媒体源（可能转码被禁用）")
-
-    // ── 2a. 服务器自己给的转码地址优先（参数齐全、已含 api_key）──
-    source.TranscodingUrl?.takeIf { it.isNotBlank() }?.let { return absolutize(server, it) }
-
-    // ── 2b. 没给就自己拼老的 /stream 端点（Static=false 即转码）──
-    val q = LinkedHashMap<String, String?>()
-    q["Static"] = "false"
-    source.Id?.let { q["MediaSourceId"] = it }
-    q["DeviceId"] = androidDeviceId(server.id.toString())
-    info.PlaySessionId?.let { q["PlaySessionId"] = it }
-    if (startTimeTicks > 0) q["StartTimeTicks"] = startTimeTicks.toString()
-    q["MaxHeight"] = maxHeight.toString()
-    q["VideoCodec"] = TRANSCODE_VIDEO_CODEC
-    q["AudioCodec"] = TRANSCODE_AUDIO_CODEC
-    q["VideoBitRate"] = videoBitrate.toString()
-    q["AudioBitRate"] = audioBitrate.toString()
-    q["TranscodingMaxAudioChannels"] = "2"
-    if (server.apiToken.isNotEmpty()) q["api_key"] = server.apiToken
-
-    val qs = q.entries.filter { it.value != null }.joinToString("&") { (k, v) ->
-      "$k=${java.net.URLEncoder.encode(v!!, "UTF-8")}"
-    }
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Videos/$itemId/stream?$qs"
-  }
-
-  /**
-   * 把服务器返回的相对地址补成完整 URL。
-   *
-   * `TranscodingUrl` 长这样：`/videos/{id}/master.m3u8?DeviceId=...&api_key=...`
-   * —— 注意它**不带 `/emby` 前缀**（虽然调用时是打在 `/emby` 下的），
-   * 所以这里统一补回 `${hostUrl}/emby`。已经是绝对地址的原样返回。
-   */
-  private fun absolutize(server: EmbyServer, url: String): String {
-    if (url.startsWith("http://") || url.startsWith("https://")) return url
-    val path = if (url.startsWith("/")) url else "/$url"
-    return EmbyEndpoints.hostUrl(server) + "/emby" + path
-  }
-
-  /**
-   * 构造「下载原始文件」URL。
-   *
-   * Emby 的 `/Items/{id}/Download` 会把服务器上的原文件以附件形式吐出（不转码），
-   * 是官方客户端「下载」用的接口；它支持 Range 请求，所以能断点续传。
-   */
-  fun itemDownloadUrl(server: EmbyServer, itemId: String): String {
-    val q = if (server.apiToken.isNotEmpty()) "?api_key=${server.apiToken}" else ""
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Items/$itemId/Download$q"
-  }
+  /** 把服务器返回的相对播放地址补成完整 URL，已经是绝对地址的原样返回。 */
+  internal fun absolutize(server: EmbyServer, url: String): String = EmbyEndpoints.resolve(server, url)
 
   /**
    * 字幕下载 URL（用于把外挂字幕交给 mpv 用 sub-file 加载）。
@@ -3158,65 +2446,12 @@ object EmbyClient {
     subtitleIndex: Int,
     format: String = "srt",
   ): String {
+    val server = EmbyHttp.sessionServer(server)
     val q = if (server.apiToken.isNotEmpty()) "?api_key=${server.apiToken}" else ""
-    return "${EmbyEndpoints.hostUrl(server)}/emby/Videos/$itemId/$mediaSourceId/Subtitles/$subtitleIndex/Stream.$format$q"
+    return "${EmbyEndpoints.apiBaseUrl(server)}/Videos/$itemId/$mediaSourceId/Subtitles/$subtitleIndex/Stream.$format$q"
   }
 
-  // ════════════════════════════════════════════════════════════════════════
-  // 5.5 播放列表（Emby 服务端）—— 实现在 EmbyPlaylists.kt，以下为转发
-  // ════════════════════════════════════════════════════════════════════════
-  // ⚠️ 与项目里**已有的本地播放列表**（Room 的 PlaylistEntity / PlaylistDao）完全是两回事：
-  // 这里的 playlist 存在 Emby 服务器上，多端共享、网页端也能看。
-  // 两者刻意不互相同步 —— 本地的是 M3U 导入 + 本地路径，Emby 的是 ItemId，两者无法可靠映射。
-  // 下面这些转发函数刻意**不用 inline**：inline + reified 泛型会要求调用方
-  // 直接依赖实现细节，而且网络调用被复制到每个调用点后更难排查。
-  // 留一层薄转发的好处是 —— 以后要在这里加统一的限流/日志/重试，只改这一处。
-  // 默认参数值必须与 EmbyPlaylists 里的**完全一致**，否则两边行为会分叉。
-
-  fun getPlaylists(
-    server: EmbyServer,
-    startIndex: Int = 0,
-    limit: Int = 100,
-  ): EmbyItemsResult = EmbyPlaylists.getPlaylists(server, startIndex, limit)
-
-  fun getPlaylistItems(
-    server: EmbyServer,
-    playlistId: String,
-    startIndex: Int = 0,
-    limit: Int = 100,
-  ): EmbyItemsResult = EmbyPlaylists.getPlaylistItems(server, playlistId, startIndex, limit)
-
-  fun createPlaylist(
-    server: EmbyServer,
-    name: String,
-    itemIds: List<String> = emptyList(),
-  ): EmbyPlaylistCreationResult = EmbyPlaylists.createPlaylist(server, name, itemIds)
-
-  fun addToPlaylist(
-    server: EmbyServer,
-    playlistId: String,
-    itemIds: List<String>,
-  ): EmbyPlaylistAddResult = EmbyPlaylists.addToPlaylist(server, playlistId, itemIds)
-
-  fun removeFromPlaylist(
-    server: EmbyServer,
-    playlistId: String,
-    entryIds: List<String>,
-  ) = EmbyPlaylists.removeFromPlaylist(server, playlistId, entryIds)
-
-  fun movePlaylistItem(
-    server: EmbyServer,
-    playlistId: String,
-    entryId: String,
-    newIndex: Int,
-  ) = EmbyPlaylists.movePlaylistItem(server, playlistId, entryId, newIndex)
-
-  fun deletePlaylist(
-    server: EmbyServer,
-    playlistId: String,
-  ) = EmbyPlaylists.deletePlaylist(server, playlistId)
-
-  // ════════════════════════════════════════════════════════════════════════
+   // ════════════════════════════════════════════════════════════════════════
   // 5.6 字幕在线搜索（Emby 服务端）—— 实现在 EmbySubtitles.kt，以下为转发
   // ════════════════════════════════════════════════════════════════════════
   // ⚠️ 与 [subtitleUrl]（拼 URL 把**服务端已有**的字幕轨交给 mpv）是两回事：
@@ -3235,13 +2470,6 @@ object EmbyClient {
     server, itemId, language, mediaSourceId, isPerfectMatch, isForced, isHearingImpaired,
   )
 
-  fun downloadRemoteSubtitle(
-    server: EmbyServer,
-    itemId: String,
-    subtitleId: String,
-    mediaSourceId: String? = null,
-  ) = EmbySubtitles.downloadRemoteSubtitle(server, itemId, subtitleId, mediaSourceId)
-
   fun downloadSubtitleStream(
     server: EmbyServer,
     itemId: String,
@@ -3256,13 +2484,13 @@ object EmbyClient {
   // `/BoxSets` 是 **Jellyfin** 的命名。Emby 官方 Java 客户端里 BoxSet 走的是
   // `CollectionServiceApi` → `/Collections`。照着 Jellyfin 的文档 / 网上教程写必然 404。
   // 另一个要记的：**参数名是 `Ids` 不是 `EntryIds`**。
-  // 口诀 —— BoxSet(Collection) 一律 `Ids`；只有 Playlist 增删条目才用 `EntryIds`。
+  // BoxSet(Collection) 查询使用 `Ids`。
   // 写错参数名服务端不报错，只是**静默不生效**（合集内容不变），极难排查。
 
   /**
    * 列出全部合集。
    *
-   * 和播放列表一样，**没有** `GET /Collections` 这种「按类型拿」的专用端点 ——
+   * **没有** `GET /Collections` 这种「按类型拿」的专用端点 ——
    * 合集本身就是一种 Item，只能走 `/Users/{id}/Items` + `IncludeItemTypes=BoxSet`。
    *
    * ⚠️ 返回里的 `ChildCount` 是服务端算的合集条目数，可能与实际差一
@@ -3293,7 +2521,7 @@ object EmbyClient {
    *
    * 对应 `GET /Collections/{Id}/Items`。
    *
-   * 不用通用 `getItems(parentId = ...)` 的理由和播放列表一样：
+   * 不用通用 `getItems(parentId = ...)`：
    * `ParentId` 传播合集 Id 时部分服务端会算成空，老实用专用端点。
    */
   fun getCollectionItems(
@@ -3316,89 +2544,7 @@ object EmbyClient {
     ),
   )
 
-  /**
-   * 新建合集。`POST /Collections`。
-   *
-   * ⚠️ **参数是 query 不是 body**（参考客户端里 `localVarPostBody = null`）。
-   * 传成 body 的话服务端会当没收到，建出一个**空的没有名字的合集**。
-   *
-   * @param name 合集名
-   * @param itemIds 初始条目（可空 = 建空合集）
-   * @param parentId 挂在哪个媒体库下；null 表示用户根
-   */
-  fun createCollection(
-    server: EmbyServer,
-    name: String,
-    itemIds: List<String> = emptyList(),
-    parentId: String? = null,
-  ): EmbyCollectionCreationResult = postJson(
-    server = server,
-    path = "/Collections",
-    bodyJson = "{}",
-    query = buildMap {
-      put("Name", name)
-      put("Ids", itemIds.joinToString(",").ifEmpty { null })
-      put("ParentId", parentId)
-      put("UserId", server.userId)
-    },
-  )
-
-  /**
-   * 往合集追加条目：`POST /Collections/{Id}/Items`。
-   *
-   * ⚠️ `Ids` 是 **query**（同 [createCollection]）。
-   * 返回体是空的，所以调用方拿不到「实际加了几条」——
-   * 重复添加是幂等的，UI 只能自己判断要不要刷新。
-   */
-  fun addToCollection(
-    server: EmbyServer,
-    collectionId: String,
-    itemIds: List<String>,
-  ): Boolean {
-    if (itemIds.isEmpty()) return true
-    val req = authedRequest(
-      server,
-      "/Collections/$collectionId/Items",
-      mapOf("Ids" to itemIds.joinToString(","), "UserId" to server.userId),
-    ).post("{}".toRequestBody(jsonMedia)).build()
-    httpClient.newCall(req).execute().use { resp ->
-      if (!resp.isSuccessful) {
-        throw EmbyApiException(resp.code, resp.body.string().ifEmpty { resp.message })
-      }
-    }
-    return true
-  }
-
-  /**
-   * 从合集移除条目：`DELETE /Collections/{Id}/Items`。
-   *
-   * ⚠️ **参数是 `Ids` 且指的是「媒体 Id」，不是合集内的条目 Id**
-   * （和 `POST /Playlists/{Id}/Items/Move` 那个 `ItemId` 正好相反，
-   * 那边要的是播放列表内的条目 Id —— 两者极易搞混）。
-   *
-   * 这是真 DELETE（不是 POST 一个 `Ids` 标记），响应体为空。
-   */
-  fun removeFromCollection(
-    server: EmbyServer,
-    collectionId: String,
-    itemIds: List<String>,
-  ): Boolean {
-    if (itemIds.isEmpty()) return true
-    val req = authedRequest(
-      server,
-      "/Collections/$collectionId/Items",
-      mapOf("Ids" to itemIds.joinToString(","))
-        .plus("UserId" to server.userId),
-    ).delete().build()
-    httpClient.newCall(req).execute().use { resp ->
-      if (!resp.isSuccessful) {
-        throw EmbyApiException(resp.code, resp.body.string().ifEmpty { resp.message })
-      }
-    }
-    return true
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
+   // ════════════════════════════════════════════════════════════════════════
   // 5.8 显示偏好（DisplayPreferences）
   // ════════════════════════════════════════════════════════════════════════
   // ⚠️ 三条容易踩空的真相，实现前务必先读完：
@@ -3446,52 +2592,7 @@ object EmbyClient {
     ),
   )
 
-  /**
-   * 写某个目标的显示偏好。**整体覆盖**（不是增量合并），所以调用方必须
-   * 先读出原有 `CustomPrefs` 再把自己的键merge 进去，否则会把别的客户端
-   * 或本客户端的其它键一起抹掉。
-   *
-   * 返回 true = 服务端收下了。注意这条路径**成功时返回空 body**，
-   * 不能拿去反序列化 —— 所以这里只判 HTTP 状态码。
-   */
-  fun postDisplayPreferences(
-    server: EmbyServer,
-    displayPreferencesId: String,
-    client: String,
-    preferences: EmbyDisplayPreferences,
-  ): Boolean {
-    val body = json.encodeToString(preferences)
-    val req = authedRequest(
-      server,
-      "/DisplayPreferences/$displayPreferencesId",
-      mapOf("UserId" to server.userId),
-    )
-      .post(body.toRequestBody(jsonMedia))
-      .header("Accept", "application/json")
-      .build()
-    httpClient.newCall(req).execute().use { resp ->
-      if (!resp.isSuccessful) {
-        throw EmbyApiException(resp.code, resp.body.string().ifEmpty { resp.message })
-      }
-    }
-    return true
-  }
 
-  // ════════════════════════════════════════════════════════════════════════
-  // 6. 辅助：基于 Android 设备 ID（用于 X-Emby-Authorization）
-  // ════════════════════════════════════════════════════════════════════════
-
-  /**
-   * 简单生成稳定的设备 ID（基于主机 + 安卓 ANDROID_ID 哈希）。
-   * Emby 用 DeviceId 标识设备，同一账号同一设备会复用会话。
-   */
-  private fun androidDeviceId(seed: String): String {
-    // 不依赖 Context（避免本类需要 Application 注入），用稳定字符串哈希
-    val raw = "mpvex-android-$seed"
-    val md = java.security.MessageDigest.getInstance("MD5")
-    val bytes = md.digest(raw.toByteArray())
-    return bytes.joinToString("") { "%02x".format(it) }.take(32)
-  }
 }
 
 /**
@@ -3577,6 +2678,9 @@ enum class EmbyErrorKind {
   }
 }
 
+/** Safe, user-facing text only: never retain HTTP bodies, URLs or credentials as a cause. */
+class EmbyEpisodeOperationException(message: String) : IllegalStateException(message)
+
 /** 把原始响应包成人话；body 只留一小段，避免塞满 Toast。 */
 private fun buildMessage(code: Int, body: String): String {
   val kind = EmbyErrorKind.of(code)
@@ -3610,13 +2714,12 @@ private fun jsonObjectOf(entries: Map<String, Any?>): JsonObject {
 /**
  * `POST /Items/{id}/PlaybackInfo` 的响应。
  *
- * 只声明 [transcodeStreamUrl] 真正用得到的那几个字段 —— Emby 的完整响应有几十个字段，
- * 靠 `ignoreUnknownKeys` 忽略掉即可（`json` 已配置）。
+ * 只声明播放会话与直连地址需要的字段，其余靠 `ignoreUnknownKeys` 忽略。
  */
 @Serializable
 private data class PlaybackInfoResult(
   val MediaSources: List<PlaybackMediaSource>? = null,
-  /** 本次转码会话 Id，自己拼 URL 时要带上，服务器靠它复用 / 回收转码进程 */
+  /** 本次播放会话 Id，指定版本的流地址需带上。 */
   val PlaySessionId: String? = null,
   /** 拿不到可用源时的错误码，例如 `NoCompatibleStream` */
   val ErrorCode: String? = null,
@@ -3627,8 +2730,6 @@ private data class PlaybackInfoResult(
 private data class PlaybackMediaSource(
   /** 即 MediaSourceId */
   val Id: String? = null,
-  /** 服务器拼好的转码地址（通常是 HLS 的 master.m3u8），优先用它 */
-  val TranscodingUrl: String? = null,
   val DirectStreamUrl: String? = null,
 )
 

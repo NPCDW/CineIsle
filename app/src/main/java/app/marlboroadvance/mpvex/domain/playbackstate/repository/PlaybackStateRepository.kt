@@ -14,13 +14,4 @@ interface PlaybackStateRepository {
    * 本地进度记录（见 [app.marlboroadvance.mpvex.domain.emby.EmbyVersionProgress]）。
    */
   suspend fun getVideoDataByTitlePrefix(prefix: String): PlaybackStateEntity?
-
-  suspend fun clearAllPlaybackStates()
-
-  suspend fun deleteByTitle(mediaTitle: String)
-
-  suspend fun updateMediaTitle(
-    oldTitle: String,
-    newTitle: String,
-  )
 }

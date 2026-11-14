@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_nav_servers">Servers</string>
+    <string name="app_nav_aggregate_search">Aggregate search</string>
+    <string name="app_nav_playback_history">Playback history</string>
+    <string name="app_nav_settings">Settings</string>
+    <string name="app_nav_home">Home</string>
+    <string name="app_nav_favorites">Favorites</string>
+    <string name="app_nav_search">Search</string>
+    <string name="app_back_to_servers">Back to servers</string>
+</resources>

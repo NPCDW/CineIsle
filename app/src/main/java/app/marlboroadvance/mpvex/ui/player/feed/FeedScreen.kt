@@ -30,13 +30,9 @@ import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.ScreenRotation
-import androidx.compose.material.icons.filled.HeartBroken
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material.icons.outlined.HeartBroken
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,8 +56,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.marlboroadvance.mpvex.ui.browser.emby.components.FavoriteHeartIcon
-import app.marlboroadvance.mpvex.ui.player.DislikeRemarkDialog
 
 /**
  * 播放器 UI 需要内核做的动作，由 Activity 实现。
@@ -77,21 +71,6 @@ interface FeedPlayerController {
   fun togglePlayPause()
 
   fun seekTo(sec: Double)
-
-  fun reload(url: String, resumeSec: Double)
-
-  fun screenshot()
-
-  fun toggleOrientation()
-
-  /**
-   * 换 mpv 内核接着播当前这条。
-   *
-   * 内置内核（ExoPlayer）的解复用器只认 mp4 / mkv / ts / flv 这一批，解码也只走
-   * 系统 MediaCodec —— 撞上 wmv / asf / rmvb，或者设备没有对应硬解且没打包软解的编码，
-   * 换几次解码器都救不回来。mpv 自带整套 ffmpeg（解复用 + 软件解码），是这条路的终点。
-   */
-  fun playInMpv()
 
   fun exit()
 }
@@ -111,10 +90,6 @@ internal fun FeedScreen(
     animationSpec = tween(220),
     label = "controls",
   )
-  // 长按「不喜欢」弹备注。放在这里而不是按钮内部，是因为弹层要用满屏宽度 ——
-  // 右侧那一列只有 48dp 宽，塞不下输入框。
-  var showDislikeRemark by remember { mutableStateOf(false) }
-
   if (item == null) {
     // 空列表：Activity 入口就该拒绝启动，这里只是兜底，避免出现「 index -1 找不到条目 」
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
@@ -163,7 +138,7 @@ internal fun FeedScreen(
       }
     }
 
-    // ── 右侧工具栏：收藏 / 截图 / 翻转 / 重载 ──
+    // ── 右侧工具栏：重载 ──
     Column(
       modifier = Modifier
         .align(Alignment.CenterEnd)
@@ -172,51 +147,6 @@ internal fun FeedScreen(
       horizontalAlignment = Alignment.CenterHorizontally,
       verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-      // 收藏：动效与 Emby 详情页是同一个组件（弹跳 → 红心径向渐变 + 外发光 →
-      // 一圈红色光环 + 8 颗金色四角星扩散淡出）。它是**状态驱动**的，所以
-      // toggleFavorite 的乐观更新一翻转，动效立刻开始，不用等服务器回包。
-      // ⚠️ 网盘内容不绑 Emby 条目（vm.embyBound = false）—— 收藏要回写服务器，
-      //    没有条目 Id 点了只会弹「操作失败」，所以整颗按钮不显示。
-      if (vm.embyBound) {
-        FeedToolButton(
-          icon = { FavoriteHeartIcon(isFavorite = item.isFavorite, isToggling = false, iconSize = 24.dp) },
-          onClick = { vm.toggleFavorite() },
-        )
-      }
-      // 「不喜欢」：单击切换、长按写备注。与 mpv / GSY 用同一枚**心碎**图标 ——
-      // 原先的「拇指向下」用户反馈看不懂（易被读成"点踩/差评"），
-      // 而这里表达的是「不想再看到这部」，与收藏（心形）是一对。
-      // 选中态用**亮红**：视界流整体是黑底大图标，红得清清楚楚。
-      if (vm.showDislike && vm.embyBound) {
-        FeedToolButton(
-          icon = {
-            Icon(
-              imageVector = if (vm.currentDislike?.active == true) {
-                Icons.Filled.HeartBroken
-              } else {
-                Icons.Outlined.HeartBroken
-              },
-              contentDescription = "不喜欢",
-              tint = if (vm.currentDislike?.active == true) {
-                Color(0xFFFF5A5A)
-              } else {
-                Color.White
-              },
-              modifier = Modifier.size(26.dp),
-            )
-          },
-          onClick = { vm.toggleDislike() },
-          onLongClick = { showDislikeRemark = true },
-        )
-      }
-      FeedToolButton(
-        icon = { Icon(Icons.Filled.PhotoCamera, contentDescription = "截图", tint = Color.White, modifier = Modifier.size(26.dp)) },
-        onClick = { controller.screenshot() },
-      )
-      FeedToolButton(
-        icon = { Icon(Icons.Filled.ScreenRotation, contentDescription = "横竖屏", tint = Color.White, modifier = Modifier.size(26.dp)) },
-        onClick = { controller.toggleOrientation() },
-      )
       FeedToolButton(
         icon = { Icon(Icons.Filled.Refresh, contentDescription = "重载", tint = Color.White, modifier = Modifier.size(26.dp)) },
         onClick = { vm.requestReload() },
@@ -285,38 +215,20 @@ internal fun FeedScreen(
       ) {
         Text(text = err, color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center)
         Spacer(modifier = Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-          Surface(
-            onClick = { vm.requestReload() },
-            shape = RoundedCornerShape(20),
-            color = Color.White.copy(alpha = 0.16f),
-          ) {
-            Text(
-              text = "重试",
-              color = Color.White,
-              modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
-          }
-          // 「换 mpv」不是重试的同义词：它换的是**内核**（解复用器 + 解码器全换）。
-          // 编码/容器本机解不了这类失败，点多少次「重试」都还是同一句话，只有这条路能过。
-          Surface(
-            onClick = { controller.playInMpv() },
-            shape = RoundedCornerShape(20),
-            color = Color.White.copy(alpha = 0.16f),
-          ) {
-            Text(
-              text = "用 mpv 播放",
-              color = Color.White,
-              modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
-          }
+        Surface(
+          onClick = { vm.requestReload() },
+          shape = RoundedCornerShape(20),
+          color = Color.White.copy(alpha = 0.16f),
+        ) {
+          Text(
+            text = "重试",
+            color = Color.White,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+          )
         }
       }
     } else {
-      // 转圈**淡出**，不做硬切。
-      // 判据已经是「帧真的画到屏幕上」了（见 ExoPlayerPool.frameOnScreen），所以这里
-      // 主要是把最后那一点点余量抹平：淡出期间画面从转圈背后浮上来，观感上就是「无缝」。
-      // 硬切的话，哪怕只差一两个 vsync 也会被看成闪了一下。
+      // mpv 真正输出首帧后淡出加载层。
       AnimatedVisibility(
         visible = !vm.buffered,
         enter = fadeIn(tween(120)),
@@ -388,46 +300,7 @@ internal fun FeedScreen(
       )
     }
 
-    // ── 阅后即焚的提示条 ──
-    vm.hint?.let { text ->
-      if (text.isNotBlank()) {
-        Box(
-          modifier = Modifier
-            .align(Alignment.BottomCenter)
-            .navigationBarsPadding()
-            .padding(bottom = 72.dp),
-        ) {
-          Surface(
-            shape = RoundedCornerShape(16),
-            color = Color.Black.copy(alpha = 0.6f),
-          ) {
-            Text(
-              text = text,
-              color = Color.White.copy(alpha = 0.85f),
-              fontSize = 12.sp,
-              modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-            )
-          }
-        }
-      }
-    }
-
-    // ── 长按「不喜欢」弹出的备注框 ──
-    // 复用 mpv 侧那份对话框：同一套文案、同一套「保存即标记」语义，
-    // 用户在三个播放器之间换来换去不用重新适应。
-    if (showDislikeRemark) {
-      DislikeRemarkDialog(
-        initialValue = vm.currentDislikeReason(),
-        showMarked = vm.currentDislike?.active == true,
-        onDismiss = { showDislikeRemark = false },
-        onConfirm = { reason ->
-          vm.saveDislikeRemark(reason)
-          showDislikeRemark = false
-        },
-      )
-    }
-
-    // ── 已到尽头 ──
+     // ── 已到尽头 ──
     if (!vm.hasNext && vm.index == vm.items.lastIndex && vm.buffered) {      Column(
         modifier = Modifier
           .align(Alignment.BottomCenter)

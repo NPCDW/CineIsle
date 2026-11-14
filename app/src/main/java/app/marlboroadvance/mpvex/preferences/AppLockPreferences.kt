@@ -115,8 +115,8 @@ class AppLockPreferences(preferenceStore: PreferenceStore) {
      * **真正离开应用**（回桌面 / 切别的 App）超过这个时长，回来才重新解锁。
      *
      * ⚠️ 判「离开应用」走的是**进程级**生命周期（`ProcessLifecycleOwner`），
-     * 不是当前 Activity 的 —— 从 MainActivity 跳本 App 的播放页（mpv / GSY 都是
-     * `singleTask`、独立任务栈）会让 MainActivity 收到 `ON_STOP`；若按 Activity
+     * 不是当前 Activity 的 —— 从 MainActivity 跳本 App 的播放页（独立 Activity）
+     * 会让 MainActivity 收到 `ON_STOP`；若按 Activity
      * 生命周期判，就变成「看多久视频 = 锁多久」，回来必被锁（太激进）。
      * 进程级 `ON_STOP` 只在**本 App 所有 Activity 都不在前台**时才派发，
      * 所以「跳自己家的播放页再回来」根本走不到这个判断。

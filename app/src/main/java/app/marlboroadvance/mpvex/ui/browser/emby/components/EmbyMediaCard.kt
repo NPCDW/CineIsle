@@ -58,6 +58,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.graphicsLayer
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
 import app.marlboroadvance.mpvex.ui.utils.pressDownScale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
@@ -82,6 +83,8 @@ fun EmbyPosterCard(
   onLongClick: ((Offset) -> Unit)? = null,
   placeholder: ImageVector = Icons.Default.Movie,
   fallbackImageUrl: String? = null,
+  contentDescription: String? = title,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   Column(modifier = modifier.width(POSTER_WIDTH)) {
     Card(
@@ -98,9 +101,10 @@ Modifier.tapAndLongPress(onClick = onClick, onLongClick = onLongClick)
         EmbyImage(
           url = imageUrl,
           fallbackUrl = fallbackImageUrl,
-          contentDescription = title,
+          contentDescription = contentDescription,
           modifier = Modifier.fillMaxSize(),
           contentScale = ContentScale.Crop,
+        server = server,
           placeholder = placeholder,
         )
 
@@ -182,6 +186,8 @@ fun EmbyWideCard(
   fallbackImageUrl: String? = null,
   remainingText: String? = null,
   showPlayButton: Boolean = true,
+  contentDescription: String? = title,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   Column(modifier = modifier.width(WIDE_WIDTH)) {
     Card(
@@ -198,9 +204,10 @@ Modifier.tapAndLongPress(onClick = onClick, onLongClick = onLongClick)
         EmbyImage(
           url = imageUrl,
           fallbackUrl = fallbackImageUrl,
-          contentDescription = title,
+          contentDescription = contentDescription,
           modifier = Modifier.fillMaxSize(),
           contentScale = ContentScale.Crop,
+        server = server,
         )
 
         // 居中播放按钮：首页「继续观看」不需要（单击进详情页，三角按钮会误导），
@@ -384,7 +391,6 @@ fun EmbyMediaCard(
    * 不传（null）则保持原来的只读行为 —— 首页横滑行、详情页推荐位这类地方
    * 不需要快捷开关，避免每张卡右上角都挂个可点按钮。
    */
-  onToggleFavorite: (() -> Unit)? = null,
   /**
    * 标题最多显示几行（默认 1，可设 2）。
    *
@@ -393,6 +399,8 @@ fun EmbyMediaCard(
    * 保持默认 1 行不变。
    */
   titleMaxLines: Int = 1,
+  contentDescription: String? = title,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   Column(modifier = if (fillWidth) modifier.fillMaxWidth() else modifier.width(style.width)) {
     Card(
@@ -407,57 +415,20 @@ Modifier.tapAndLongPress(onClick = onClick, onLongClick = onLongClick)
     ) {
       Box(modifier = Modifier.fillMaxSize()) {
         if (!mosaicUrls.isNullOrEmpty()) {
-          FolderMosaicCover(urls = mosaicUrls)
+          FolderMosaicCover(urls = mosaicUrls, server = server)
         } else {
           EmbyImage(
             url = imageUrl,
             fallbackUrl = fallbackImageUrl,
-            contentDescription = title,
+            contentDescription = contentDescription,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,
+            server = server,
             placeholder = placeholder,
           )
         }
 
-        if (onToggleFavorite != null) {
-          // 快捷收藏开关：始终显示（未收藏是描边 + 半透明白，已收藏是实心 + 主色）。
-          // 用 pointerInput 而不是 IconButton / clickable：前者会把触控区撑到 48dp 压住封面，
-          // 后者要额外引一个 import；这里只需要「点一下别穿透到卡片」，detectTapGestures
-          // 会消费掉事件，父层 Card 的单击就收不到了 —— 正是想要的。
-          // ⚠️ 回调必须过一层 rememberUpdatedState：`pointerInput(Unit)` 的 key 是常量，
-          // 手势协程只在卡片**第一次**组合时启动一次，直接捕获 onToggleFavorite 会把
-          // 那一刻的 lambda 永久焊死 —— 而它闭包里是当时那一条 item（IsFavorite=false）。
-          // 卡片按 Id 复用、组合不重启，于是之后每次点心形都还在按「收藏」算，
-          // **永远取消不掉**（「只能收藏不能取消收藏」）。与播放队列拖拽那个
-          // pointerInput 坑同源：常量 key 的手势里，任何会变的东西都得走最新值。
-          val latestToggleFavorite by rememberUpdatedState(onToggleFavorite)
-          Surface(
-            modifier = Modifier
-              .align(Alignment.TopEnd)
-              .padding(6.dp)
-              .clip(RoundedCornerShape(50))
-              .pointerInput(Unit) { detectTapGestures { latestToggleFavorite?.invoke() } },
-            shape = RoundedCornerShape(50),
-            color = if (isFavorite) {
-              MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f)
-            } else {
-              Color.Black.copy(alpha = 0.32f)
-            },
-          ) {
-            Icon(
-              imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-              contentDescription = if (isFavorite) "取消收藏" else "收藏",
-              modifier = Modifier
-                .padding(5.dp)
-                .size(15.dp),
-              tint = if (isFavorite) {
-                MaterialTheme.colorScheme.onPrimaryContainer
-              } else {
-                Color.White
-              },
-            )
-          }
-        } else if (isFavorite) {
+        if (isFavorite) {
           Surface(
             modifier = Modifier
               .align(Alignment.TopEnd)
@@ -617,21 +588,21 @@ private const val MOSAIC_SWAP_FADE_MS = 260
  * - 4 张及以上：2×2 宫格
  */
 @Composable
-private fun FolderMosaicCover(urls: List<String>) {
+private fun FolderMosaicCover(urls: List<String>, server: EmbyServer? = LocalEmbyImageServer.current) {
   val target = urls.take(4)
-  // 上层正在显示的一批 / 正在退场（留在下层）的一批；只有换图期间两层会同时绘制
-  var shown by remember { mutableStateOf(target) }
-  var outgoing by remember { mutableStateOf<List<String>?>(null) }
-  val fade = remember { Animatable(1f) }
+  // 更换来源时旧封面与淡入状态一起丢弃，不能把另一行的图片留作退场层。
+  var shown by remember(server) { mutableStateOf(target) }
+  var outgoing by remember(server) { mutableStateOf<List<String>?>(null) }
+  val fade = remember(server) { Animatable(1f) }
 
-  LaunchedEffect(target) {
+  LaunchedEffect(server, target) {
     // 首次进入（含列表滚动复用）：直接显示，不必预热 —— 这时的 tile 本来就要自己去取，
     // 再预热一遍会变成同一个地址发两次请求。
     if (target == shown) return@LaunchedEffect
     // ① 预热：把新一批都解到内存缓存里（新图此刻才下载；已缓存则几乎瞬时）
-    withTimeoutOrNull(MOSAIC_PREWARM_TIMEOUT_MS) {
+    if (server != null) withTimeoutOrNull(MOSAIC_PREWARM_TIMEOUT_MS) {
       coroutineScope {
-        target.forEach { url -> launch { prewarmMosaicTile(url) } }
+        target.forEach { url -> launch { prewarmMosaicTile(url, server) } }
       }
     }
     // ② 淡入替换：旧图留在下层不许动，新图从透明渐到不透明
@@ -644,14 +615,14 @@ private fun FolderMosaicCover(urls: List<String>) {
 
   Box(modifier = Modifier.fillMaxSize()) {
     // 下层：退场中的旧封面（保持不透明，避免淡入过程中露出卡片底色）
-    outgoing?.let { MosaicTiles(it) }
+    outgoing?.let { MosaicTiles(it, server) }
     // 上层：当前封面，换图时整体淡入
     Box(
       modifier = Modifier
         .fillMaxSize()
         .graphicsLayer { alpha = fade.value },
     ) {
-      MosaicTiles(shown)
+      MosaicTiles(shown, server)
     }
   }
 }
@@ -662,9 +633,9 @@ private fun FolderMosaicCover(urls: List<String>) {
  * ⚠️ 取消必须原样抛出（不许被 `runCatching` 吞掉）：换代 / 离开页面时这个协程会被取消，
  * 吞掉取消会让后面的「换图」步骤在已取消的协程里继续跑，画面与状态就对不上了。
  */
-private suspend fun prewarmMosaicTile(url: String) {
+private suspend fun prewarmMosaicTile(url: String, server: EmbyServer) {
   try {
-    EmbyImageLoader.load(url, MOSAIC_TILE_MAX_WIDTH)
+    EmbyImageLoader.load(server, url, MOSAIC_TILE_MAX_WIDTH)
   } catch (e: CancellationException) {
     throw e
   } catch (_: Exception) {
@@ -674,34 +645,34 @@ private suspend fun prewarmMosaicTile(url: String) {
 
 /** 宫格本体：按张数决定排版。 */
 @Composable
-private fun MosaicTiles(urls: List<String>) {
+private fun MosaicTiles(urls: List<String>, server: EmbyServer? = LocalEmbyImageServer.current) {
   val tiles = urls.take(4)
   // 兜底：空列表时什么都不画（直接索引会越界）
   if (tiles.isEmpty()) return
   when (tiles.size) {
-    1 -> MosaicTile(tiles[0], Modifier.fillMaxSize())
+    1 -> MosaicTile(tiles[0], Modifier.fillMaxSize(), server)
 
     2 -> Row(modifier = Modifier.fillMaxSize()) {
-      MosaicTile(tiles[0], Modifier.weight(1f).fillMaxHeight())
-      MosaicTile(tiles[1], Modifier.weight(1f).fillMaxHeight())
+      MosaicTile(tiles[0], Modifier.weight(1f).fillMaxHeight(), server)
+      MosaicTile(tiles[1], Modifier.weight(1f).fillMaxHeight(), server)
     }
 
     3 -> Column(modifier = Modifier.fillMaxSize()) {
       Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-        MosaicTile(tiles[0], Modifier.weight(1f).fillMaxHeight())
-        MosaicTile(tiles[1], Modifier.weight(1f).fillMaxHeight())
+        MosaicTile(tiles[0], Modifier.weight(1f).fillMaxHeight(), server)
+        MosaicTile(tiles[1], Modifier.weight(1f).fillMaxHeight(), server)
       }
-      MosaicTile(tiles[2], Modifier.weight(1f).fillMaxWidth())
+      MosaicTile(tiles[2], Modifier.weight(1f).fillMaxWidth(), server)
     }
 
     else -> Column(modifier = Modifier.fillMaxSize()) {
       Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-        MosaicTile(tiles[0], Modifier.weight(1f).fillMaxHeight())
-        MosaicTile(tiles[1], Modifier.weight(1f).fillMaxHeight())
+        MosaicTile(tiles[0], Modifier.weight(1f).fillMaxHeight(), server)
+        MosaicTile(tiles[1], Modifier.weight(1f).fillMaxHeight(), server)
       }
       Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-        MosaicTile(tiles[2], Modifier.weight(1f).fillMaxHeight())
-        MosaicTile(tiles[3], Modifier.weight(1f).fillMaxHeight())
+        MosaicTile(tiles[2], Modifier.weight(1f).fillMaxHeight(), server)
+        MosaicTile(tiles[3], Modifier.weight(1f).fillMaxHeight(), server)
       }
     }
   }
@@ -712,6 +683,7 @@ private fun MosaicTiles(urls: List<String>) {
 private fun MosaicTile(
   url: String?,
   modifier: Modifier,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   Box(
     modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
@@ -722,6 +694,7 @@ private fun MosaicTile(
         contentDescription = null,
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Crop,
+        server = server,
         // 与预热用同一个宽度：内存缓存按 URL 存（不分尺寸），不一致就会解码两遍
         maxWidth = MOSAIC_TILE_MAX_WIDTH,
       )
@@ -753,6 +726,7 @@ fun EmbyLibraryCard(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
   onLongClick: ((Offset) -> Unit)? = null,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   Card(
     modifier = modifier
@@ -770,6 +744,7 @@ Modifier.tapAndLongPress(onClick = onClick, onLongClick = onLongClick)
         contentDescription = name,
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Crop,
+        server = server,
         placeholder = icon,
       )
       // 置顶标记：右上角一枚小图钉。置顶的库本来就排在最前面，但这枚钉子能让人

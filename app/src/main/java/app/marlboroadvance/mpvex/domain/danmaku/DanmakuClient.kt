@@ -84,7 +84,7 @@ object DanmakuClient {
         val ts = System.currentTimeMillis() / 1000
         val builder = Request.Builder()
           .url(url)
-          .header("User-Agent", "CineIsle/1.2.5 (Android)")
+          .header("User-Agent", "loembyA/1.2.5 (Android)")
           .header("Accept", "application/json")
         if (credentials.isConfigured) {
           // ⚠️ 签名必须对**去掉 query 后的路径**计算（见 DanmakuSignature.pathOf）。

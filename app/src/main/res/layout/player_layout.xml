@@ -9,13 +9,6 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- GSYVideoPlayer 的渲染容器：只有内核 = GSY 时才把播放器 View 挂进来 -->
-    <FrameLayout
-        android:id="@+id/gsyContainer"
-        android:visibility="gone"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-
     <!-- ⚠️ 弹幕层：独立一层，**声明在 controls 之前** = 画在它下面、触摸也让给它。
          v118：以前它挂在 controls 那棵 Compose 树里（还是最顶上的全屏节点），
          结果整屏的 DOWN 全被它先接住，`GestureHandler` 收不到 ⇒ 点屏幕唤不出控件。

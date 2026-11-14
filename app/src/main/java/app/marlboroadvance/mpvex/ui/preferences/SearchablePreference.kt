@@ -53,33 +53,6 @@ object SearchablePreferences {
                 screen = AppearancePreferencesScreen,
             ))
             add(SearchablePreference(
-                titleRes = R.string.pref_appearance_unlimited_name_lines_title,
-                summaryRes = R.string.pref_appearance_unlimited_name_lines_summary,
-                keywords = listOf("name", "full", "truncate", "lines", "display"),
-                category = "Appearance",
-                screen = AppearancePreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_appearance_show_unplayed_old_video_label_title,
-                summaryRes = R.string.pref_appearance_show_unplayed_old_video_label_summary,
-                keywords = listOf("unplayed", "old", "label", "video", "new", "indicator"),
-                category = "Appearance",
-                screen = AppearancePreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_appearance_unplayed_old_video_days_title,
-                keywords = listOf("days", "old", "video", "threshold", "time"),
-                category = "Appearance",
-                screen = AppearancePreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_appearance_auto_scroll_title,
-                summaryRes = R.string.pref_appearance_auto_scroll_summary,
-                keywords = listOf("scroll", "auto", "last played", "resume", "position"),
-                category = "Appearance",
-                screen = AppearancePreferencesScreen,
-            ))
-            add(SearchablePreference(
                 titleRes = R.string.pref_appearance_hide_nav_labels_title,
                 summaryRes = R.string.pref_appearance_hide_nav_labels_summary,
                 keywords = listOf("navigation", "bottom bar", "labels", "icons", "tabs", "hide"),
@@ -87,63 +60,11 @@ object SearchablePreferences {
                 screen = AppearancePreferencesScreen,
             ))
 
-            // Layout preferences
-            add(SearchablePreference(
-                titleRes = R.string.pref_layout_title,
-                summaryRes = R.string.pref_layout_summary,
-                keywords = listOf("layout", "controls", "buttons", "player", "customize", "arrange"),
-                category = "Appearance",
-                screen = PlayerControlsPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_layout_top_right_controls,
-                keywords = listOf("controls", "top", "right", "landscape", "buttons"),
-                category = "Appearance",
-                screen = PlayerControlsPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_layout_bottom_right_controls,
-                keywords = listOf("controls", "bottom", "right", "landscape", "buttons"),
-                category = "Appearance",
-                screen = PlayerControlsPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_layout_bottom_left_controls,
-                keywords = listOf("controls", "bottom", "left", "landscape", "buttons"),
-                category = "Appearance",
-                screen = PlayerControlsPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_layout_portrait_bottom_controls,
-                keywords = listOf("controls", "portrait", "bottom", "buttons"),
-                category = "Appearance",
-                screen = PlayerControlsPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_appearance_hide_player_buttons_background_title,
-                summaryRes = R.string.pref_appearance_hide_player_buttons_background_summary,
-                keywords = listOf("hide", "background", "buttons", "transparent", "player"),
-                category = "Appearance",
-                screen = PlayerControlsPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_player_display_hide_player_control_time,
-                keywords = listOf("time", "hide", "controls", "disappear", "timeout", "ms"),
-                category = "Appearance",
-                screen = PlayerControlsPreferencesScreen,
-            ))
-
             // Player preferences
             add(SearchablePreference(
                 titleRes = R.string.pref_player,
                 summaryRes = R.string.pref_player_summary,
                 keywords = listOf("player", "orientation", "gestures", "controls", "playback"),
-                category = "Player",
-                screen = PlayerPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_player_orientation,
-                keywords = listOf("orientation", "landscape", "portrait", "rotate", "screen"),
                 category = "Player",
                 screen = PlayerPreferencesScreen,
             ))
@@ -173,16 +94,9 @@ object SearchablePreferences {
                 screen = PlayerPreferencesScreen,
             ))
             add(SearchablePreference(
-                titleRes = R.string.pref_autoplay_title,
-                summaryRes = R.string.pref_autoplay_summary,
-                keywords = listOf("autoplay", "playlist", "next", "previous", "folder", "navigation"),
-                category = "Player",
-                screen = PlayerPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_autoplay_next_video_title,
+                titleRes = R.string.i18n_autoplay_next_video,
                 summaryRes = R.string.pref_autoplay_next_video_summary,
-                keywords = listOf("autoplay", "next", "video", "auto", "advance", "continuous"),
+                keywords = listOf("autoplay", "next", "episode", "video", "auto", "advance", "continuous", "自动续集", "连播"),
                 category = "Player",
                 screen = PlayerPreferencesScreen,
             ))
@@ -194,14 +108,8 @@ object SearchablePreferences {
                 screen = PlayerPreferencesScreen,
             ))
             add(SearchablePreference(
-                titleRes = R.string.show_splash_ovals_on_double_tap_to_seek,
-                keywords = listOf("oval", "circle", "double tap", "seek", "visual", "feedback"),
-                category = "Player",
-                screen = PlayerPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.show_time_on_double_tap_to_seek,
-                keywords = listOf("time", "double tap", "seek", "overlay", "timestamp"),
+                titleRes = R.string.pref_player_display_hide_player_control_time,
+                keywords = listOf("time", "hide", "controls", "disappear", "timeout", "ms"),
                 category = "Player",
                 screen = PlayerPreferencesScreen,
             ))
@@ -262,12 +170,6 @@ object SearchablePreferences {
                 screen = PlayerPreferencesScreen,
             ))
             add(SearchablePreference(
-                titleRes = R.string.swap_the_volume_and_brightness_slider,
-                keywords = listOf("swap", "volume", "brightness", "slider", "left", "right"),
-                category = "Player",
-                screen = PlayerPreferencesScreen,
-            ))
-            add(SearchablePreference(
                 titleRes = R.string.pref_player_controls_show_loading_circle,
                 keywords = listOf("loading", "circle", "indicator", "buffer", "progress"),
                 category = "Player",
@@ -285,12 +187,6 @@ object SearchablePreferences {
                 //    差一个「同时」—— 按资源名挂就会永远定位不到，所以这里跟字面量对齐。
                 title = "显示控件时显示导航栏",
                 keywords = listOf("navigation bar", "controls", "system", "show", "hide", "导航栏"),
-                category = "Player",
-                screen = PlayerPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_player_display_reduce_player_animation,
-                keywords = listOf("reduce", "animation", "motion", "performance", "smooth"),
                 category = "Player",
                 screen = PlayerPreferencesScreen,
             ))
@@ -358,22 +254,6 @@ object SearchablePreferences {
                 keywords = listOf("media", "next", "gesture", "control", "forward"),
                 category = "Gestures",
                 screen = GesturePreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_gesture_tap_thumbnail_to_select_title,
-                summaryRes = R.string.pref_gesture_tap_thumbnail_to_select_summary,
-                keywords = listOf("thumbnail", "tap", "select", "play", "preview"),
-                category = "Appearance",
-                screen = AppearancePreferencesScreen,
-            ))
-
-            // Folder preferences
-            add(SearchablePreference(
-                titleRes = R.string.pref_folders_title,
-                summaryRes = R.string.pref_folders_summary,
-                keywords = listOf("folders", "blacklist", "hide", "exclude", "manage"),
-                category = "Folders",
-                screen = FoldersPreferencesScreen,
             ))
 
             // Decoder preferences
@@ -525,20 +405,6 @@ object SearchablePreferences {
                 screen = AdvancedPreferencesScreen,
             ))
             add(SearchablePreference(
-                titleRes = R.string.pref_export_settings_title,
-                summaryRes = R.string.pref_export_settings_summary,
-                keywords = listOf("export", "backup", "settings", "xml", "save"),
-                category = "Advanced",
-                screen = AdvancedPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_import_settings_title,
-                summaryRes = R.string.pref_import_settings_summary,
-                keywords = listOf("import", "restore", "settings", "xml", "load"),
-                category = "Advanced",
-                screen = AdvancedPreferencesScreen,
-            ))
-            add(SearchablePreference(
                 titleRes = R.string.pref_advanced_mpv_conf_storage_location,
                 keywords = listOf("storage", "location", "directory", "folder", "config"),
                 category = "Advanced",
@@ -557,29 +423,9 @@ object SearchablePreferences {
                 screen = AdvancedPreferencesScreen,
             ))
             add(SearchablePreference(
-                titleRes = R.string.pref_advanced_enable_recently_played_title,
-                summaryRes = R.string.pref_advanced_enable_recently_played_summary,
-                keywords = listOf("recently", "played", "history", "enable", "track"),
-                category = "Advanced",
-                screen = AdvancedPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_advanced_clear_playback_history,
-                keywords = listOf("clear", "history", "playback", "reset", "delete"),
-                category = "Advanced",
-                screen = AdvancedPreferencesScreen,
-            ))
-            add(SearchablePreference(
                 titleRes = R.string.pref_clear_config_cache_title,
                 summaryRes = R.string.pref_clear_config_cache_summary,
                 keywords = listOf("clear", "config", "cache", "mpv", "settings"),
-                category = "Advanced",
-                screen = AdvancedPreferencesScreen,
-            ))
-            add(SearchablePreference(
-                titleRes = R.string.pref_clear_thumbnail_cache_title,
-                summaryRes = R.string.pref_clear_thumbnail_cache_summary,
-                keywords = listOf("clear", "thumbnail", "cache", "preview", "images"),
                 category = "Advanced",
                 screen = AdvancedPreferencesScreen,
             ))

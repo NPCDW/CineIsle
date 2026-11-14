@@ -1,5 +1,8 @@
 package app.marlboroadvance.mpvex.ui.browser.emby
 
+import app.marlboroadvance.mpvex.domain.emby.EmbyItem
+import app.marlboroadvance.mpvex.domain.emby.EmbyItemsResult
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,6 +20,87 @@ import org.junit.Test
  */
 class PagedListTest {
   private data class Row(val id: Int)
+
+  @Test
+  fun `episode playlist pages by raw consumption dedupes and replaces current`() = runTest {
+    val current = EmbyItem(Id = "episode-175", Name = "Current", Type = "Episode")
+    val starts = mutableListOf<Int>()
+    val result = collectEpisodePlaylist(current, completeSeason = true) { start, limit ->
+      starts += start
+      val end = minOf(start + limit, 225)
+      val items = (start until end).map { index ->
+        EmbyItem(Id = "episode-$index", Name = "Server $index", Type = "Episode")
+      }.let { if (start == 100) listOf(EmbyItem(Id = "episode-99", Type = "Episode")) + it else it }
+      EmbyItemsResult(items, TotalRecordCount = 225, consumedCount = end - start)
+    }
+
+    assertEquals(listOf(0, 100, 200), starts)
+    assertEquals(225, result.items.size)
+    assertEquals((0 until 225).map { "episode-$it" }, result.items.map { it.Id })
+    assertEquals("Current", result.items[175].Name)
+    assertNull(result.warning)
+  }
+
+  @Test
+  fun `episode playlist later page failure retains collected and current with warning`() = runTest {
+    val current = EmbyItem(Id = "episode-175", Name = "Current", Type = "Episode")
+    val result = collectEpisodePlaylist(current, completeSeason = true) { start, _ ->
+      if (start >= 100) error("offline")
+      EmbyItemsResult(
+        Items = (0 until 100).map { EmbyItem(Id = "episode-$it", Type = "Episode") },
+        TotalRecordCount = 225,
+        consumedCount = 100,
+      )
+    }
+
+    assertEquals((0 until 100).map { "episode-$it" } + "episode-175", result.items.map { it.Id })
+    assertEquals("分集列表加载不完整，将播放已加载的分集", result.warning)
+  }
+
+  @Test
+  fun `episode playlist first request failure returns current with warning`() = runTest {
+    val current = EmbyItem(Id = "current", Type = "Episode")
+    val result = collectEpisodePlaylist(current, completeSeason = true) { _, _ -> error("offline") }
+
+    assertEquals(listOf(current), result.items)
+    assertEquals("获取整季分集失败，将仅播放当前集", result.warning)
+  }
+
+  @Test
+  fun `episode playlist repeated page without total cannot loop forever`() = runTest {
+    var calls = 0
+    val current = EmbyItem(Id = "episode-0", Name = "Current", Type = "Episode")
+    val result = collectEpisodePlaylist(current, completeSeason = true) { _, limit ->
+      calls++
+      EmbyItemsResult(
+        Items = (0 until limit).map { EmbyItem(Id = "episode-$it", Type = "Episode") },
+        TotalRecordCount = 0,
+        consumedCount = limit,
+      )
+    }
+
+    assertEquals(2, calls)
+    assertEquals(100, result.items.size)
+    assertEquals("分集列表加载不完整，将播放已加载的分集", result.warning)
+  }
+
+  @Test
+  fun `episode playlist repeated page with reported total cannot loop forever`() = runTest {
+    var calls = 0
+    val current = EmbyItem(Id = "episode-0", Name = "Current", Type = "Episode")
+    val result = collectEpisodePlaylist(current, completeSeason = true) { _, limit ->
+      calls++
+      EmbyItemsResult(
+        Items = (0 until limit).map { EmbyItem(Id = "episode-$it", Type = "Episode") },
+        TotalRecordCount = 10_000,
+        consumedCount = limit,
+      )
+    }
+
+    assertEquals(2, calls)
+    assertEquals(100, result.items.size)
+    assertEquals("分集列表加载不完整，将播放已加载的分集", result.warning)
+  }
 
   /** 造一页数据：id 从 [from] 开始的 [count] 条，total 是服务端报告的总数 */
   private fun loader(
@@ -261,6 +345,187 @@ class PagedListTest {
     }
     assertEquals("重复项不该把列表撑大", 10, page.items.size)
     assertFalse("一条新的都没有 ⇒ 判到底，否则会无限翻", page.hasMore)
+  }
+
+  @Test
+  fun `过滤掉的首屏继续消费到可见内容`() = runTest {
+    val starts = mutableListOf<Int>()
+    val page = PagedList<Row>(pageSize = 10, keyOf = { it.id })
+    page.reload { start, size ->
+      starts += start
+      PagedResult(
+        items = if (start == 0) emptyList() else listOf(Row(start)),
+        totalCount = 30,
+        pageSize = size,
+        consumedCount = size,
+      )
+    }
+    assertEquals(listOf(0, 10), starts)
+    assertEquals(listOf(Row(10)), page.items)
+    assertEquals(20, page.nextIndex())
+    assertTrue(page.hasMore)
+  }
+
+  @Test
+  fun `整页过滤后的追加仍使用原始位置`() = runTest {
+    val starts = mutableListOf<Int>()
+    val page = PagedList<Row>(pageSize = 10, keyOf = { it.id })
+    val load: suspend (Int, Int) -> PagedResult<Row> = { start, size ->
+      starts += start
+      PagedResult(
+        items = if (start == 10) emptyList() else listOf(Row(start)),
+        totalCount = 30,
+        pageSize = size,
+        consumedCount = size,
+      )
+    }
+    page.reload(load)
+    page.loadMore(load)
+    assertEquals(listOf(0, 10, 20), starts)
+    assertEquals(listOf(Row(0), Row(20)), page.items)
+    assertEquals(30, page.nextIndex())
+    assertFalse(page.hasMore)
+  }
+
+  @Test
+  fun `过滤后失败重试不回到第一页`() = runTest {
+    val page = PagedList<Row>(pageSize = 10, keyOf = { it.id })
+    page.reload { start, size ->
+      if (start == 10) throw IllegalStateException("超时")
+      PagedResult(emptyList(), 30, size, consumedCount = size)
+    }
+    assertEquals(10, page.nextIndex())
+    page.retry { start, size ->
+      assertEquals(10, start)
+      PagedResult(listOf(Row(start)), 30, size, consumedCount = size)
+    }
+    assertEquals(listOf(Row(10)), page.items)
+    assertNull(page.error)
+  }
+
+  @Test
+  fun `原始消费到总数后不因过滤而多拉`() = runTest {
+    val page = PagedList<Row>(pageSize = 10, keyOf = { it.id })
+    var calls = 0
+    page.reload { _, size ->
+      calls++
+      PagedResult(listOf(Row(1)), 10, size, consumedCount = 10)
+    }
+    assertEquals(1, calls)
+    assertFalse(page.hasMore)
+  }
+
+  @Test
+  fun `成功空页也可快照并按原始游标恢复续拉`() = runTest {
+    val original = PagedList<Row>(pageSize = 10, keyOf = { it.id })
+    original.reload { start, size ->
+      PagedResult(if (start == 0) listOf(Row(0)) else emptyList(), 20, size, consumedCount = size)
+    }
+    assertTrue(original.loaded)
+    assertEquals(10, original.nextIndex())
+
+    val restored = PagedList<Row>(pageSize = 10, keyOf = { it.id })
+    restored.restore(original.snapshot())
+    assertTrue(restored.loaded)
+    assertEquals(10, restored.nextIndex())
+    assertTrue(restored.hasMore)
+    assertNull(restored.error)
+    restored.loadMore { start, size ->
+      assertEquals(10, start)
+      PagedResult(listOf(Row(start)), 20, size, consumedCount = size)
+    }
+    assertEquals(listOf(Row(0), Row(10)), restored.items)
+    assertFalse(restored.hasMore)
+  }
+
+  @Test
+  fun `静默刷新保留旧内容并原子替换已加载范围`() = runTest {
+    val page = PagedList<Row>(pageSize = 2, keyOf = { it.id })
+    page.reload(loader(from = 0, limit = 2, total = 4))
+    page.loadMore(loader(from = 0, limit = 2, total = 4))
+    assertEquals(listOf(0, 1, 2, 3), page.items.map { it.id })
+
+    val starts = mutableListOf<Int>()
+    page.refresh { start, size ->
+      starts += start
+      PagedResult((start until minOf(start + size, 4)).map { Row(it + 10) }, 4, size)
+    }
+
+    assertEquals(listOf(0, 2), starts)
+    assertEquals(listOf(10, 11, 12, 13), page.items.map { it.id })
+    assertFalse(page.refreshing)
+  }
+
+  @Test
+  fun `静默刷新失败保留旧快照`() = runTest {
+    val page = PagedList<Row>(pageSize = 2, keyOf = { it.id })
+    page.reload(loader(from = 0, limit = 2, total = 2))
+    val before = page.snapshot()
+
+    page.refresh { _, _ -> error("offline") }
+
+    assertEquals(before, page.snapshot())
+    assertEquals("offline", page.error)
+    assertFalse(page.refreshing)
+  }
+
+  @Test
+  fun `静默刷新失败后的重试仍刷新而不是追加`() = runTest {
+    val page = PagedList<Row>(pageSize = 2, keyOf = { it.id })
+    page.reload(loader(from = 0, limit = 2, total = 4))
+    page.loadMore(loader(from = 0, limit = 2, total = 4))
+    page.refresh { _, _ -> error("offline") }
+
+    val starts = mutableListOf<Int>()
+    page.retry { start, size ->
+      starts += start
+      PagedResult((start until minOf(start + size, 4)).map { Row(it + 20) }, 4, size)
+    }
+
+    assertEquals(listOf(0, 2), starts)
+    assertEquals(listOf(20, 21, 22, 23), page.items.map { it.id })
+    assertNull(page.error)
+  }
+
+  @Test
+  fun `刷新期间禁止追加避免结果相互覆盖`() = runTest {
+    val page = PagedList<Row>(pageSize = 2, keyOf = { it.id })
+    page.reload(loader(from = 0, limit = 2, total = 4))
+    val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+    val refresh = async {
+      page.refresh { start, size ->
+        gate.await()
+        PagedResult((start until start + size).map(::Row), 4, size)
+      }
+    }
+    kotlinx.coroutines.yield()
+    page.loadMore { _, _ -> throw AssertionError("refreshing must block append") }
+    gate.complete(Unit)
+    refresh.await()
+    assertEquals(listOf(0, 1), page.items.map { it.id })
+  }
+
+  @Test
+  fun `updateFirst only changes matching item without moving cursor`() = runTest {
+    val page = PagedList<Row>(pageSize = 2, keyOf = { it.id })
+    page.reload(loader(from = 0, limit = 2, total = 4))
+    assertTrue(page.updateFirst({ it.id == 1 }) { Row(9) })
+    assertEquals(listOf(0, 9), page.items.map { it.id })
+    assertEquals(2, page.nextIndex())
+  }
+
+  @Test
+  fun `连续过滤请求有上限并可从游标重试`() = runTest {
+    val page = PagedList<Row>(pageSize = 10, keyOf = { it.id })
+    var calls = 0
+    page.reload { _, size ->
+      calls++
+      PagedResult(emptyList(), null, size, consumedCount = size)
+    }
+    assertEquals(50, calls)
+    assertEquals(500, page.nextIndex())
+    assertTrue(page.hasMore)
+    assertNotNull(page.error)
   }
 
   @Test

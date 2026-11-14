@@ -28,12 +28,12 @@ import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 /**
  * 分页列表的**通用底部状态行**（清单 1.1）。
  *
- * 各分页页面（收藏影片 / 标签结果 / 演员作品 / 播放历史 / 搜索…）的底部都是同一套需求：
+ * 各分页页面（收藏影片 / 标签结果 / 演员作品 / 搜索…）的底部都是同一套需求：
  * 续拉中给个提示、失败给个重试、到底给句「没有更多了」。各写一遍必然走样，
  * 所以收成一个组件，参数只有 [appending] / [hasMore] / [error] / [loadedCount]。
  *
  * 刻意**不渲染首屏加载态** —— 首屏由各页的骨架屏负责
- * （`EmbySkeletonGrid` / `EmbySkeletonHistory`）。两处都放会出现「上面一个转圈、
+ * （例如 `EmbySkeletonGrid`）。两处都放会出现「上面一个转圈、
  * 下面一个转圈」，比不给提示更让人困惑。
  *
  * 用法：放进 `LazyColumn` / `LazyVerticalGrid` 的最后一个 `item(span = …)`。
@@ -165,11 +165,13 @@ fun rememberPredictivePreloadDistance(browserPreferences: BrowserPreferences): I
 /** `LazyListState` → [PagingScrollSource] */
 @Composable
 fun androidx.compose.foundation.lazy.LazyListState.pagingSource(): PagingScrollSource {
-  val snap = androidx.compose.runtime.derivedStateOf {
-    PagingScrollSource(
-      lastVisibleIndex = { layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 },
-      totalItems = { layoutInfo.totalItemsCount },
-    )
+  val snap = androidx.compose.runtime.remember(this) {
+    androidx.compose.runtime.derivedStateOf {
+      PagingScrollSource(
+        lastVisibleIndex = { layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 },
+        totalItems = { layoutInfo.totalItemsCount },
+      )
+    }
   }
   return snap.value
 }
@@ -177,11 +179,13 @@ fun androidx.compose.foundation.lazy.LazyListState.pagingSource(): PagingScrollS
 /** `LazyGridState` → [PagingScrollSource] */
 @Composable
 fun androidx.compose.foundation.lazy.grid.LazyGridState.pagingSource(): PagingScrollSource {
-  val snap = androidx.compose.runtime.derivedStateOf {
-    PagingScrollSource(
-      lastVisibleIndex = { layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 },
-      totalItems = { layoutInfo.totalItemsCount },
-    )
+  val snap = androidx.compose.runtime.remember(this) {
+    androidx.compose.runtime.derivedStateOf {
+      PagingScrollSource(
+        lastVisibleIndex = { layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 },
+        totalItems = { layoutInfo.totalItemsCount },
+      )
+    }
   }
   return snap.value
 }

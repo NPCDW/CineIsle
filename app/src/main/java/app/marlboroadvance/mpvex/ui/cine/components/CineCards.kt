@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
@@ -46,6 +45,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImage
 import app.marlboroadvance.mpvex.ui.cine.CineBadgeUi
 import app.marlboroadvance.mpvex.ui.cine.CineMediaUi
@@ -88,6 +89,7 @@ fun CinePosterCard(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
   onLongClick: (() -> Unit)? = null,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
@@ -126,8 +128,9 @@ fun CinePosterCard(
     ) {
       if (hasImage) {
         EmbyImage(
+          server = media.imageServer ?: server,
           url = poster,
-          contentDescription = media.title,
+          contentDescription = media.item.Name,
           modifier = Modifier.fillMaxSize(),
           contentScale = ContentScale.Crop,
           // 与 CineItemMapper 的 POSTER_DECODE_WIDTH 对齐：URL 已按 420 请求，
@@ -245,6 +248,7 @@ fun CineWideCard(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
   onLongClick: (() -> Unit)? = null,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
@@ -266,6 +270,7 @@ fun CineWideCard(
         .combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
       EmbyImage(
+        server = media.imageServer ?: server,
         url = media.thumbUrl,
         fallbackUrl = media.posterUrl,
         contentDescription = media.wideTitle,
@@ -390,45 +395,6 @@ fun CineBadge(
       style = type.badge.copy(fontSize = 9.sp),
       color = fg,
       maxLines = 1,
-    )
-  }
-}
-
-/**
- * Hero 上的收藏圆钮。
- *
- * 三种状态必须能区分：已收藏（实心 primary）、未收藏（玻璃）、请求中（透明度降低）。
- * 分散写容易出现「点了没反应」的错觉 —— 所以把它收成一个组件。
- */
-@Composable
-fun CineFavoriteButton(
-  isFavorite: Boolean,
-  busy: Boolean,
-  onClick: () -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  val colors = CineTheme.colors
-  val shape = remember { CircleShape }
-
-  Box(
-    modifier = modifier
-      .size(46.dp)
-      .clip(shape)
-      .background(
-        if (isFavorite) {
-          colors.progressFill.copy(alpha = if (busy) 0.6f else 1f)
-        } else {
-          colors.badgeGhostSurface
-        },
-      )
-      .clickable(enabled = !busy, onClick = onClick),
-    contentAlignment = Alignment.Center,
-  ) {
-    Icon(
-      imageVector = if (isFavorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-      contentDescription = if (isFavorite) "取消收藏" else "收藏",
-      tint = colors.onImage,
-      modifier = Modifier.size(18.dp),
     )
   }
 }

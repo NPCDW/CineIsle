@@ -2,6 +2,7 @@ package app.marlboroadvance.mpvex.domain.emby
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonObject
 
 // ════════════════════════════════════════════════════════════════════════
@@ -46,33 +47,8 @@ data class EmbySystemInfo(
 data class EmbyItemsResult(
   val Items: List<EmbyItem> = emptyList(),
   val TotalRecordCount: Int = 0,
-)
-
-/**
- * 新建播放列表的结果（`POST /Playlists` 的响应）。
- *
- * @param Id 新建的播放列表 Id，后续所有操作都靠它
- * @param Name 服务端回显的名字
- * @param ItemAddedCount 实际加入的条数（可能小于请求数 —— 服务端会去重）
- */
-@Serializable
-data class EmbyPlaylistCreationResult(
-  val Id: String? = null,
-  val Name: String? = null,
-  val ItemAddedCount: Int = 0,
-)
-
-/**
- * 往播放列表追加条目的结果（`POST /Playlists/{Id}/Items` 的响应）。
- *
- * @param ItemAddedCount **本次真正新加入**的条数。
- *   重复添加同一批时会返回 0，所以它同时也是「是否需要刷新」的信号：
- *   为 0 就说明列表内容没变，不必重新拉一遍。
- */
-@Serializable
-data class EmbyPlaylistAddResult(
-  val Id: String? = null,
-  val ItemAddedCount: Int = 0,
+  /** Raw server positions consumed by this page; never derive offsets from filtered Items. */
+  @Transient val consumedCount: Int = Items.size,
 )
 
 /**
@@ -316,35 +292,6 @@ data class EmbyItem(
    * 只有部分部署会返回，缺了就退化成用 [Id] 顶上（Emby 自己也接受条目 Id 作为分区 Id）。
    */
   val DisplayPreferencesId: String? = null,
-  /**
-   * 播放列表条目指向的**媒体本身**的 Id（`BaseItemDto.MediaItemId`）。
-   *
-   * `GET /Playlists/{Id}/Items` 返回的每一行是一条 `PlaylistItem`（播放列表内的「条目」），
-   * 它的 [Id] 是条目自己的 Id，**不是媒体的 Id**。拿 [Id] 去请求媒体详情会拿到 404/500
-   * （服务端按媒体 Id 查不到东西）。所以播放列表里点条目进详情页必须用这个字段。
-   *
-   * 只在播放列表接口的返回里有；其它接口的条目上它恒为 null，此时继续用 [Id]。
-   */
-  val MediaItemId: String? = null,
-  /**
-   * 直播电视频道号（`BaseItemDto.ChannelNumber`，**是字符串**：常见 "12"，
-   * 也有带小数分的 "12.1"）。只有 TvChannel 类型的条目有，其余恒为 null。
-   *
-   * c1：频道网格左下角的小角标就是它（以前 [EmbyItem] 没这个字段，
-   * `EmbyLiveTvScreen` 里只能干放着台标）。
-   */
-  val ChannelNumber: String? = null,
-  /**
-   * 节目单条目的开播时间（ISO 8601 UTC，如 `2026-10-10T20:00:00Z`）。
-   *
-   * 只有 Program 类型的条目有（`BaseItemDto.StartDate`）。「正在播出」的判据就是
-   * 当前时刻夹在 [StartDate] 与 [EndDate] 之间。
-   */
-  val StartDate: String? = null,
-  /** 节目单条目的结束时间（ISO 8601 UTC，`BaseItemDto.EndDate`）。 */
-  val EndDate: String? = null,
-  /** 该节目是否正在直播（`BaseItemDto.IsLive`；重播/录播为 false）。 */
-  val IsLive: Boolean? = null,
   // ——— 照片（Photo）专属字段 ———
   // 只在使用照片专用 fields 请求（见 EmbyClient.PHOTO_FIELDS）时才可能非空，
   // 视频条目上恒为 null。全部加在末尾并给默认值，不影响既有按位置构造。
@@ -500,29 +447,6 @@ data class EmbyDisplayPreferences(
 )
 
 /**
- * 单个章节。
- *
- * 字段名与 Emby 返回的 JSON 保持一致（`StartPositionTicks` / `Name`），
- * 别自己改成驼峰 —— 少写一个 `SerialName` 就静默变成默认值 0，
- * 表现为「所有章节都叠在 0 秒」，是那种很难一眼看出来的 bug。
- */
-@Serializable
-data class EmbyChapter(
-  /** 起点，**单位是 100 纳秒**（.NET `TimeSpan`  ticks，1ms = 10000） */
-  @SerialName("StartPositionTicks") val StartPositionTicks: Long = 0,
-  val Name: String? = null,
-  @SerialName("ImageTag") val ImageTag: String? = null,
-) {
-  /**
-   * 起点毫秒。
-   *
-   * 1 tick = 100ns ⇒ 1ms = 10_000 ticks，除以 10000 正好是毫秒（不用先转微秒）。
-   * 多数服务端返回的章节起点都是整数秒，除完不会掉精度。
-   */
-  val startPositionMs: Long get() = StartPositionTicks / 10_000L
-}
-
-/**
  * 一段媒体分段（片头 / 片尾 / 前情提要 / 预告 / 广告）。
  *
  * Emby 4.7+ 原生 Intro Skip 与 TheIntroDB 等插件都走这套数据：
@@ -535,7 +459,7 @@ data class EmbyChapter(
 data class EmbyMediaSegment(
   /** 分段类型：`Intro` / `Outro` / `Recap` / `Preview` / `Commercial`（大小写随服务端） */
   @SerialName("Type") val Type: String? = null,
-  /** 起点，**单位是 100 纳秒**（同 [EmbyChapter.StartPositionTicks]） */
+  /** 起点，单位是 100 纳秒（.NET `TimeSpan` ticks，1ms = 10000） */
   @SerialName("StartTicks") val StartTicks: Long = 0,
   /** 终点，同上 */
   @SerialName("EndTicks") val EndTicks: Long = 0,
@@ -588,6 +512,11 @@ data class EmbyMediaSource(
   val Size: Long? = null,
   val Bitrate: Long? = null,
   val MediaStreams: List<EmbyMediaStream>? = null,
+  val DirectStreamUrl: String? = null,
+  val IsRemote: Boolean? = null,
+  val ItemId: String? = null,
+  val SupportsDirectPlay: Boolean? = null,
+  val SupportsDirectStream: Boolean? = null,
 )
 
 @Serializable
@@ -632,6 +561,8 @@ data class EmbyMediaStream(
   val IsExternal: Boolean? = null,
   val IsDefault: Boolean? = null,
   val IsForced: Boolean? = null,
+  val DisplayLanguage: String? = null,
+  val Title: String? = null,
 )
 
 @Serializable

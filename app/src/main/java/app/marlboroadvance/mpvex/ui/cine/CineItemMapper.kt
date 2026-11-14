@@ -28,7 +28,7 @@ import app.marlboroadvance.mpvex.ui.browser.emby.remainingSeconds
 data class CineMediaUi(
   val id: String,
   val item: EmbyItem,
-  /** 卡片标题（海报压图 / 继续观看图下） */
+  /** Full title for poster, hero, list, detail, and route fallback surfaces. */
   val title: String,
   /** 继续观看卡的标题：剧集用剧名，单集不会拿剧集名去冒充 */
   val wideTitle: String,
@@ -76,6 +76,8 @@ data class CineMediaUi(
   val genresLine: String?,
   /** 已看（详情页次操作圆钮的选中态） */
   val isPlayed: Boolean,
+  /** In-memory row used to generate every image URL in this snapshot; never saved or serialized. */
+  val imageServer: EmbyServer? = null,
 )
 
 /** 角标：[ghost] = 压图半透明白（弱），否则走 `tertiaryContainer`（强） */
@@ -105,6 +107,7 @@ private const val LOGO_DECODE_WIDTH = 660
  */
 internal fun EmbyViewModel.toCineMedia(server: EmbyServer, item: EmbyItem): CineMediaUi {
   val name = item.Name?.trim().takeUnless { it.isNullOrBlank() } ?: "未命名"
+  val fullTitle = displayTitle(item).ifBlank { "未命名" }
   val isEpisode = item.Type.equals("Episode", ignoreCase = true)
   val typeLabel = item.typeLabel()
   val seriesName = item.SeriesName?.trim().takeUnless { it.isNullOrBlank() }
@@ -192,7 +195,7 @@ internal fun EmbyViewModel.toCineMedia(server: EmbyServer, item: EmbyItem): Cine
   return CineMediaUi(
     id = item.Id.orEmpty(),
     item = item,
-    title = name,
+    title = fullTitle,
     wideTitle = if (isEpisode) seriesName ?: name else name,
     meta = meta,
     wideMeta = wideMeta,
@@ -219,6 +222,7 @@ internal fun EmbyViewModel.toCineMedia(server: EmbyServer, item: EmbyItem): Cine
       .joinToString(" · ")
       .takeUnless { it.isBlank() },
     isPlayed = item.UserData?.Played == true,
+    imageServer = server,
   )
 }
 

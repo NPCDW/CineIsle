@@ -1,5 +1,9 @@
 package app.marlboroadvance.mpvex.ui.browser.emby.discover
 
+import androidx.compose.runtime.CompositionLocalProvider
+
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
+
 import android.app.Application
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -51,11 +55,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
 import app.marlboroadvance.mpvex.domain.emby.EmbyServer
 import app.marlboroadvance.mpvex.domain.emby.EmbyTicks
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
 import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyEmptyState
 import app.marlboroadvance.mpvex.ui.browser.emby.EmbyViewModel
+import app.marlboroadvance.mpvex.ui.browser.emby.EmbyDetailScreen
+import app.marlboroadvance.mpvex.ui.browser.emby.openEmbyMediaCard
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyCardStyle
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyMediaCard
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbySectionHeader
@@ -103,6 +110,7 @@ object EmbyDiscoverScreen : Screen {
     val preferences: BrowserPreferences = koinInject()
 
     val server by embyVm.currentServer.collectAsState()
+    CompositionLocalProvider(LocalEmbyImageServer provides server) {
     val resumeItems by embyVm.resumeItems.collectAsState()
     val latestItems by embyVm.latestItems.collectAsState()
 
@@ -221,6 +229,7 @@ object EmbyDiscoverScreen : Screen {
               items(nextUp, key = { it.Id ?: it.hashCode().toString() }) { item ->
                 EmbyWideCard(
                   title = embyVm.displayTitle(item),
+                  contentDescription = item.Name,
                   subtitle = item.SeriesName ?: item.ProductionYear?.toString(),
                   imageUrl = server?.let { embyVm.imageUrl(it, item, "Backdrop", 640) },
                   fallbackImageUrl = server?.let { embyVm.imageUrl(it, item, "Primary", 640) },
@@ -229,13 +238,10 @@ object EmbyDiscoverScreen : Screen {
                   isFavorite = item.UserData?.IsFavorite == true,
                   onClick = {
                     val current = server ?: return@EmbyWideCard
-                    scope.launch {
-                      embyVm.play(
-                        current,
-                        item,
-                        EmbyTicks.ticksToSeconds(item.UserData?.PlaybackPositionTicks ?: 0L),
-                      )
-                    }
+                    openEmbyMediaCard(item,
+                      onOpenDetail = { episode -> episode.Id?.let { backStack.add(EmbyDetailScreen(it, episode.displayTitle())) } },
+                      onPlay = { media -> scope.launch { embyVm.play(current, media, EmbyTicks.ticksToSeconds(media.UserData?.PlaybackPositionTicks ?: 0L)) } },
+                    )
                   },
                 )
               }
@@ -269,7 +275,8 @@ object EmbyDiscoverScreen : Screen {
               items(similar, key = { it.item.Id ?: it.item.hashCode().toString() }) { entry ->
                 val item = entry.item
                 EmbyMediaCard(
-                  title = item.Name ?: "",
+                  title = item.displayTitle(),
+                  contentDescription = item.Name,
                   subtitle = item.ProductionYear?.toString() ?: item.Type,
                   imageUrl = server?.let { embyVm.imageUrl(it, item) },
                   progress = item.UserData?.PlayedPercentage?.takeIf { !item.UserData.Played }
@@ -279,7 +286,10 @@ object EmbyDiscoverScreen : Screen {
                   badgeText = entry.reason(),
                   onClick = {
                     val current = server ?: return@EmbyMediaCard
-                    scope.launch { embyVm.play(current, item) }
+                    openEmbyMediaCard(item,
+                      onOpenDetail = { episode -> episode.Id?.let { backStack.add(EmbyDetailScreen(it, episode.displayTitle())) } },
+                      onPlay = { media -> scope.launch { embyVm.play(current, media) } },
+                    )
                   },
                 )
               }
@@ -322,7 +332,10 @@ object EmbyDiscoverScreen : Screen {
               embyVm = embyVm,
               onClick = { item ->
                 val current = server ?: return@EmbyChunkedPosterGrid
-                scope.launch { embyVm.play(current, item) }
+                openEmbyMediaCard(item,
+                  onOpenDetail = { episode -> episode.Id?.let { backStack.add(EmbyDetailScreen(it, episode.displayTitle())) } },
+                  onPlay = { media -> scope.launch { embyVm.play(current, media) } },
+                )
               },
             )
           }
@@ -355,6 +368,7 @@ object EmbyDiscoverScreen : Screen {
           }
         }
       }
+    }
     }
   }
 }
@@ -397,7 +411,9 @@ private fun EmbyChunkedPosterGrid(
       ) {
         row.forEach { item ->
           EmbyMediaCard(
+            server = server,
             title = embyVm.displayTitle(item),
+            contentDescription = item.Name,
             subtitle = item.ProductionYear?.toString() ?: item.Type,
             imageUrl = server?.let { embyVm.imageUrl(it, item, "Primary", 480) },
             fallbackImageUrl = server?.let { embyVm.imageUrl(it, item, "Thumb", 480) },

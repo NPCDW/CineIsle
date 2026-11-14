@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="emby_search_screen_title">Search</string>
+    <string name="emby_search_aggregate_title">Search all servers</string>
+    <string name="emby_search_query_hint">Search titles and people</string>
+    <string name="emby_search_back">Back</string>
+    <string name="emby_search_clear_query">Clear search</string>
+    <string name="emby_search_history_hint">Type a title or person to search this server</string>
+    <string name="emby_search_idle">Ready</string>
+    <string name="emby_search_queued">Waiting</string>
+    <string name="emby_search_loading">Searching</string>
+    <string name="emby_search_success">%1$d results</string>
+    <string name="emby_search_empty">No matches</string>
+    <string name="emby_search_partial">Partial results</string>
+    <string name="emby_search_failed">Search failed</string>
+    <string name="emby_search_type_query">Enter a keyword to search</string>
+    <string name="emby_search_category_empty">No matches in this category</string>
+    <string name="emby_search_bounded">Showing a limited first page; refine your keyword or filters</string>
+    <string name="emby_search_source_loading">Loading server configuration</string>
+    <string name="emby_search_source_failed">Server configuration could not be refreshed. Existing results are retained.</string>
+    <string name="emby_search_no_enabled">No enabled servers</string>
+    <string name="emby_search_no_current">Open a server before searching</string>
+    <string name="emby_search_reason_auth">Authentication failed. Check the account in the desktop app.</string>
+    <string name="emby_search_reason_timeout">The request timed out.</string>
+    <string name="emby_search_reason_network">The server could not be reached.</string>
+    <string name="emby_search_reason_server">The server returned an error.</string>
+    <string name="emby_search_reason_configuration">This server’s connection configuration is invalid.</string>
+    <string name="emby_search_reason_source">The source configuration changed. Search again.</string>
+    <string name="emby_search_reason_unknown">The search request failed.</string>
+    <string name="emby_search_retry">Retry search</string>
+    <string name="emby_search_refresh_sources">Refresh servers</string>
+</resources>

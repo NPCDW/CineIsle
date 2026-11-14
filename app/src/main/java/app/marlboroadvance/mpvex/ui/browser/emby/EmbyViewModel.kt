@@ -1,58 +1,46 @@
 package app.marlboroadvance.mpvex.ui.browser.emby
 
+import app.marlboroadvance.mpvex.R
+import app.marlboroadvance.mpvex.database.repository.EmbyServerLoadState
+import app.marlboroadvance.mpvex.domain.postgres.PostgresException
+import app.marlboroadvance.mpvex.domain.postgres.PostgresFailure
 import android.app.Application
 import android.content.Intent
-import android.net.Uri
 import android.os.SystemClock
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import app.marlboroadvance.mpvex.domain.emby.EmbyClient
-import app.marlboroadvance.mpvex.domain.emby.EmbyBatchResult
-import app.marlboroadvance.mpvex.domain.emby.EmbyEndpoint
-import app.marlboroadvance.mpvex.domain.emby.EmbyExternalIdInfo
-import app.marlboroadvance.mpvex.domain.emby.EmbyFailoverController
+import app.marlboroadvance.mpvex.domain.emby.EmbyEpisodeOperationException
+import app.marlboroadvance.mpvex.domain.emby.EmbyUserData
+import app.marlboroadvance.mpvex.domain.postgres.PlaybackConfiguration
+import app.marlboroadvance.mpvex.domain.postgres.PlaybackConfigurationRepository
 import app.marlboroadvance.mpvex.domain.emby.EmbyFilterOptions
 import app.marlboroadvance.mpvex.domain.emby.EmbyImageInfo
-import app.marlboroadvance.mpvex.domain.emby.EmbyImageProviderInfo
 import app.marlboroadvance.mpvex.domain.emby.EmbyItem
-import app.marlboroadvance.mpvex.domain.emby.EmbyItemLookupInfo
+import app.marlboroadvance.mpvex.domain.emby.EmbyItemPolicy
+import app.marlboroadvance.mpvex.domain.emby.EmbyMediaSourcePolicy
 import app.marlboroadvance.mpvex.domain.emby.EmbyItemsResult
-import app.marlboroadvance.mpvex.domain.emby.EmbyRemoteImageInfo
-import app.marlboroadvance.mpvex.domain.emby.EmbyRemoteSearchResult
 import app.marlboroadvance.mpvex.domain.emby.EmbyRecentPlays
 import app.marlboroadvance.mpvex.domain.emby.EmbyRepository
 import app.marlboroadvance.mpvex.domain.emby.EmbyScanChunk
 import app.marlboroadvance.mpvex.domain.emby.EmbyScanQuery
 import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.domain.emby.playback.LoopbackPlaybackServer
+import app.marlboroadvance.mpvex.domain.emby.playback.PlaybackSpec
 import app.marlboroadvance.mpvex.domain.emby.EmbyTicks
-import app.marlboroadvance.mpvex.domain.emby.FavoriteClock
 import app.marlboroadvance.mpvex.domain.emby.StreamProbe
-import app.marlboroadvance.mpvex.domain.emby.DuplicateGroup
-import app.marlboroadvance.mpvex.domain.emby.MergeItemRef
-import app.marlboroadvance.mpvex.domain.emby.MergeOutcome
-import app.marlboroadvance.mpvex.domain.emby.MergePhase
-import app.marlboroadvance.mpvex.domain.emby.OrphanCleanOutcome
-import app.marlboroadvance.mpvex.domain.emby.PersonMergeBatch
-import app.marlboroadvance.mpvex.domain.emby.PersonMergeJournal
-import app.marlboroadvance.mpvex.domain.emby.PersonMerger
-import app.marlboroadvance.mpvex.domain.emby.PersonRef
-import app.marlboroadvance.mpvex.domain.emby.UndoOutcome
-import app.marlboroadvance.mpvex.domain.emby.autoMergeableGroups
-import app.marlboroadvance.mpvex.domain.emby.PersonMergeRule
-import app.marlboroadvance.mpvex.domain.emby.clusterDuplicatePersons
+import app.marlboroadvance.mpvex.domain.emby.displayTitle
 import app.marlboroadvance.mpvex.domain.emby.primaryImageRef
-import app.marlboroadvance.mpvex.domain.emby.toPersonRef
-import app.marlboroadvance.mpvex.domain.iso.RemoteIsoPlayback
 import app.marlboroadvance.mpvex.preferences.BrowserPreferences
-import app.marlboroadvance.mpvex.preferences.PlayerPreferences
-import app.marlboroadvance.mpvex.ui.browser.emby.displayprefs.EmbyDisplayPrefsSync
-import app.marlboroadvance.mpvex.ui.player.GsyPlayerActivity
 import app.marlboroadvance.mpvex.ui.player.PlayerActivity
-import app.marlboroadvance.mpvex.ui.player.engine.EngineKind
-import app.marlboroadvance.mpvex.ui.player.engine.reversed
+import app.marlboroadvance.mpvex.ui.player.PlayerHandoff
+import app.marlboroadvance.mpvex.ui.player.PlayerHttpHeaders
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -72,8 +60,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.java.KoinJavaComponent.inject
-import java.time.Instant
-import java.time.format.DateTimeFormatter
 
 /** 全库搜索没选任何筛选时的默认类型集：只保留可播放的视频本体 */
 private const val PERSON_TYPE = "Person"
@@ -96,57 +82,95 @@ private val CONTAINER_TYPES = setOf(
   "PhotoAlbum",
   "MusicAlbum",
   "MusicArtist",
-  "Playlist",
   "Book",
   "AudioBook",
 )
 
-/**
- * 远程 ISO 探测的总预算（毫秒）—— 见 [EmbyViewModel.prepareRemoteIso]。
- *
- * 判据只是「读 2KB 的 PVD」，正常几十毫秒就回来了。给 2.5 秒是因为第一跳可能要走
- * 服务端 / 网盘的 302 + 建连；再慢就没有探测价值：strm 指向的绝大多数是普通视频
- * （wmv / mp4），为了确认「它不是 ISO」让用户干等几分钟是纯亏。
- *
- * ⚠️ 这条预算与「302 预解析」的 2 秒（`EmbyClient` 里的
- * `STREAM_PROBE_CALL_TIMEOUT_MS`）一起构成**起播前的总等待上限**：
- * 两者都是阻塞在 `play()` 里、播放器要等它们返回才拉起 —— 少任何一道闸，
- * 「第一次点播放一直卡在加载中」就会回来。
- */
-private const val ISO_PROBE_BUDGET_MS = 2_500L
+private const val EPISODE_PLAYLIST_PAGE_SIZE = 100
+private const val EPISODE_PLAYLIST_MAX_PAGES = 1_000
+private const val EPISODE_PLAYLIST_FIRST_PAGE_WARNING = "获取整季分集失败，将仅播放当前集"
+private const val EPISODE_PLAYLIST_PARTIAL_WARNING = "分集列表加载不完整，将播放已加载的分集"
 
-/**
- * 随机播放入口「起播前预解析」的总预算（毫秒）。
- *
- * 本次解析**只为一件事**：给服务端一个「现在去 probe 这个远端文件」的机会，顺便拿到
- * 302 直链。它挡在拉起播放器之前，所以必须比 [ISO_PROBE_BUDGET_MS] 更短 —— 探不出来
- * 就按原地址播，让用户在播放器里等，而不是在列表页对着不动的一屏等。
- */
-private const val RANDOM_PREWARM_BUDGET_MS = 2_000L
-
-/**
- * 「演职员合并」的运行态快照。
- *
- * 进度**必须是 ViewModel 上的状态**而不是页面里的 `remember`：
- * 合并几十条作品要跑一两分钟，用户很可能切走再回来（甚至退到设置页），
- * 挂在组合里的话一离开就断了、回来看到的是「什么都没发生」。
- *
- * @param message 跑完/取消/失败后要给用户看的一句话；页面弹过提示后调
- *   [EmbyViewModel.clearMergeMessage] 清掉，避免旋转屏幕又弹一遍。
- */
-data class MergeUiState(
-  val running: Boolean = false,
-  /** 进度框标题（单组合并 = 保留项名字；自动合并 = 「自动合并同名 (3/12)」） */
-  val title: String = "",
-  val phase: MergePhase = MergePhase.COLLECTING,
-  val done: Int = 0,
-  val total: Int = 0,
-  /** 正在处理的作品名 / 正在扫描的演员数 */
-  val currentName: String = "",
-  val wrote: Int = 0,
-  val failed: Int = 0,
-  val message: String? = null,
+internal data class EpisodePlaylistBuildResult(
+  val items: List<EmbyItem>,
+  val warning: String? = null,
 )
+
+/** Auto mode has no trustworthy source until fresh PlaybackInfo is selected by the loopback backend. */
+internal fun requireExplicitPlaybackSource(
+  item: EmbyItem,
+  mediaSourceId: String?,
+  url: String? = null,
+) {
+  if (mediaSourceId != null) EmbyMediaSourcePolicy.requirePlayableSource(item, mediaSourceId, url)
+}
+
+/** Pure pagination core used by playback and JVM tests. Offsets always follow raw server consumption. */
+internal suspend fun collectEpisodePlaylist(
+  current: EmbyItem,
+  completeSeason: Boolean,
+  pageSize: Int = EPISODE_PLAYLIST_PAGE_SIZE,
+  maxPages: Int = EPISODE_PLAYLIST_MAX_PAGES,
+  loadPage: suspend (startIndex: Int, limit: Int) -> EmbyItemsResult,
+): EpisodePlaylistBuildResult {
+  require(pageSize > 0 && maxPages > 0)
+  val currentId = current.Id?.takeIf { it.isNotBlank() } ?: return EpisodePlaylistBuildResult(listOf(current))
+  val ordered = ArrayList<EmbyItem>()
+  val seenIds = HashSet<String>()
+  val pageSignatures = HashSet<List<String?>>()
+  var startIndex = 0
+  var totalCount = 0
+  var pageCount = 0
+  var exhausted = false
+  var warning: String? = null
+
+  while (pageCount < maxPages) {
+    val page = try {
+      loadPage(startIndex, pageSize)
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (_: Exception) {
+      warning = if (pageCount == 0) EPISODE_PLAYLIST_FIRST_PAGE_WARNING else EPISODE_PLAYLIST_PARTIAL_WARNING
+      break
+    }
+    pageCount++
+    if (page.TotalRecordCount > 0) totalCount = maxOf(totalCount, page.TotalRecordCount)
+    val signature = page.Items.map { it.Id }
+    if (!pageSignatures.add(signature)) {
+      warning = EPISODE_PLAYLIST_PARTIAL_WARNING
+      break
+    }
+    page.Items.forEach { episode ->
+      val id = episode.Id?.takeIf { it.isNotBlank() } ?: return@forEach
+      if (EmbyItemPolicy.isSupported(episode) && seenIds.add(id)) ordered += episode
+    }
+
+    val consumed = page.consumedCount
+    if (consumed <= 0) {
+      exhausted = true
+      break
+    }
+    val next = startIndex.toLong() + consumed.toLong()
+    if (next > Int.MAX_VALUE || next <= startIndex) {
+      warning = EPISODE_PLAYLIST_PARTIAL_WARNING
+      break
+    }
+    startIndex = next.toInt()
+    if (totalCount > 0 && startIndex >= totalCount) {
+      exhausted = true
+      break
+    }
+  }
+  if (!exhausted && warning == null && pageCount >= maxPages) warning = EPISODE_PLAYLIST_PARTIAL_WARNING
+
+  val currentIndex = ordered.indexOfFirst { it.Id == currentId }
+  if (currentIndex >= 0) ordered[currentIndex] = current else ordered += current
+  val result = if (completeSeason) ordered else {
+    val index = ordered.indexOfFirst { it.Id == currentId }
+    if (index >= 0) ordered.drop(index) else listOf(current)
+  }
+  return EpisodePlaylistBuildResult(result, warning)
+}
 
 /**
  * Emby 模块共享 ViewModel。
@@ -154,51 +178,57 @@ data class MergeUiState(
  * 负责：当前服务器、媒体库/继续观看/最新加入数据加载、收藏、删除、播放启动。
  * [EmbyRepository] 是 Koin 单例，因此多个页面拿到的当前服务器是一致的。
  */
-class EmbyViewModel(application: Application) : AndroidViewModel(application) {
+class EmbyViewModel(application: Application, private val boundServer: EmbyServer? = null) : AndroidViewModel(application) {
   private val repository by inject<EmbyRepository>(EmbyRepository::class.java)
-  private val playerPreferences by inject<PlayerPreferences>(PlayerPreferences::class.java)
-  private val browserPreferences by inject<BrowserPreferences>(BrowserPreferences::class.java)
-  private val displayPrefsSync by inject<EmbyDisplayPrefsSync>(EmbyDisplayPrefsSync::class.java)
-  /** 收藏时间账本：Emby 不记收藏时间，点红心时自己记一笔（见 FavoriteClock 的 KDoc） */
-  private val favoriteClock by inject<FavoriteClock>(FavoriteClock::class.java)
-  // 「聚合库」：删服务器时要级联清掉这台服务器上的聚合库（成员库 Id 全都失效了）
-  private val aggregateLibraryRepository by inject<app.marlboroadvance.mpvex.database.repository.AggregateLibraryRepository>(
-    app.marlboroadvance.mpvex.database.repository.AggregateLibraryRepository::class.java,
+  private val serverRepository by inject<app.marlboroadvance.mpvex.database.repository.EmbyServerRepository>(
+    app.marlboroadvance.mpvex.database.repository.EmbyServerRepository::class.java,
   )
-
+  private val loopback by inject<LoopbackPlaybackServer>(LoopbackPlaybackServer::class.java)
+  private val browserPreferences by inject<BrowserPreferences>(BrowserPreferences::class.java)
   val servers: StateFlow<List<EmbyServer>> = repository.servers
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-  val currentServer: StateFlow<EmbyServer?> = repository.currentServer
+  val serverLoadState: StateFlow<EmbyServerLoadState> = repository.loadState
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), EmbyServerLoadState.Loading)
+  private val _managementError = MutableStateFlow<String?>(null)
+  val managementError: StateFlow<String?> = _managementError.asStateFlow()
 
-  // ─── 主 / 备自动接管（见 EmbyFailoverController）───
-  val failoverEnabled: StateFlow<Boolean> = repository.failover.enabled
-  val failoverState: StateFlow<EmbyFailoverController.FailoverState> = repository.failover.state
+  fun refreshServers() {
+    viewModelScope.launch {
+      try {
+        repository.refreshServers()
+      } catch (cancelled: CancellationException) {
+        throw cancelled
+      } catch (failure: Exception) {
+        _managementError.value = safeServerError(failure)
+      }
+    }
+  }
 
-  fun setFailoverEnabled(on: Boolean) = repository.failover.setEnabled(on)
+  private val boundRef = boundServer?.let(EmbyServerRef::from)
+  private val boundCurrent = MutableStateFlow(boundServer?.let {
+    runCatching { repository.sessionServer(it) }.getOrNull()
+  })
+  val currentServer: StateFlow<EmbyServer?> = if (boundServer == null) repository.currentServer else boundCurrent.asStateFlow()
 
-  /** 某台服务器配的备用服务器 id（null = 没配） */
-  fun failoverBackupId(serverId: Long): Long? = repository.failover.backupIdFor(serverId)
+  init {
+    if (boundServer != null) viewModelScope.launch {
+      kotlinx.coroutines.flow.combine(serverRepository.loadState, serverRepository.sourceChanged) { state, source -> state to source }
+        .collect { (state, source) ->
+          // A transient refresh failure hides the entry, but must not erase its visit or session.
+          boundCurrent.value = nextBoundEmbyServer(
+            boundServer, boundCurrent.value, state, source, serverRepository::isCurrent,
+          ) { original -> runCatching { repository.sessionServer(original) }.getOrNull() }
+        }
+    }
+  }
 
-  /**
-   * 「主 → 备」映射，UI 用它渲染「备用：XXX」那一行。
-   *
-   * ⚠️ 不要在组合里直接调 [failoverBackupId]：那是普通函数，读的是快照，
-   * 设置完不会触发重组（v146 的「设好了但还显示未设置」就是这么来的）。
-   */
-  val failoverBackups: StateFlow<Map<Long, Long>> = repository.failover.backups
-
-  // ─── 第二地址（内网 / 公网双入口）───
-  /** 各服务器配的第二地址 */
-  val endpointAlts: StateFlow<Map<Long, EmbyEndpoint>> = repository.endpointAlts
-
-  /** 各服务器**此刻生效**的入口（可能已经自动切到第二地址） */
-  val activeEndpoints: StateFlow<Map<Long, EmbyEndpoint>> = repository.activeEndpoints
-
-  fun setAltEndpoint(serverId: Long, endpoint: EmbyEndpoint?) =
-    repository.setAltEndpoint(serverId, endpoint)
-
-  fun setFailoverBackup(serverId: Long, backupId: Long?) =
-    repository.failover.setBackup(serverId, backupId)
+  private fun requireBoundServer(server: EmbyServer) {
+    if (boundRef != null && (boundCurrent.value == null || !boundRef.matches(server) ||
+        resolveEmbyServerBinding(boundRef, serverRepository.loadState.value, serverRepository::isCurrent) == null)) {
+      throw PostgresException(PostgresFailure.SOURCE_CHANGED)
+    }
+    if (boundServer != null) repository.sessionServer(boundServer)
+  }
 
   private val _libraries = MutableStateFlow<List<EmbyItem>>(emptyList())
   val libraries: StateFlow<List<EmbyItem>> = _libraries.asStateFlow()
@@ -224,86 +254,25 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
   private val _error = MutableStateFlow<String?>(null)
   val error: StateFlow<String?> = _error.asStateFlow()
 
-  init {
-    viewModelScope.launch { refreshHome() }
-    // 主备自动切换成功后要重拉一份数据：两台服务器各自一套 Item Id，
-    // 界面留着旧数据的话，用户点任意一张卡都会打到新服务器上并 404。
-    viewModelScope.launch {
-      repository.failover.autoSwitched.collect { refreshHome() }
-    }
-    // 第二地址切换（**同一台服务器**换入口）同样必须重拉（v160）。
-    //
-    // ⚠️ 这一条原来漏了 —— 用户真机报的「服务器管理页已经显示切到第二地址，
-    // 首页却还在往第一地址拿数据，卡满 15 秒超时、点重试才走第二地址」就是它：
-    // 地址层是独立于主备的另一层（见 `EmbyEndpointResolver`），它切完只发了
-    // `switched` 事件，而全场没有一个人收，于是首页那条**已经在飞的旧请求**
-    // 只能自己跑完超时。
-    viewModelScope.launch {
-      repository.endpoints.switched.collect { refreshHome() }
-    }
-  }
-
-  // ==================== 服务器管理 ====================
-
-  /**
-   * 登录并保存服务器。
-   *
-   * @return 成功返回保存后的服务器，失败返回 null（错误信息写入 [error]）
-   */
-  suspend fun loginAndSave(
-    name: String,
-    host: String,
-    port: Int,
-    useHttps: Boolean,
-    username: String,
-    password: String,
-  ): EmbyServer? = runCatching {
-    repository.loginAndSave(name, host, port, useHttps, username, password)
-  }.onFailure { _error.value = it.message ?: "登录失败" }.getOrNull()
-
-  /** 保存已存在的服务器（host/port 填完整 URL 的场景） */
-  fun addServer(server: EmbyServer) {
-    viewModelScope.launch {
-      runCatching { repository.addServer(server) }
-        .onFailure { _error.value = it.message ?: "保存失败" }
-    }
-  }
-
-  fun updateServer(server: EmbyServer) {
-    viewModelScope.launch {
-      runCatching { repository.updateServer(server) }
-        .onFailure { _error.value = it.message ?: "保存失败" }
-    }
-  }
-
-  fun deleteServer(server: EmbyServer) {
-    viewModelScope.launch {
-      // 先级联清聚合库，再删服务器本身：反过来的话中途失败会留下
-      // 「服务器没了、聚合库还在」的孤儿行（首页 observe 不到，但管理页翻得出来）
-      runCatching { aggregateLibraryRepository.deleteByServer(server.id) }
-      runCatching { repository.deleteServer(server) }
-        .onFailure { _error.value = it.message ?: "删除失败" }
-        .onSuccess {
-          // 删掉的是当前服务器时，切到剩下的一台
-          if (currentServer.value?.id == server.id) {
-            val rest = repository.getServers().firstOrNull()
-            rest?.let { repository.setCurrentServer(it) }
-          }
-        }
-    }
-  }
+  private fun safeServerError(failure: Throwable): String =
+    getApplication<Application>().getString(embyServerErrorResource(failure))
 
   fun switchServer(server: EmbyServer) {
-    // 用「用户选择」那条路径：它额外会停掉主备自动接管，否则用户刚点到的这台
-    // 可能在主服务器恢复时被后台抢回去
+    if (boundRef != null) return
     repository.selectServerAsUser(server)
     viewModelScope.launch { refreshHome() }
   }
 
-  suspend fun relogin(server: EmbyServer): EmbyServer? =
-    runCatching { repository.relogin(server) }
-      .onFailure { _error.value = it.message ?: "重新登录失败" }
-      .getOrNull()
+  suspend fun relogin(server: EmbyServer): EmbyServer? {
+    try {
+      return repository.relogin(server)
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (failure: Exception) {
+      _error.value = safeServerError(failure)
+      return null
+    }
+  }
 
   // ==================== 数据加载 ====================
 
@@ -366,7 +335,7 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
       // 记下代：拉到一半用户切了服务器，这份数据属于上一代，写下去会冲掉新的
       val gen = homeGeneration
       val server = runCatching {
-        repository.ensureLoggedIn(repository.awaitCurrentServer())
+        currentServerOrAwait()
       }.getOrNull() ?: return@launch
       val resume = runCatching { fetchResume(server, limit = 20) }.getOrNull()
         ?: return@launch
@@ -415,7 +384,7 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
     _error.value = null
     try {
       // 冷启动时服务器是异步恢复的，这里必须等它恢复完，否则会误判成「没有服务器」
-      val server = repository.ensureLoggedIn(repository.awaitCurrentServer())
+      val server = currentServerOrAwait()
       // 等服务器的这一段也可能被新的加载取代（切服务器 / 切入口），过期就别往下走
       if (gen != homeGeneration) return
       if (server == null) {
@@ -435,7 +404,7 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
         // 写下去会把新代刚拉到的数据冲成「空 + 加载失败」。
         if (gen == homeGeneration) {
           _libraries.value = libs.getOrElse { e ->
-            _error.value = e.message ?: "加载失败"
+            _error.value = safeServerError(e)
             emptyList()
           }
         }
@@ -453,18 +422,11 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
           _latestItems.value = latest.getOrElse { emptyList() }
         }
 
-        // 显示偏好自动恢复（清单 #16）。放在数据加载**之后**：
-        // 拉回来的偏好要影响本次已经渲染的首屏，重新触发一次重组就够了，
-        // 而放在前面会让首屏用旧偏好渲染一遍再跳变。
-        // 失败**不写 _error** —— 显示偏好是锦上添花，为它把整个首页标成「加载失败」不合理。
-        // ⚠️ 把已经拉到的媒体库列表传进去：它内部按「每个媒体库一份」读偏好，
-        // 老路会**自己再发一次 /Views**，纯属重复请求。
-        if (gen == homeGeneration) {
-          runCatching {
-            displayPrefsSync.pullIfEnabled(server, libraries = libs.getOrNull())
-          }
-        }
       }
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (failure: Exception) {
+      if (gen == homeGeneration) _error.value = safeServerError(failure)
     } finally {
       // 只有最新一代能收尾：旧代把 isLoading 置 false 会让新代的骨架屏提前消失
       if (gen == homeGeneration) {
@@ -496,8 +458,15 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
    * 各个二级页面（媒体库/收藏/历史/详情）的首屏加载都应使用它，
    * 直接用 [currentServer] 的 value 会在冷启动时拿到 null 而静默不加载。
    */
-  suspend fun currentServerOrAwait(): EmbyServer? =
-    repository.ensureLoggedIn(repository.awaitCurrentServer())
+  suspend fun currentServerOrAwait(): EmbyServer? {
+    if (boundRef == null) return repository.ensureLoggedIn(repository.awaitCurrentServer())
+    val target = boundCurrent.value ?: return null
+    requireBoundServer(target)
+    val loggedIn = repository.ensureLoggedIn(target)
+    requireBoundServer(target)
+    boundCurrent.value = loggedIn
+    return loggedIn
+  }
 
   /** 加载指定父级下的媒体（供库浏览页使用） */
   suspend fun loadItems(
@@ -571,7 +540,7 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
       hasSubtitles = hasSubtitles,
       studioIds = studioIds,
     )
-    return EmbyItemsPage(result.Items, result.TotalRecordCount)
+    return EmbyItemsPage(result.Items, result.TotalRecordCount, result.consumedCount)
   }
 
   /**
@@ -586,38 +555,6 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
     query: EmbyScanQuery,
     onChunk: suspend (EmbyScanChunk) -> Unit,
   ): Int = repository.scanItems(server, query, onChunk = onChunk)
-
-  /**
-   * 直播电视频道列表（`/LiveTv/Channels`）。
-   *
-   * 频道条目的 `Type` 是 `TvChannel`，可以直接喂给 [play] 起播。
-   * 服务端没启用直播电视时返回空列表 —— 那是「没有这个功能」，不是错误。
-   */
-  suspend fun loadLiveTvChannels(server: EmbyServer): List<EmbyItem> =
-    withContext(Dispatchers.IO) { repository.getLiveTvChannels(server) }
-
-  /**
-   * 直播电视节目单（a2 + c1）。
-   *
-   * @param channelId 非 null = 单个频道的时间轴（频道详情页）；
-   *                  null = 所有频道在窗口内的节目（频道网格的「正在播出」一次拿全）
-   * @param hoursAhead 从「现在」起往后数多少小时
-   *
-   * 时间窗在这里算（ISO 8601 UTC），调用方不用碰日期格式。
-   */
-  suspend fun loadLiveTvPrograms(
-    server: EmbyServer,
-    channelId: String? = null,
-    hoursAhead: Int = 3,
-  ): List<EmbyItem> = withContext(Dispatchers.IO) {
-    val now = Instant.now()
-    repository.getLiveTvPrograms(
-      server = server,
-      channelId = channelId,
-      startTime = DateTimeFormatter.ISO_INSTANT.format(now),
-      endTime = DateTimeFormatter.ISO_INSTANT.format(now.plusSeconds(hoursAhead.toLong() * 3600)),
-    )
-  }
 
   /** 取某媒体库的筛选可选项（类型 / 标签 / 年份 / 分级），供筛选面板使用。 */
   suspend fun loadFilterOptions(
@@ -642,13 +579,13 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
     limit: Int = 50,
   ): EmbyItemsPage {
     val result = repository.getSeasons(server, seriesId, startIndex, limit)
-    if (result.TotalRecordCount > startIndex + result.Items.size) {
+    if (result.TotalRecordCount > startIndex + result.consumedCount) {
       android.util.Log.w(
         "EmbyViewModel",
         "季列表被分页截断：共 ${result.TotalRecordCount} 季，本次只取到 ${result.Items.size}",
       )
     }
-    return EmbyItemsPage(result.Items, result.TotalRecordCount)
+    return EmbyItemsPage(result.Items, result.TotalRecordCount, result.consumedCount)
   }
 
   /** 某一季下的剧集列表（分页参数见 [loadSeasons]） */
@@ -660,7 +597,7 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
     limit: Int = EPISODE_PAGE_SIZE,
   ): EmbyItemsPage {
     val result = repository.getEpisodes(server, seriesId, seasonId, startIndex, limit)
-    return EmbyItemsPage(result.Items, result.TotalRecordCount)
+    return EmbyItemsPage(result.Items, result.TotalRecordCount, result.consumedCount)
   }
 
   /**
@@ -676,9 +613,10 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
     limit: Int = 100,
     sortBy: String? = null,
     sortOrder: String? = null,
+    includeItemTypes: List<String>? = null,
   ): EmbyItemsPage {
-    val result = repository.getFavoriteItems(server, startIndex, limit, sortBy, sortOrder)
-    return EmbyItemsPage(result.Items, result.TotalRecordCount)
+    val result = repository.getFavoriteItems(server, startIndex, limit, sortBy, sortOrder, includeItemTypes)
+    return EmbyItemsPage(result.Items, result.TotalRecordCount, result.consumedCount)
   }
 
   /**
@@ -687,9 +625,6 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
    * 收藏页的「收藏时间」排序用它。读失败 / 没有记录都返回空表 —— 排序会退回
    * 入库时间当近似值，不影响页面可用。
    */
-  suspend fun favoriteMarks(server: EmbyServer): Map<String, Long> =
-    runCatching { favoriteClock.marks(server.id) }.getOrDefault(emptyMap())
-
   /**
    * 收藏的演员列表（收藏页「演员」tab）。
    *
@@ -768,18 +703,6 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
     favoriteStudiosCache = null
   }
 
-  suspend fun loadHistory(
-    server: EmbyServer,
-    startIndex: Int = 0,
-    limit: Int = 60,
-  ): EmbyItemsPage {
-    val result = repository.getPlayedHistory(server, limit, startIndex)
-    return EmbyItemsPage(result.Items, result.TotalRecordCount)
-  }
-
-  suspend fun loadResume(server: EmbyServer, limit: Int = 60): List<EmbyItem> =
-    fetchResume(server, limit)
-
   /**
    * 取「继续观看」= 服务端结果 + 本地最近播放账本。
    *
@@ -845,6 +768,51 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
 
   suspend fun loadItemDetail(server: EmbyServer, itemId: String): EmbyItem =
     repository.getItem(server, itemId)
+
+  suspend fun setMediaFavorite(server: EmbyServer, item: EmbyItem, enabled: Boolean): EmbyUserData =
+    episodeRequest(server, "媒体收藏操作失败，请刷新核对状态") {
+      repository.setMediaFavorite(server, item, enabled)
+    }
+
+  suspend fun setMediaPlayed(server: EmbyServer, item: EmbyItem, enabled: Boolean): EmbyUserData =
+    episodeRequest(server, "媒体已看操作失败，请刷新核对状态") {
+      repository.setMediaPlayed(server, item, enabled)
+    }
+
+  suspend fun loadEpisodePlaybackConfiguration(server: EmbyServer): PlaybackConfiguration =
+    episodeRequest(server, "播放配置加载失败，请重试") {
+      val configurations = org.koin.java.KoinJavaComponent.get<PlaybackConfigurationRepository>(PlaybackConfigurationRepository::class.java)
+      val target = repository.sessionServer(server)
+      val configuration = configurations.snapshot(target)
+      if (!configurations.isCurrent(configuration) || configuration.serverUuid != target.remoteId ||
+        configuration.source.sourceKey != target.sourceKey || configuration.source.revision != target.sourceRevision) {
+        throw PostgresException(PostgresFailure.SOURCE_CHANGED)
+      }
+      configuration
+    }
+
+  private suspend fun <T> episodeRequest(server: EmbyServer, fallback: String, action: suspend () -> T): T {
+    try {
+      requireBoundServer(server)
+      repository.sessionServer(server)
+      val result = action()
+      currentCoroutineContext().ensureActive()
+      requireBoundServer(server)
+      repository.sessionServer(server)
+      _error.value = null
+      return result
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (failure: Exception) {
+      val message = when (failure) {
+        is EmbyEpisodeOperationException -> failure.message ?: fallback
+        is PostgresException -> safeServerError(failure)
+        else -> fallback
+      }
+      _error.value = message
+      throw EmbyEpisodeOperationException(message)
+    }
+  }
 
   /**
    * 库内搜索。
@@ -979,243 +947,10 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
         // 所以 totalCount 是**媒体部分的**总数，UI 提示截断时要说明「至少还有这么多条」。
         totalCount = media.TotalRecordCount,
         personCount = persons.size,
+        consumedCount = media.consumedCount,
       )
     }
 
-
-  // ==================== 媒体操作 ====================
-
-  /**
-   * 切换收藏。返回 [Result]：成功时携带**切换后**的状态（true = 已收藏），失败时携带异常，
-   * 由调用方决定提示文案与是否回滚本地状态 —— 详情页要据此弹 Toast，
-   * 所以这里不自己吞掉错误（内部同步写 [_error] 供其他观察者使用）。
-   *
-   * [favorite] 是要落到的**目标状态**，默认按 [item] 当前状态取反。调用方（详情页 /
-   * 媒体库卡片）在点了红心之后，应当把自己**已经乐观切换到的那个目标**显式传进来 ——
-   * 否则一旦传进来的 [item] 是旧快照，这里算出的方向就可能和用户看到的方向相反，
-   * 表现就是「红心只能点亮、取消不了」。
-   *
-   * **成败以服务器回读的真实状态为准**：兼容服务端的回执（200 + UserData）并不可信 ——
-   * 会「回 200 但没落库」。这个回读最早只做在演员收藏上（那是最先踩坑的地方），
-   * 现在媒体条目的**取消收藏**也必须做（同一个坑，用户反馈「媒体详情页红心只能点亮
-   * 不能取消」）。回执本身就与目标一致时走快路径、不回读；否则回读确认，
-   * 确认下来没生效就换更用力的写法补一次（取消收藏会补标准 DELETE），再做最终确认。
-   */
-  suspend fun toggleFavorite(
-    server: EmbyServer,
-    item: EmbyItem,
-    favorite: Boolean = item.UserData?.IsFavorite != true,
-  ): Result<Boolean> {
-    val itemId = item.Id ?: return Result.failure(IllegalArgumentException("缺少条目 Id"))
-    val target = favorite
-    val isPerson = item.Type?.equals("Person", ignoreCase = true) == true
-    val result = runCatching {
-      val data = repository.setFavorite(server, itemId, target)
-      // 回执里的状态；**只有「与目标一致」才直接采信**，否则一律回读服务器真值
-      var confirmed = data?.IsFavorite
-      var authoritative = confirmed == target
-
-      if (isPerson) {
-        // 演员收藏的回执在这类兼容服务端上不可信：返回 200、回执看似成功，
-        // 服务器却没落库（Emby Web 验证仍是未收藏）——用户碰到的「假成功」。
-        // 所以 Person 一律回读，回执只作参考。
-        // 部分服务端是「先回 200 再异步落库」，先等一拍再读，避免把刚提交的成功误判成失败
-        delay(400)
-        var read = readbackFavoriteState(server, item, itemId)
-        if (read == null) {
-          delay(600)
-          read = readbackFavoriteState(server, item, itemId)
-        }
-        if (read != null) {
-          confirmed = read
-          authoritative = true
-        }
-      } else if (!authoritative) {
-        // 媒体条目：回执没给出「等于目标」的状态（空 body / 旧值 / 解析不出），回读一次。
-        // 「取消收藏」被服务端静默忽略就是从这里被抓出来的。
-        delay(300)
-        var read = readbackFavoriteState(server, item, itemId)
-        if (read == null) {
-          delay(400)
-          read = readbackFavoriteState(server, item, itemId)
-        }
-        if (read != null) {
-          confirmed = read
-          authoritative = true
-        }
-      }
-
-      // 回读明确显示没生效：换更用力的写法再补一次，然后做最终确认。
-      // 取消收藏用 [EmbyRepository.unfavoriteHard]（补一枪标准 DELETE）——
-      // `POST .../Delete` 在部分兼容服务端上只是回 200、并不落库。
-      if (authoritative && confirmed != target) {
-        delay(200)
-        if (target) {
-          repository.setFavorite(server, itemId, true)
-        } else {
-          repository.unfavoriteHard(server, itemId)
-        }
-        delay(300)
-        readbackFavoriteState(server, item, itemId)?.let { confirmed = it }
-      }
-
-      // 只有「明确确认与目标不符」才算失败；读不到状态时不下失败结论
-      if (authoritative && confirmed != target) {
-        throw IllegalStateException(
-          if (isPerson) "服务器未接受这次收藏（该服务端可能不支持收藏演员）" else "服务器未接受这次操作",
-        )
-      }
-      target
-    }
-    // 演员的收藏状态变了：收藏页「演员」tab 的缓存不再可信，作废掉
-    if (isPerson) {
-      invalidateFavoritePersonsCache()
-    }
-    // 单条收藏的时间戳**不在这里记**：它由 EmbyRepository 的收藏方法统一落账，
-    // 这样播放器控件（EmbyPlayerActions）与视界流红心（FeedViewModel）两条旁路也覆盖到了。
-    result.exceptionOrNull()?.let { _error.value = it.message ?: "操作失败" }
-    return result
-  }
-
-  /**
-   * 收藏后回读真实状态（true=已收藏 / false=未收藏 / null=读不到，无法确认）。
-   *
-   * Person 走 [loadPersonFavoriteState]（单条轻量读 + `IsFavorite=true` 列表查询的
-   * 多路径真值读取）；媒体走 [getItem]。
-   *
-   * ⚠️ Person 不能再走 [getPersonById] 那条 `/Persons?Ids=`：它与进页面时的加载请求
-   * 是**同一个 URL**，服务端（或中间层）按 URL 缓存响应，收藏成功后回读拿到的还是
-   * 缓存里的旧 UserData（IsFavorite=false）—— 于是「明明收藏成功」被误判成
-   * 「服务器未接受」，红心回滚成灰色，体感就是点不动。换 URL 形态是对症药。
-   */
-  private suspend fun readbackFavoriteState(
-    server: EmbyServer,
-    item: EmbyItem,
-    itemId: String,
-  ): Boolean? =
-    withContext(Dispatchers.IO) {
-      runCatching {
-        if (item.Type?.equals("Person", ignoreCase = true) == true) {
-          repository.getPersonFavoriteState(server, itemId)
-        } else {
-          repository.getItem(server, itemId).UserData?.IsFavorite
-        }
-      }.getOrNull()
-    }
-
-  fun deleteItem(server: EmbyServer, itemId: String) {
-    viewModelScope.launch {
-      runCatching { repository.deleteItem(server, itemId) }
-        .onSuccess {
-          // 媒体库列表的进程内缓存同步剔除：返回媒体库时不再渲染已删除的条目
-          EmbyLibraryCache.removeItem(itemId)
-          _error.value = null
-          android.widget.Toast
-            .makeText(getApplication(), "已删除", android.widget.Toast.LENGTH_SHORT)
-            .show()
-          refreshHome()
-        }
-        .onFailure {
-          _error.value = it.message ?: "删除失败"
-          android.widget.Toast
-            .makeText(
-              getApplication(),
-              "删除失败：${it.message ?: "未知错误"}",
-              android.widget.Toast.LENGTH_LONG,
-            ).show()
-        }
-    }
-  }
-
-  /**
-   * 标记已播放 / 未播放，并把结果返回给调用方（详情页据此弹 Toast、失败时回滚 UI）。
-   *
-   * 这里刻意不做「内部 launch 后不管」：那样调用方无从得知成败，
-   * 用户点了右上角的勾却没有任何反馈，服务端失败时也看不出来。
-   */
-  /** 标记已看 / 未看。同 [toggleFavorite]：以服务器回传的 UserData 为准。
-   *
-   * a8：走 [EmbyRepository.setPlayedWithClearPosition] —— 「已看 + 清进度」
-   * 一个请求写完（旧路径只翻 Played 位，会在服务端留下陈旧的续播点）。
-   * 该路径内部对不认 UserData 直写端点的服务端有 PlayedItems 兜底。 */
-  suspend fun setPlayed(server: EmbyServer, itemId: String, played: Boolean): Result<Unit> {
-    val result = runCatching {
-      val data = repository.setPlayedWithClearPosition(server, itemId, played)
-      // 只有服务器明确回「状态和我要的不一样」才算失败；拿不到 UserData 时不下失败结论
-      if (data?.Played == !played) throw IllegalStateException("服务器未接受这次修改")
-    }
-    result.exceptionOrNull()?.let { _error.value = it.message ?: "操作失败" }
-    return result
-  }
-
-  // ==================== 批量操作 / 继续观看清除 / 直链预解析 ====================
-
-  /**
-   * 批量收藏 / 取消收藏。
-   *
-   * 走 [EmbyClient.setFavoriteMany]（Emby 无批量端点，客户端逐条汇总，单条失败不中断整批）。
-   * 只要这批里有演员（Person），顺带把「收藏演员」的进程内缓存作废 ——
-   * 否则退回收藏页「演员」tab 看到的还是旧名单。
-   */
-  suspend fun setFavoriteBatch(
-    server: EmbyServer,
-    items: List<EmbyItem>,
-    favorite: Boolean,
-  ): EmbyBatchResult = withContext(Dispatchers.IO) {
-    val ids = items.mapNotNull { it.Id }
-    if (ids.isEmpty()) return@withContext EmbyBatchResult(0, 0, null)
-    val result = runCatching { EmbyClient.setFavoriteMany(server, ids, favorite) }
-      .getOrElse { EmbyBatchResult(0, ids.size, it.message) }
-    if (items.any { it.Type?.equals("Person", ignoreCase = true) == true }) {
-      invalidateFavoritePersonsCache()
-    }
-    // 与单条收藏同一套记账。批量接口只回「成功几条 / 失败几条」，拿不到具体是哪些，
-    // 所以按整批记：多记的那几条此时并没有被收藏，不会出现在收藏页，不影响排序；
-    // 真被收藏时（下一次操作）时间会被覆盖。
-    // ⚠️ 批量走的是 EmbyClient.setFavoriteMany（静态方法），绕过 EmbyRepository，
-    //    所以这里必须单独记一次 —— 单条那条路已经在仓库里记过了。
-    if (favorite) {
-      favoriteClock.stamp(server.id, ids)
-    } else {
-      favoriteClock.forget(server.id, ids)
-    }
-    _error.value = if (result.failed > 0) result.firstError ?: "部分操作失败" else null
-    result
-  }
-
-  /** 批量标记已看 / 未看。与 [setFavoriteBatch] 同构。 */
-  suspend fun setPlayedBatch(
-    server: EmbyServer,
-    itemIds: List<String>,
-    played: Boolean,
-  ): EmbyBatchResult = withContext(Dispatchers.IO) {
-    if (itemIds.isEmpty()) return@withContext EmbyBatchResult(0, 0, null)
-    val result = runCatching { EmbyClient.setPlayedMany(server, itemIds, played) }
-      .getOrElse { EmbyBatchResult(0, itemIds.size, it.message) }
-    _error.value = if (result.failed > 0) result.firstError ?: "部分操作失败" else null
-    result
-  }
-
-  /**
-   * 把一条媒体从服务器的「继续观看」里移除（清掉服务器记录的播放位置）。
-   *
-   * 见 [EmbyClient.hideFromResume]：三种请求形态逐层兜底。返回 true 只代表
-   * 「请求被服务端接受」，UI 侧仍做本地乐观移除，不依赖这里回读。
-   */
-  suspend fun removeFromResume(server: EmbyServer, itemId: String): Boolean =
-    withContext(Dispatchers.IO) {
-      runCatching { EmbyClient.hideFromResume(server, itemId) }.getOrDefault(false)
-    }
-
-  /**
-   * 本地把一条从「继续观看」列表里摘掉。
-   *
-   * 配合 [removeFromResume] 的乐观移除：不管服务端是否真的落库，先让用户看到它消失，
-   * 免得「点了移除还杵在那儿」——兼容服务端有「回 200 不生效」的先例。
-   */
-  fun dropResumeItem(itemId: String) {
-    _resumeItems.value = _resumeItems.value.filterNot { it.Id == itemId }
-  }
 
   /**
    * 预解析「302 直链」：拿 `/Videos/{id}/stream` 背后跳转到的真实地址。
@@ -1240,7 +975,6 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun resolveDirectUrl(
     server: EmbyServer,
     itemId: String,
-    static: Boolean = true,
     /** 多版本媒体要指定的版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
     mediaSourceId: String? = null,
   ): StreamProbe = withContext(Dispatchers.IO) {
@@ -1248,7 +982,6 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
       EmbyClient.resolveStreamUrl(
         server = server,
         itemId = itemId,
-        static = static,
         // 起播路径上不重试：见上面的说明。
         attempts = 1,
         mediaSourceId = mediaSourceId,
@@ -1268,13 +1001,11 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
    * 从而在播完当前集后自动接着播下一集。
    *
    * @param resumeSeconds >0 时从指定秒数续播，否则从头开始
-   * @param reverseEngine true = 用「与默认相反」的内核播放（详情页长按播放按钮）
    */
   suspend fun play(
     server: EmbyServer,
     item: EmbyItem,
     resumeSeconds: Long = 0,
-    reverseEngine: Boolean = false,
     /**
      * 多版本媒体要播放的那个版本（`item.MediaSources[i].Id`）。
      * null = 不指定，由服务端挑默认版本（单版本媒体照旧走这条路）。
@@ -1293,9 +1024,18 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
      *   而「从头播放」的语义是「第一集开头」，哪怕第 1 集已经看完。
      */
     fromStart: Boolean = false,
+    videoSelect: Int = 0,
+    audioSelect: Int = 0,
+    subtitleSelect: Int = 0,
+    selectPolicy: String = "auto",
+    versionSelect: Int = 1,
+    useDirectLink: Boolean? = null,
+    selectionCurrentItemOnly: Boolean = false,
   ) {
-    val itemId = item.Id ?: return
-    val engine = resolveEngine(reverseEngine)
+    requireBoundServer(server)
+    repository.sessionServer(server)
+    if (!EmbyItemPolicy.isSupported(item)) return
+    val itemId = item.Id?.takeIf { it.isNotBlank() } ?: return
 
     // ⚠️ 容器类条目**绝不能**直接交给播放器。
     // `Series` / `Season` / 文件夹自身没有媒体文件，`/Videos/{id}/stream` 会回一个
@@ -1323,622 +1063,93 @@ class EmbyViewModel(application: Application) : AndroidViewModel(application) {
     } else {
       item
     }
+    if (!EmbyItemPolicy.isSupported(playTarget)) return
     val itemIdToPlay = playTarget.Id ?: return
     val playItem = playTarget
+    val explicitSourceId = if (selectionCurrentItemOnly && selectPolicy != "manual") null else mediaSourceId
+    try {
+      requireExplicitPlaybackSource(playItem, explicitSourceId)
+    } catch (error: IllegalArgumentException) {
+      showPlaybackError(error.message ?: "此媒体源不可播放")
+      return
+    }
     // 「从头播放」一律从头：哪怕调用方顺手传了续播秒数也不认。
     // （分集里的「从头播放本季」走 onPlayEpisode(ep, 0)，本就不带秒数，
     //   这里兜的是「Series 大按钮 + 老版本调用方」这类组合。）
     val effectiveResume = if (fromStart) 0L else resumeSeconds
 
-    // 剧集：构建从当前集开始的播放列表，实现"播完自动下一集"
-    val playlist = if (playItem.Type == "Episode") {
-      buildEpisodePlaylist(server, playItem)
-    } else {
-      emptyList()
-    }
-
-    if (playlist.size > 1) {
-      // ⚠️⚠️ 只探**用户马上要播的那一条**，绝不遍历整条连播列表。
-      //
-      // 原来这里是 `playlist.mapNotNull { resolveIfEnabled(...) }` —— 逐条串行发请求，
-      // 而 `resolveDirectUrl` 单次上限 2 秒（`STREAM_PROBE_CALL_TIMEOUT_MS`），
-      // 一季 12 集就是最坏 **24 秒**才 `startActivity`。用户看到的是「点了播放，
-      // 等 20 秒才出画面」，而同一部片第二次点又很快（服务端已经把 strm 的远端源
-      // probe 完写库了）—— 正是「有时候慢、有时候又快」的形状，且**只发生在多集
-      // 连播**上（电影 / 单集走下面 else 分支，只解析一条）。
-      //
-      // 这也与本文件里 `launchRandomPlaybackAwait` 的口径一致：那边写着「剧集连播
-      // 那条路也一样只探首条」，只是这里一直没照着做。
-      //
-      // 后面自动连播的集数不需要预解析：mpv 请求原始地址时会自己跟 302，多一次往返
-      // 而已；真要省这一步，应由播放器在「播这条时预热下一条」里串行处理
-      // （见 `EmbyPlaybackReporter.warmNextItem`），而不是让用户对着加载层等着。
-      //
-      // 版本选择本来就只作用于「用户当前点播的这一集」，所以这里只传这一条。
-      val directUrls: Map<String, String> = resolveIfEnabled(server, itemIdToPlay, mediaSourceId)
-        ?.urlOrNull
-        ?.let { mapOf(itemIdToPlay to it) }
-        ?: emptyMap()
-      launchPlaylist(
-        server = server,
-        items = playlist,
-        resumeSeconds = effectiveResume,
-        engine = engine,
-        directUrls = directUrls,
-        firstMediaSourceId = mediaSourceId,
-        firstMediaSourceName = mediaSourceLabel,
+    // mpv registers the complete season through loopback PlaybackSpec entries, without resolving
+    // every remote URL before launch. PlaybackInfo/version selection happens on demand.
+    try {
+      val queue = if (playItem.Type == "Episode") buildEpisodePlaylist(server, playItem, completeSeason = true)
+        else listOf(playItem)
+      launchPlaylistAwait(
+        server = server, items = queue, resumeSeconds = effectiveResume,
+        firstMediaSourceId = explicitSourceId, firstMediaSourceName = mediaSourceLabel,
+        startItemId = itemIdToPlay, videoSelect = videoSelect, audioSelect = audioSelect,
+        subtitleSelect = subtitleSelect, selectPolicy = selectPolicy, versionSelect = versionSelect,
+        useDirectLink = useDirectLink, selectionCurrentItemOnly = selectionCurrentItemOnly,
       )
-    } else {
-      // 单片播放。
-      // ⚠️ ISO 探测**不能挂在 `resolveIfEnabled` 下面** ——
-      // 「预解析直链」是个无关的优化开关（默认关，见 BrowserPreferences），
-      // 挂在它底下等于「用户没开这个开关就永远用不到 ISO 播放」。
-      // 而 ISO 探测自己是会判断的：花 2KB 读一下 PVD，不是 ISO 就立刻返回。
-      // ── 多版本：先向服务器要「这个版本」的播放地址 ──
-      // ⚠️ 不能只自己拼 `/Videos/{id}/stream?MediaSourceId=…`：官方文档把
-      //   `PlaySessionId` 与 `MediaSourceId` 一起列为该端点的**必需参数**，
-      //   少了前者服务器会无视我们选的版本、直接吐默认版本 —— 现象就是
-      //   「选了不带字幕的 B、播出来还是带字幕的 A」，关掉 302 预解析也一样。
-      //   单版本媒体（mediaSourceId == null）完全不走这条路，行为与改动前一致。
-      val versionUrl = if (mediaSourceId != null) {
-        withContext(Dispatchers.IO) {
-          runCatching { repository.directStreamUrl(server, itemIdToPlay, mediaSourceId) }.getOrNull()
-        }
-      } else {
-        null
-      }
-      // ① 预解析（仅在「预解析直链」开关打开时才发请求）。
-      //    返回值现在一并带出「能不能播」的结论 —— 用的是**本来就会发的那一次请求**。
-      val directProbe = versionUrl?.let { StreamProbe.Ok(it) }
-        ?: resolveIfEnabled(server, itemIdToPlay, mediaSourceId)
-
-      // 明确被拒（401 / 403 / 404 / 410）⇒ 起播前就拦下，改成播放页里的错误卡片。
-      // 把死链交给 mpv 会让 libmpv 在 native 层崩掉（整个 App 消失、Java 层拦不到），
-      // 而这次判定没有额外打 CDN —— 请求是「预解析」本来就有的那一次。
-      (directProbe as? StreamProbe.Denied)?.let { denial ->
-        launchSingle(
-          server = server,
-          item = playItem,
-          resumeSeconds = effectiveResume,
-          engine = engine,
-          mediaSourceId = mediaSourceId,
-          mediaSourceLabel = mediaSourceLabel,
-          playbackError = denial.message,
-        )
-        return
-      }
-      val directUrl = directProbe?.urlOrNull
-
-      // ② ISO 探测：只有容器**可能**是原盘 / STRM 时才值得发这次解析请求。
-      //    v127 及以前不管 mkv 还是 mp4 都会为它白发一次 302 解析（请求在容器预筛
-      //    之前就发出去了）；v128 起按容器先筛，普通片源直接零请求。
-      //    ISO 容器要用**选中版本**的容器名，否则多版本下（4K 是 ISO、1080P 是 mkv）
-      //    会拿错容器的预筛结论，把真 ISO 拦在探测之前。
-      val selectedContainer = playItem.MediaSources
-        ?.firstOrNull { it.Id == mediaSourceId }
-        ?.Container
-        ?: playItem.MediaSources?.firstOrNull()?.Container
-      var isoSourceUrl: String? = null
-      if (mayBeIsoContainer(selectedContainer)) {
-        val isoProbe = directProbe
-          ?: resolveDirectUrl(server, itemIdToPlay, mediaSourceId = mediaSourceId)
-        (isoProbe as? StreamProbe.Denied)?.let { denial ->
-          launchSingle(
-            server = server,
-            item = playItem,
-            resumeSeconds = effectiveResume,
-            engine = engine,
-            mediaSourceId = mediaSourceId,
-            mediaSourceLabel = mediaSourceLabel,
-            playbackError = denial.message,
-          )
-          return
-        }
-        isoSourceUrl = isoProbe.urlOrNull
-      }
-      val isoUrl = isoSourceUrl?.let {
-        prepareRemoteIso(
-          directUrl = it,
-          container = selectedContainer,
-          renewDirect = {
-            // 直链中途过期 → 重新走一次 302 解析换新的。
-            // ⚠️ 与探测必须同一套 UA，resolveDirectUrl 内部已经保证了。
-            resolveDirectUrl(server, itemIdToPlay, mediaSourceId = mediaSourceId).urlOrNull
-          },
-        )
-      }
-      launchSingle(
-        server = server,
-        item = playItem,
-        resumeSeconds = effectiveResume,
-        engine = engine,
-        overrideUrl = isoUrl ?: directUrl,
-        mediaSourceId = mediaSourceId,
-        mediaSourceLabel = mediaSourceLabel,
-      )
-    }
-
-    // ⚠️ 这里**不再**单独上报 Start。
-    //
-    // 原来这里发一次 `/Sessions/Playing`，进播放页后 `EmbyPlaybackReporter.start()`
-    // 又发一次 —— 同一个条目两条播放会话，而且这一条没有会话 id、也永远不会有对应的
-    // Progress / Stopped（服务端上就是一条「一直停在 0% 的正在播放」）。
-    // 现在统一由上报器负责：它在 `PlayerActivity.onCreate` 挂上观察者，用的是同一个
-    // intent 里的 `position`（即续播秒数）与媒体源 Id，信息不比这里少。
-  }
-
-  /**
-   * 用**服务器转码**后的流播放当前媒体。
-   *
-   * 【什么时候用它】默认的 [play] 是「直连原文件」—— 最快、服务器零负担，但能不能播
-   * 全看本机解不解得了这个编码。下面这两类源一定会失败，换内核也没用：
-   *
-   *  · 远程 STRM（`.strm` 里指向一个远端地址，源文件是 AVI）；
-   *  · AVI + Xvid / DivX（MPEG-4 ASP）等老编码 —— 手机的硬解不出画面、软解又跟不上。
-   *
-   * 这时让服务器用 ffmpeg 转成 H.264 + AAC 再下发，客户端拿到的就是最普通的流。
-   * 代价是**服务器要跑实时转码**（CPU 占用明显上升），所以做成显式入口、不自动触发。
-   *
-   * 与 [playWithExternalPlayer] 一样返回 [Result]：失败原因（转码被禁用、服务器连不上）
-   * 要能原样说给用户听，闷在那儿只会让人以为按钮坏了。
-   */
-  suspend fun playTranscoded(
-    server: EmbyServer,
-    item: EmbyItem,
-    resumeSeconds: Long = 0,
-    reverseEngine: Boolean = false,
-    /** 多版本媒体要转码的那个版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
-    mediaSourceId: String? = null,
-    /** 多版本媒体：版本显示名（播放页顶栏会追加在片名后面） */
-    mediaSourceLabel: String? = null,
-  ): Result<Unit> {
-    val itemId = item.Id ?: return Result.failure(IllegalArgumentException("缺少媒体 Id"))
-    return runCatching {
-      val url =
-        repository.transcodeStreamUrl(
-          server = server,
-          itemId = itemId,
-          startTimeTicks = EmbyTicks.secondsToTicks(resumeSeconds),
-          mediaSourceId = mediaSourceId,
-        )
-      launchSingle(
-        server = server,
-        item = item,
-        resumeSeconds = resumeSeconds,
-        engine = resolveEngine(reverseEngine),
-        overrideUrl = url,
-        mediaSourceId = mediaSourceId,
-        mediaSourceLabel = mediaSourceLabel,
-      )
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (_: Exception) {
+      showPlaybackError("本地播放服务不可用，请重试")
     }
   }
 
-  /**
-   * 列出本机能打开这条流的**外部播放器**候选（已剔除自家两个播放页）。
-   *
-   * 枚举规则见 [queryExternalPlayers] —— 关键在于**不能只查一次带 URI 的 intent**，
-   * 否则只声明了 `file` / `content` 的播放器会因为 scheme 对不上而全部消失。
-   */
-  fun listExternalPlayers(
-    server: EmbyServer,
-    item: EmbyItem,
-    /** 多版本媒体要交给外部播放器的版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
-    mediaSourceId: String? = null,
-  ): Result<List<ExternalPlayerOption>> {
-    val itemId = item.Id
-      ?: return Result.failure(IllegalStateException("这个条目没有可播放的媒体 Id"))
-    val app = getApplication<Application>()
-    val players =
-      queryExternalPlayers(
-        context = app,
-        uri = externalStreamUri(server, itemId, mediaSourceId),
-        selfPackageName = app.packageName,
-      )
-    return if (players.isEmpty()) {
-      Result.failure(IllegalStateException("手机里没有找到能播放视频的外部播放器"))
-    } else {
-      Result.success(players)
-    }
-  }
-
-  /** 上次用过的外部播放器（`包名/Activity名`，空串 = 还没用过） */
-  fun lastExternalPlayerKey(): String = browserPreferences.embyExternalPlayer.get()
-
-  /**
-   * 用**指定的外部播放器**打开当前媒体。
-   *
-   * 与 [play] 的区别：那条走的是 App 自带的两个内核（mpv / GSY），这条把流地址交给
-   * 系统里别的播放器（MX、VLC、各类投屏 App…）。用的是静态直链（`static=true`），
-   * 拿到 URL 的播放器自己拉流，完全不依赖我们的播放页。
-   *
-   * 两点取舍：不带续播位置（外部播放器不认我们的 `position` extra，硬塞没用），
-   * 这条链路的进度也不会回传到 Emby 服务器。
-   */
-  fun playWithExternalPlayer(
-    server: EmbyServer,
-    item: EmbyItem,
-    player: ExternalPlayerOption,
-    /** 多版本媒体要交给外部播放器的版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
-    mediaSourceId: String? = null,
-  ): Result<Unit> {
-    val itemId = item.Id
-      ?: return Result.failure(IllegalStateException("这个条目没有可播放的媒体 Id"))
-    val app = getApplication<Application>()
-    val intent =
-      externalPlayerLaunchIntent(
-        uri = externalStreamUri(server, itemId, mediaSourceId),
-        option = player,
-        title = displayTitle(item),
-      )
-    return runCatching {
-      app.startActivity(intent)
-      // 记住这次的选择：下次列表里那一项会打上勾，并排到已知播放器里的原位置
-      browserPreferences.embyExternalPlayer.set(player.key)
-    }
-  }
-
-  /**
-   * 兜底：交给系统自己的选择器。候选同样是剔除自家之后的那批，
-   * 所以系统选择器里也不会冒出影屿自己。
-   */
-  fun playWithExternalPlayerChooser(
-    server: EmbyServer,
-    item: EmbyItem,
-    /** 多版本媒体要交给外部播放器的版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
-    mediaSourceId: String? = null,
-  ): Result<Unit> {
-    val itemId = item.Id
-      ?: return Result.failure(IllegalStateException("这个条目没有可播放的媒体 Id"))
-    val app = getApplication<Application>()
-    val chooser =
-      externalPlayerChooserIntent(
-        context = app,
-        uri = externalStreamUri(server, itemId, mediaSourceId),
-        selfPackageName = app.packageName,
-        title = displayTitle(item),
-      )
-        ?: return Result.failure(IllegalStateException("手机里没有找到能播放视频的外部播放器"))
-    return runCatching { app.startActivity(chooser) }
-  }
-
-  /**
-   * 交给外部播放器的直链。
-   *
-   * `static=true` = 服务器原样吐原文件，一个字节都不改 —— 外部播放器自带解码器，
-   * 用不着服务器帮它转码。
-   */
-  private fun externalStreamUri(
-    server: EmbyServer,
-    itemId: String,
-    mediaSourceId: String? = null,
-  ): Uri =
-    Uri.parse(repository.videoStreamUrl(server, itemId, static = true, mediaSourceId = mediaSourceId))
-
-  /**
-   * 取同季剧集中「当前集及其之后」的列表；失败时只返回当前集。
-   */
+  /** Fetch the complete season in bounded pages. Partial failures remain playable and visible. */
   private suspend fun buildEpisodePlaylist(
     server: EmbyServer,
     item: EmbyItem,
+    completeSeason: Boolean = false,
   ): List<EmbyItem> {
-    val seriesId = item.SeriesId ?: return listOf(item)
-    val episodes = runCatching { repository.getEpisodes(server, seriesId, item.SeasonId).Items }
-      .getOrNull()
-      ?: return listOf(item)
-    if (episodes.isEmpty()) return listOf(item)
-
-    val index = episodes.indexOfFirst { it.Id == item.Id }
-    return if (index >= 0) episodes.subList(index, episodes.size) else listOf(item)
-  }
-
-  /**
-   * 算出这次播放**实际要用**的内核。
-   *
-   * 默认就是设置里选的「默认播放内核」（设置 → GSY 播放器 → 默认播放内核），
-   * 长按（[reverse]）且「长按反选内核」开关打开时才反选另一个。
-   *
-   * 注意这里必须返回「默认内核」而不是 null：返回 null 的话调用方只会把 intent
-   * 指向 mpv 播放页，「默认内核 = GSYVideoPlayer」这个设置就形同虚设
-   * （「设置里选了 GSY，播放起来还是 mpv」就是这个原因）。
-   */
-  fun resolveEngine(reverse: Boolean): EngineKind {
-    val preferred = EngineKind.from(playerPreferences.playbackEngine.get())
-    if (!reverse || !playerPreferences.longPressReverseEngine.get()) return preferred
-    return preferred.reversed()
-  }
-
-  /**
-   * 只有「真的被反选了」才返回非空。
-   *
-   * 详情页拿它决定要不要弹「用 xx 播放」的提示 —— 每次点播放都弹一条就太吵了，
-   * 长按换内核才需要明确反馈。
-   */
-  fun resolveEngineOverride(reverse: Boolean): EngineKind? {
-    if (!reverse || !playerPreferences.longPressReverseEngine.get()) return null
-    return resolveEngine(reverse)
-  }
-
-  /**
-   * 把内核选择写进 intent。
-   *
-   * 备用内核（GSY）走独立的 [GsyPlayerActivity]；
-   * 主内核（mpv）则显式把内核名塞进 extra，让 [PlayerActivity] 明确按 mpv 播 ——
-   * 免得「设置里默认内核 = GSY」时又被路由走一次。
-   */
-  private fun Intent.putEngine(engine: EngineKind?) {
-    when (engine) {
-      EngineKind.GSY -> setClass(getApplication(), GsyPlayerActivity::class.java)
-      EngineKind.MPV -> putExtra(PlayerActivity.EXTRA_ENGINE, engine.name)
-      null -> Unit
+    val seriesId = item.SeriesId?.takeIf { it.isNotBlank() } ?: return listOf(item)
+    val result = collectEpisodePlaylist(item, completeSeason) { startIndex, limit ->
+      repository.getEpisodes(server, seriesId, item.SeasonId, startIndex, limit)
     }
+    result.warning?.let(::showPlaybackError)
+    return result.items
   }
 
-  /**
- * 这个地址是不是 [RemoteIsoPlayback]起的**本地** ISO 代理。
- *
- * 要分出来是因为请求头不能一视同仁：直链要带与探测一致的 UA / Referer
- * （否则签名校验失败），而本地代理是mpv → localhost → CDN 的中转，
- * 代理自己会补对头的 UA，给它加 Referer 只会让上游看到一堆乱 headers。
- */
-private fun isLocalIsoProxyUrl(url: String): Boolean =
-  url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")
-
-/**
-   * 试把这个条目当「远程 ISO 原盘」播，返回给播放器的本地代理地址。
-   *
-   * ## 为什么要单独一条路
-   *
-   * 蓝光/DVD 原盘的目录结构（`BDMV/STREAM`、`VIDEO_TS`）在**镜像内部**，
-   * 服务器那条流地址给的是整张 ISO —— mpv 拿到会当成普通字节流，
-   * 找不到 MPEG-TS 的 `0x47` 同步就一直缓冲黑屏。
-   * 所以做法是：客户端自己解析 ISO 目录、取出主影片那一个文件，
-   * 起一个本地 Range 代理把它伪装成普通媒体文件交给 mpv
-   * （纯客户端解码，**不需要服务端转码**）。
-   *
-   * ## 失败必须安静回退
-   *
-   * 探测不出来（不是 ISO / 签名过期 / 网络不通）就返回 null，
-   * 调用方继续走原来的直链播放。远程 ISO 是增强功能，**不能变成拦路石**。
-   *
-   * @param directUrl 已解析好的直链（`resolveStreamUrl` 的结果）。
-   * @param renewDirect 直链过期时的重新解析入口。正常条目传得上，
-   *   这样一部两小时的电影中途链接过期也不会断。
-   * @return 代理地址；不是 ISO / 探测失败返回 null。
-   */
-  /**
-   * 容器名是否**可能**是原盘 / STRM —— 决定要不要为 ISO 探测发那次 302 解析请求。
-   *
-   * 只有明确报出 `iso` / `strm`（或服务器根本没给容器名）才值得探。
-   * 明确是 mkv / mp4 / avi 的直接跳过：以前这些片源每次起播都会**白发一次**解析请求
-   * （请求在 `prepareRemoteIso` 的容器预筛之前就发出去了），v128 起省掉。
-   *
-   * STRM 必须留下：它指向的可能是 ISO，而且它本来就是最需要探测死链的一类
-   * （网盘直链过期后交给 mpv 会 native 崩溃）。
-   */
-  private fun mayBeIsoContainer(container: String?): Boolean {
-    val c = container?.trim()?.lowercase() ?: return true
-    return c == "iso" || c == "strm"
+  /** Playback failures are surfaced before launching the mpv page when possible. */
+  private fun showPlaybackError(message: String) {
+    val app = getApplication<Application>()
+    val show = Runnable { Toast.makeText(app, message, Toast.LENGTH_LONG).show() }
+    if (Looper.myLooper() == Looper.getMainLooper()) show.run()
+    else Handler(Looper.getMainLooper()).post(show)
   }
 
-  private suspend fun prepareRemoteIso(
-    directUrl: String,
-    renewDirect: (suspend () -> String?)? = null,
-    /** 条目自报的容器（`MediaSources[0].Container`，Emby 扫描时就知道）。可空。 */
-    container: String? = null,
-  ): String? {
-    if (!directUrl.startsWith("http://") && !directUrl.startsWith("https://")) return null
-
-    // 预筛：能**确定**不是 ISO 就别发探测请求了。
-    // 两个判据都必须是「否定式」的 —— 只要存在任何疑点就继续探测：
-    // · 容器明确报了别的名字（mkv / mp4 / avi…）⇒ 肯定不是 ISO；
-    // · URL 路径里没有 .iso ⇒ 只是「看不出来」，**不能**据此排除，
-    //   因为 CDN 常把路径混淆成随机串（真 ISO 也可能叫 `/a/9f3c2b`）。
-    //   这种情况交给 PVD 探测定夺，那才是唯一可靠的判据。
-    if (container != null && !container.equals("iso", ignoreCase = true)) {
-      val isStrm = container.equals("strm", ignoreCase = true)
-      val pathLooksIso = Uri.parse(directUrl).path.orEmpty().lowercase().contains(".iso")
-      if (!isStrm && !pathLooksIso) return null
-    }
-    // ⚠️ 这一段同样在**起播关键路径**上（`play()` 要等它才拉起播放器），所以给硬预算。
-    // 探测本身只是「读 2KB 看是不是 CD001」，正常几十毫秒；慢的一律当「不是 ISO」，
-    // 立刻回退普通播放 —— 远程 ISO 是增强功能，宁可播得普通，也不能让用户对着转圈等。
-    // 超时后底层 OkHttp 线程会自己跑到它自己的超时，注册出来的代理路由由
-    // IsoRangeProxy 按「30 分钟没人用」回收，不用这里操心。
-    val prepared =
-      withTimeoutOrNull(ISO_PROBE_BUDGET_MS) {
-        runCatching {
-          withContext(Dispatchers.IO) {
-            RemoteIsoPlayback.prepareFromDirectUrl(directUrl, onUrlExpired = renewDirect)
-          }
-        }.getOrNull()
-      }
-    return prepared?.playbackUrl
-  }
-
-  /** 播放单个媒体 */
-  private fun launchSingle(
-    server: EmbyServer,
-    item: EmbyItem,
-    resumeSeconds: Long,
-    engine: EngineKind? = resolveEngine(false),
-    /**
-     * 覆盖播放地址。null = 默认的「直连原文件」（`static=true`，服务器不动数据）。
-     * 两个来源：
-     * · [playTranscoded] 拿到的服务端转码地址；
-     * · **本地 ISO Range 代理地址**（远程 ISO 原盘，见 [prepareRemoteIso]）。
-     */
-    overrideUrl: String? = null,
-    /** 多版本媒体：本次播放的版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
-    mediaSourceId: String? = null,
-    /** 多版本媒体：本次播放的版本显示名（播放页顶栏会追加在片名后面） */
-    mediaSourceLabel: String? = null,
-    /**
-     * 起播前就被判定为不可播（死链）的原因。非 null 时播放页**不会调 playFile**，
-     * 而是直接把这句话显示成错误卡片 —— 用来替代「把死链交给 mpv → native 崩溃」。
-     */
-    playbackError: String? = null,
-  ) {
-    val itemId = item.Id ?: return
-    val url = overrideUrl
-      ?: repository.videoStreamUrl(server, itemId, static = true, mediaSourceId = mediaSourceId)
-    val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).apply {
-      setClass(getApplication(), PlayerActivity::class.java)
-      putExtra("internal_launch", true)
-      putExtra("launch_source", "emby")
-      if (playbackError != null) putExtra("play_error", playbackError)
-      putExtra("title", displayTitle(item))
-      putExtra("filename", item.Name ?: displayTitle(item))
-      if (resumeSeconds > 0) {
-        putExtra("position", (resumeSeconds * 1000).toInt())
-      } else {
-        // 显式「从头播放」：告知播放页别再拿本地续播记录覆盖进度。
-        // 否则 savePositionOnQuit 开启时，applyPlaybackState 会把上次停下
-        // 的位置套回 time-pos，「从头播放」就变成了「继续播放」。
-        putExtra("play_from_start", true)
-      }
-      // 供播放页把进度回传给 Emby 服务器；带上版本 Id / 版本名 ——
-      // 前者让在线字幕搜索找对版本，后者让播放页顶栏显示「正在播的是哪个版本」
-      putEmbyPlaybackExtras(
-        server = server,
-        itemIds = listOf(itemId),
-        mediaSourceIds = mediaSourceId?.let { listOf(it) } ?: emptyList(),
-        mediaSourceNames = mediaSourceLabel?.takeIf { it.isNotBlank() }?.let { listOf(it) }
-          ?: emptyList(),
-        episodeNumbers = listOf(encodeEpisodeNumber(item)),
-      )
-      // 「记忆播放设置」的键：剧集用所属剧的 Id（整季共用一份速度 / 音轨），
-      // 电影没有 SeriesId，就用它自己的 Id。
-      putExtra("emby_series_key", item.SeriesId ?: itemId)
-      putEngine(engine)
-      // 这条是「预解析」探出来的直链：探测与真正拉流必须用同一套请求头。
-      // 网盘直链（115 这类）常把 UA / Referer 算进签名校验，两边不一致就会被 403
-      // —— 现象正是「解析成功、播放必失败」。播放器侧的 headers 约定：
-      // 第 0/1 位是 User-Agent，其后两两成对（见 PlayerActivity.setHttpHeadersFromExtras）。
-      // Referer 统一给**服务器**的来源，而不是直链自己（自引用常被网盘判为非法）。
-      if (overrideUrl != null && !isLocalIsoProxyUrl(overrideUrl)) putStreamHeaders(server)
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-    getApplication<Application>().startActivity(intent)
-  }
-
-  /**
-   * 给播放 intent 补上「与预解析探测一致」的请求头。
-   *
-   * 只在**确实用了预解析直链**时才加（普通直出路径播放器原本就能播，
-   * 平白改 UA / Referer 反而可能打破现有可用组合）。
-   */
-  private fun Intent.putStreamHeaders(server: EmbyServer) {
-    val origin = "${if (server.useHttps) "https" else "http"}://${server.host}:${server.port}"
+  /** Bind headers to this server's current memory session and the actual target URL. */
+  private fun Intent.putStreamHeaders(server: EmbyServer, url: String) {
+    requireBoundServer(server)
+    val session = repository.sessionServer(server)
     putExtra(
-      "headers",
-      arrayOf("User-Agent", EmbyClient.STREAM_USER_AGENT, "Referer", origin),
+      PlayerHandoff.EXTRA_HEADERS,
+      PlayerHttpHeaders.toPairs(PlayerHttpHeaders.forUrl(url, server = session)),
     )
   }
 
-  /**
-   * 「预解析开关打开」时才去解析直链；关闭 → 直接返回 null（用原始流地址，零额外开销）。
-   *
-   * 返回的是 [StreamProbe] 而不是地址，因为这次请求顺带就能判定死链（见
-   * [EmbyClient.resolveStreamUrl]）。调用方取地址用 [StreamProbe.urlOrNull]，
-   * 想拦死链就判 [StreamProbe.Denied]。
-   */
-  private suspend fun resolveIfEnabled(
-    server: EmbyServer,
-    itemId: String,
-    mediaSourceId: String? = null,
-  ): StreamProbe? =
-    if (shouldResolveDirectLink()) resolveDirectUrl(server, itemId, mediaSourceId = mediaSourceId)
-    else null
-
-  /** 播放一组媒体（剧集连播 / 随机播放） */
+  /** 播放一组媒体（剧集连播 / 随机播放）。 */
   /**
    * 「随机播放 / 随机播放收藏 / 混合推荐连播 / 演员作品连播」的统一启动入口。
-   *
-   * 与直接调 [launchPlaylist] 的唯一区别：**起播前先把首条的直链探一次**（带硬预算）。
-   *
-   * ## 为什么必须探（v141）
-   *
-   * 随机列表里可能有 strm 条目，而服务端还没 probe 过它的远端源文件（详情页「什么都
-   * 不显示」就是这个状态）。这时候 `/Videos/{id}/stream` 会先让服务端去读远端文件、
-   * 把大小/时长写库，一次能挂到分钟级；播放器要等它返回才有第一个字节 ⇒ 用户看到
-   * 「一直卡在加载中」。
-   *
-   * 详情页那条路（`play()`）本来就有这道预解析 + 超时放行，所以同一个文件第一次点播
-   * 只是稍等一下、退出重进就秒开；而随机播放入口原先**完全不走探测**，播放器拿着原始
-   * 地址直接撞上去 —— 这就是「详情页修好了、随机播放还是卡」的原因。
-   *
-   * 这里复用的正是同一个 [resolveDirectUrl]（单次 2 秒、不重试，超时返回 [StreamProbe.Unknown]），
-   * 再套一层总预算：探不出来就按原地址起播，绝不为了「探」再拖一轮。
-   *
-   * ⚠️ 只在**首条**上做：后面自动连播的条目由播放器自己处理，逐条探测会让等待线性叠加
-   * （剧集连播那条路也一样只探首条，见 `play()` 里的 `directUrls`）。
+   * 所有条目注册为本地 loopback PlaybackSpec，由 mpv 按需解析。
    */
   fun launchRandomPlayback(
     server: EmbyServer,
     items: List<EmbyItem>,
-    engine: EngineKind? = resolveEngine(false),
   ) {
     if (items.isEmpty()) return
-    viewModelScope.launch { launchRandomPlaybackAwait(server, items, engine) }
+    viewModelScope.launch { launchRandomPlaybackAwait(server, items) }
   }
 
-  /**
-   * [launchRandomPlayback] 的**可等待**版本：函数返回时播放页已经 `startActivity` 了。
-   *
-   * ## 为什么要有这一版
-   *
-   * 起播前那次 `warmStream` 最长要 2 秒（见上面那段说明）。fire-and-forget 那版立刻返回，
-   * 调用方（抽卡层）关掉自己的遮罩后，用户会对着光秃秃的媒体库干等一两秒，然后播放页
-   * 才「突然」弹出来 —— 这段空窗必须有人负责。挂起版本把「已经起播」这个时刻交还给
-   * 调用方，它就能一直挂着「正在打开」遮罩，直到播放页真的起来。
-   *
-   * ⚠️ 本体只有一份（下面这段），不要在这里复制粘贴一份探测逻辑 —— 那份 302 / 网盘
-   * 风控的口径（只探首条、不跟跳转、2 秒硬预算）是踩过坑的，分叉出去必然走样。
-   */
+  /** [launchRandomPlayback] 的可等待版本：返回时播放页已经启动。 */
   suspend fun launchRandomPlaybackAwait(
     server: EmbyServer,
     items: List<EmbyItem>,
-    engine: EngineKind? = resolveEngine(false),
   ) {
+    val items = EmbyItemPolicy.filterSupported(items).filter { it.Id != null }
     if (items.isEmpty()) return
-    val firstId = items.firstOrNull()?.Id
-    // ── 起播前只处理**首条**，而且**不跟 302**（v142）──
-    //
-    // 这套服务器的形态是「Emby 只存 .strm，真实文件在网盘 CDN 上」。所以口径必须
-    // 分得很清：**凡是跟随 302 的请求，都等于往网盘 CDN 打一次**，批量预取会直接
-    // 触发网盘风控。于是这里只用 [EmbyClient.warmStream]：
-    //
-    // · `followRedirects=false` ⇒ 请求**只到我们自己的 Emby 服务器**，拿到那个
-    //   302 就结束，客户端**一个字节都不打网盘 CDN**；
-    // · 而「服务端读远端文件把大小时长写库」这一步照样会发生 —— 这正是起播慢的
-    //   根因（v140），也就被提前掉了；
-    // · 它不取直链，所以这里**不再**产出 `directUrls`。即使用户开了「预解析直链」，
-    //   随机入口也不为了一个地址去多打一次 CDN —— 播放器自己跟 302 只需要一次，
-    //   而预解析会变成两次（解析一次 + 播放一次）。想看直链的场景（详情页点播）
-    //   仍然走原来那条 opt-in 的路。
-    //
-    // 只发**一次**、只针对**首条**、2 秒硬预算（超时按原地址起播）。后面的条目一律
-    // 不在这里探测 —— 由播放器按「播这条时预热下一条」串行处理
-    // （见 EmbyPlaybackReporter.warmNextItem）。
-    if (firstId != null) {
-      withTimeoutOrNull(RANDOM_PREWARM_BUDGET_MS) {
-        withContext(Dispatchers.IO) {
-          // 阻塞调用，所以把上限交给 OkHttp 自己（2 秒），别指望协程超时能打断它
-          EmbyClient.warmStream(
-            server = server,
-            itemId = firstId,
-            callTimeoutMs = RANDOM_PREWARM_BUDGET_MS,
-          )
-        }
-      }
-    }
-    launchPlaylist(
-      server = server,
-      items = items,
-      // 随机列表常混着看过的剧，切到下一条时恢复续播会直接跳到片尾就结束
-      playFromStartAll = true,
-      engine = engine,
-    )
+    launchPlaylistAwait(server, items, playFromStartAll = true)
   }
 
   fun launchPlaylist(
@@ -1952,12 +1163,7 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
      */
     playFromStartAll: Boolean = false,
     /**
-     * 指定内核；默认取设置里的「默认播放内核」（长按反选时由 [resolveEngine] 给出）
-     */
-    engine: EngineKind? = resolveEngine(false),
-    /**
-     * itemId → 预解析出来的直链。空 map = 全部走原始流地址（默认行为）。
-     * 只有开启「预解析直链」且该条确实发生 302 跳转时才会有内容。
+     * itemId → 预解析出来的直链。空 map = 全部由 PlaybackSpec 按需解析。
      */
     directUrls: Map<String, String> = emptyMap(),
     /**
@@ -1968,6 +1174,50 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
     /** [firstMediaSourceId] 对应的显示名；播放页顶栏据此显示「正在播的是哪个版本」。 */
     firstMediaSourceName: String? = null,
   ) {
+    viewModelScope.launch {
+      try {
+        launchPlaylistAwait(server, items, resumeSeconds, playFromStartAll, directUrls,
+          firstMediaSourceId, firstMediaSourceName)
+      } catch (cancelled: CancellationException) {
+        throw cancelled
+      } catch (_: Exception) {
+        showPlaybackError("本地播放服务不可用，请重试")
+      }
+    }
+  }
+
+  private suspend fun launchPlaylistAwait(
+    server: EmbyServer,
+    items: List<EmbyItem>,
+    resumeSeconds: Long = 0,
+    playFromStartAll: Boolean = false,
+    directUrls: Map<String, String> = emptyMap(),
+    firstMediaSourceId: String? = null,
+    firstMediaSourceName: String? = null,
+    startItemId: String? = items.firstOrNull()?.Id,
+    videoSelect: Int = 0,
+    audioSelect: Int = 0,
+    subtitleSelect: Int = 0,
+    selectPolicy: String = "auto",
+    versionSelect: Int = 1,
+    useDirectLink: Boolean? = null,
+    selectionCurrentItemOnly: Boolean = false,
+  ) {
+    requireBoundServer(server)
+    val supported = EmbyItemPolicy.filterSupported(items).filter { !it.Id.isNullOrBlank() }
+    val current = supported.firstOrNull { it.Id == startItemId } ?: return
+    try {
+      requireExplicitPlaybackSource(current, firstMediaSourceId, directUrls[current.Id])
+    } catch (error: IllegalArgumentException) {
+      showPlaybackError(error.message ?: "此媒体源不可播放")
+      return
+    }
+    val items = supported.filter { candidate ->
+      candidate.Id == startItemId || directUrls[candidate.Id]?.let { url ->
+        !EmbyMediaSourcePolicy.isRemoteIsoUrl(url)
+      } != false
+    }
+    val startIndex = items.indexOfFirst { it.Id == startItemId }.takeIf { it >= 0 } ?: return
     val uris = ArrayList<android.net.Uri>()
     val ids = ArrayList<String>()
     // 与 uris 下标一一对应的显示标题。播放器侧切集时用它，避免从
@@ -1976,8 +1226,8 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
     // 与 uris 下标一一对应的「记忆键」：剧集用 SeriesId（整季共用一份速度 / 音轨），
     // 电影没有 SeriesId 就用自身 Id。播放器切集时按下标取，实现「同剧继承」。
     val seriesKeys = ArrayList<String>()
-    // 与上面四条同序的媒体源 Id，供播放页的「在线字幕搜索」用。
-    // 取不到就填空串占位 —— 播放页会跳过空串（那时在线搜索按钮自动禁用）。
+    // 与队列同序的媒体源 Id，供进度上报与版本信息使用。
+    // 取不到时填空串占位，保证所有平行数组继续严格对齐。
     val mediaSourceIds = ArrayList<String>()
     // 与上面同序的版本显示名，供播放页顶栏显示「正在播的是哪个版本」。
     // 只有「用户点播的那一条」才会有值（用户只为这一条选了版本），其余一律空串占位。
@@ -1988,21 +1238,45 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
     // 拿分集名（item.Name，如「都市传说」）去搜番是搜不到的。电影没有 SeriesName ⇒ 空串，
     // 播放器侧会退回用显示名。
     val seriesNames = ArrayList<String>()
-    val firstNameId = items.firstOrNull()?.Id
-    items.forEach { item ->
-      val id = item.Id ?: return@forEach
-      // 首条若选了版本就用它；其余条目一律用各自的默认源（第一条源）
-      val sourceId = if (id == firstNameId && firstMediaSourceId != null) {
-        firstMediaSourceId
-      } else {
-        item.MediaSources?.firstOrNull()?.Id
+    items.forEachIndexed { index, item ->
+      val id = item.Id ?: return@forEachIndexed
+      // Only a manual choice is known before PlaybackInfo. Auto sources are filled by the coordinator.
+      val sourceId = if (index == startIndex) firstMediaSourceId else null
+      val url = run {
+        requireBoundServer(server)
+        loopback.register(PlaybackSpec(
+          server = repository.sessionServer(server),
+          itemId = id,
+          seriesId = item.SeriesId,
+          itemName = item.Name.orEmpty(),
+          seriesName = item.SeriesName,
+          title = displayTitle(item),
+          itemType = item.Type,
+          seasonNumber = item.ParentIndexNumber,
+          episodeNumber = item.IndexNumber,
+          runTimeTicks = item.RunTimeTicks,
+          primaryImageItemId = item.primaryImageRef()?.itemId,
+          primaryImageTag = item.primaryImageRef()?.tag,
+          backdropImageTag = item.BackdropImageTags.firstOrNull(),
+          positionTicks = if (index == startIndex && !playFromStartAll) {
+            EmbyTicks.secondsToTicks(resumeSeconds)
+          } else 0L,
+          useDirectLink = when {
+            index == startIndex && useDirectLink != null -> useDirectLink
+            else -> shouldResolveDirectLink()
+          },
+          selectPolicy = selectPolicy,
+          versionSelect = versionSelect,
+          videoSelect = videoSelect,
+          audioSelect = audioSelect,
+          subtitleSelect = subtitleSelect,
+          playlistIndex = index + 1,
+          playlistTotal = items.size,
+          explicitMediaSourceId = if (index == startIndex) firstMediaSourceId else null,
+          overrideUrl = directUrls[id],
+        ).forPlaylistEntry(index == startIndex, selectionCurrentItemOnly))
       }
-      uris.add(
-        android.net.Uri.parse(
-          directUrls[id]
-            ?: repository.videoStreamUrl(server, id, static = true, mediaSourceId = sourceId),
-        ),
-      )
+      uris.add(android.net.Uri.parse(url))
       ids.add(id)
       titles.add(displayTitle(item))
       seriesKeys.add(item.SeriesId ?: id)
@@ -2012,14 +1286,14 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
       seriesNames.add(item.SeriesName.orEmpty())
       mediaSourceIds.add(sourceId ?: "")
       mediaSourceNames.add(
-        if (id == firstNameId) firstMediaSourceName.orEmpty() else "",
+        if (index == startIndex) firstMediaSourceName.orEmpty() else "",
       )
       episodeNumbers.add(encodeEpisodeNumber(item))
     }
     if (uris.isEmpty()) return
 
-    val first = items.first()
-    val intent = Intent(Intent.ACTION_VIEW, uris.first()).apply {
+    val first = items[startIndex]
+    val intent = Intent(Intent.ACTION_VIEW, uris[startIndex]).apply {
       setClass(getApplication(), PlayerActivity::class.java)
       putExtra("internal_launch", true)
       putExtra("launch_source", "emby")
@@ -2042,15 +1316,14 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
       putStringArrayListExtra("playlist_series_keys", seriesKeys)
       putStringArrayListExtra("playlist_series_names", seriesNames)
       // 单文件/单条播放时也有剧名可用于匹配（电影为空串 ⇒ 退回显示名）
-      putExtra("emby_series_name", items.firstOrNull()?.SeriesName.orEmpty())
-      putExtra("playlist_index", 0)
+      putExtra("emby_series_name", first.SeriesName.orEmpty())
+      putExtra("playlist_index", startIndex)
       // 播放列表的 ID 顺序与 uris 一致，切集时据此把"正在播放"同步给服务器
       putEmbyPlaybackExtras(server, ids, mediaSourceIds, mediaSourceNames, episodeNumbers)
-      putEngine(engine)
-      // 列表里只要有用预解析直链换掉的条目，就得同步请求头（理由见 [putStreamHeaders]）
-      if (directUrls.isNotEmpty()) putStreamHeaders(server)
+      putStreamHeaders(server, uris[startIndex].toString())
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
+    requireBoundServer(server)
     getApplication<Application>().startActivity(intent)
   }
 
@@ -2065,7 +1338,8 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
    * 判据用白名单而不是黑名单：宁可漏判（退化成现在的行为）也不能误判，
    * 误判会把能播的东西拦下来。`Episode` 必须在内 —— 它才是电视剧真正的播放单元。
    */
-  fun isContainerOnly(item: EmbyItem): Boolean = item.Type?.let { it in CONTAINER_TYPES } ?: true
+  fun isContainerOnly(item: EmbyItem): Boolean = !EmbyItemPolicy.isSupported(item) ||
+    (item.Type?.let { type -> CONTAINER_TYPES.any { it.equals(type.trim(), ignoreCase = true) } } ?: true)
 
   /**
    * 详情页的分集列表（电视剧用）。
@@ -2124,29 +1398,25 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
     return (season * 1000 + episode).toString()
   }
 
-  /** 显示用的标题：剧集用「剧集名 S01E05」这类格式 */
-  fun displayTitle(item: EmbyItem): String {
-    val name = item.Name ?: return ""
-    val season = item.ParentIndexNumber
-    val episode = item.IndexNumber
-    return if (item.Type == "Episode" && season != null && episode != null) {
-      "S%02dE%02d %s".format(season, episode, name)
-    } else {
-      name
-    }
-  }
+  /** Full titles use the shared loemby-compatible episode format. */
+  fun displayTitle(item: EmbyItem): String = item.displayTitle()
 
   /** 构造播放地址（用于播放列表等只需要 URL 的场景） */
   fun getStreamUrl(
     server: EmbyServer,
     itemId: String,
-    static: Boolean = true,
     /** 多版本媒体要指定的版本（`MediaSources[i].Id`）；null = 服务端默认版本 */
     mediaSourceId: String? = null,
   ): String =
-    repository.videoStreamUrl(server, itemId, static, mediaSourceId = mediaSourceId)
+    repository.videoStreamUrl(server, itemId, mediaSourceId = mediaSourceId)
 
-  fun imageUrl(server: EmbyServer, item: EmbyItem, imageType: String = "Primary", maxWidth: Int = 480): String? {
+  fun imageUrl(
+    server: EmbyServer,
+    item: EmbyItem,
+    imageType: String = "Primary",
+    maxWidth: Int = 480,
+    imageIndex: Int? = null,
+  ): String? {
     // Primary 统一走 primaryImageRef()：相册 / 文件夹自身没有主图，真正带图的
     // 是 PrimaryImageItemId 指向的条目（见 domain/emby/EmbyPrimaryImage.kt）。
     if (imageType == "Primary") {
@@ -2155,10 +1425,10 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
     }
     val id = item.Id ?: return null
     val tag = when (imageType) {
-      "Backdrop" -> item.BackdropImageTags.firstOrNull()
+      "Backdrop" -> item.BackdropImageTags.getOrNull(imageIndex ?: 0)
       else -> item.ImageTags[imageType]
     }
-    return repository.imageUrl(server, id, imageType, tag, maxWidth)
+    return repository.imageUrl(server, id, imageType, tag, maxWidth, imageIndex = imageIndex)
   }
 
   // ── 照片（图集）──
@@ -2181,12 +1451,6 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
   }
 
   /** 照片原文件下载地址（「保存原图」用，不带缩放参数） */
-  fun photoDownloadUrl(server: EmbyServer, item: EmbyItem): String? {
-    val id = item.Id ?: return null
-    return EmbyClient.photoDownloadUrl(server, id)
-  }
-
-  /** 相册（PhotoAlbum）列表；recursive=false，相册层级不拉平 */
   suspend fun loadPhotoAlbums(
     server: EmbyServer,
     parentId: String,
@@ -2282,85 +1546,6 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
     personWorkCountsCache = null
   }
 
-  /** 刷新 / 刮削元数据。full=true 走全量重刮（FullRefresh），否则默认刷新（Default）。 */
-  suspend fun refreshMetadata(
-    server: EmbyServer,
-    itemId: String,
-    full: Boolean = false,
-    replaceAllMetadata: Boolean = false,
-    replaceAllImages: Boolean = false,
-  ): Boolean {
-    val ok = withContext(Dispatchers.IO) {
-      runCatching {
-        EmbyClient.refreshItem(
-          server = server,
-          itemId = itemId,
-          mode = if (full) "FullRefresh" else "Default",
-          replaceAllMetadata = replaceAllMetadata,
-          replaceAllImages = replaceAllImages,
-        )
-      }.isSuccess
-    }
-    // 刷新 / 扫描都会改动库里的演职员 ⇒ 演员角标的数字全变，缓存作废。
-    // 放在这里而不是各个调用点：refreshMetadata 是「刷新元数据」「扫描媒体库」
-    // 两条路的共同入口（见 refreshLibraryMetadata / scanLibrary），一处收口。
-    if (ok) invalidatePersonWorkCountsCache()
-    return ok
-  }
-
-  /**
-   * 「刷新元数据」：全量重刮 + 可选的强制覆盖。
-   *
-   * 与 [scanLibrary] 的区别是这边走 FullRefresh，会把片名 / 简介 / 演职员 / 图片重新刮一遍；
-   * [replaceAllMetadata] / [replaceAllImages] 决定「已有的要不要一起换掉」——
-   * 不勾时 Emby 只补缺失字段，已锁定的本地元数据会被保留。
-   *
-   * 同样是异步任务：返回 true 只代表服务器接受了请求，实际刮削要跑一阵子。
-   */
-  suspend fun refreshLibraryMetadata(
-    server: EmbyServer,
-    itemId: String,
-    replaceAllMetadata: Boolean = false,
-    replaceAllImages: Boolean = false,
-  ): Boolean =
-    refreshMetadata(
-      server = server,
-      itemId = itemId,
-      full = true,
-      replaceAllMetadata = replaceAllMetadata,
-      replaceAllImages = replaceAllImages,
-    )
-
-  /**
-   * 扫描媒体库 / 文件夹：等价于 Emby Web 端库菜单里的「扫描媒体库」。
-   *
-   * 走的还是官方那条 `POST /Items/{id}/Refresh`（Recursive=true），和 [refreshMetadata]
-   * 是同一个接口 —— 差别只在语义：这里要的是「让服务器重新读一遍目录」，
-   * 新拷进去的文件会入库、删掉的会清掉，而不是为了重刮海报简介。
-   *
-   * **它是异步任务**：接口立刻返回，服务器在后台慢慢扫，所以返回 true 只代表
-   * 「服务器接受了」，不代表已经扫完 —— 列表不会自己变，结果要等下拉刷新才看得到。
-   *
-   * @param full false = 默认刷新（只处理新增 / 变更，快）；true = 全量重刮（连元数据带图片一起重来，慢）
-   */
-  suspend fun scanLibrary(server: EmbyServer, itemId: String, full: Boolean = false): Boolean =
-    refreshMetadata(server, itemId, full)
-
-  /** 编辑（更新）条目元数据：传入「带修改后的完整 item」整体 PUT 给服务器。 */
-  suspend fun updateItemMetadata(server: EmbyServer, item: EmbyItem): Boolean =
-    withContext(Dispatchers.IO) {
-      runCatching { EmbyClient.updateItem(server, item) }.isSuccess
-    }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // 图片管理（长按菜单 → 编辑图片）
-  // ══════════════════════════════════════════════════════════════════════
-
-  /**
-   * 重新拉一次条目。换图 / 删图后要靠它拿**新的图片 tag** ——
-   * 图片地址里带着 tag，tag 不变地址就不变，图片库会直接把旧图从缓存里翻出来，
-   * 表现就是「抽屉里还是老图，关掉再进才更新」。
-   */
   suspend fun loadItem(server: EmbyServer, itemId: String): EmbyItem? =
     withContext(Dispatchers.IO) {
       runCatching { repository.getItem(server, itemId) }.getOrNull()
@@ -2371,94 +1556,6 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
     withContext(Dispatchers.IO) {
       runCatching { EmbyClient.getItemImages(server, itemId) }.getOrDefault(emptyList())
     }
-
-  suspend fun deleteItemImage(
-    server: EmbyServer,
-    itemId: String,
-    imageType: String,
-    index: Int = 0,
-  ): Boolean = withContext(Dispatchers.IO) {
-    runCatching { EmbyClient.deleteItemImage(server, itemId, imageType, index) }.isSuccess
-  }
-
-  /** 本地换图：[mime] 必须是图片类型（image/jpeg / image/png …），否则服务器会拒 */
-  suspend fun uploadItemImage(
-    server: EmbyServer,
-    itemId: String,
-    imageType: String,
-    bytes: ByteArray,
-    mime: String,
-  ): Boolean = withContext(Dispatchers.IO) {
-    runCatching { EmbyClient.uploadItemImage(server, itemId, imageType, bytes, mime) }.isSuccess
-  }
-
-  suspend fun loadRemoteImageProviders(
-    server: EmbyServer,
-    itemId: String,
-  ): List<EmbyImageProviderInfo> = withContext(Dispatchers.IO) {
-    runCatching { EmbyClient.getRemoteImageProviders(server, itemId) }.getOrDefault(emptyList())
-  }
-
-  /** 从元数据源搜某类图片；[providerName] 为空表示「所有图源」 */
-  /** 同样返回 [Result]：空图和「请求失败」要分开提示，否则排查起来没有头绪 */
-  suspend fun searchRemoteImages(
-    server: EmbyServer,
-    itemId: String,
-    imageType: String,
-    providerName: String? = null,
-  ): Result<List<EmbyRemoteImageInfo>> = withContext(Dispatchers.IO) {
-    runCatching { EmbyClient.searchRemoteImages(server, itemId, imageType, providerName) }
-  }
-
-  suspend fun downloadRemoteImage(
-    server: EmbyServer,
-    itemId: String,
-    imageType: String,
-    imageUrl: String,
-    providerName: String? = null,
-  ): Boolean = withContext(Dispatchers.IO) {
-    runCatching {
-      EmbyClient.downloadRemoteImage(server, itemId, imageType, imageUrl, providerName)
-    }.isSuccess
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // 识别 / 刮削（长按菜单 → 刮削元数据）
-  // ══════════════════════════════════════════════════════════════════════
-
-  /** 条目已绑定的外部 ID（Imdb / Tmdb / Tvdb），用于预填识别对话框 */
-  suspend fun loadExternalIdInfos(
-    server: EmbyServer,
-    itemId: String,
-  ): List<EmbyExternalIdInfo> = withContext(Dispatchers.IO) {
-    runCatching { EmbyClient.getExternalIdInfos(server, itemId) }.getOrDefault(emptyList())
-  }
-
-  /**
-   * 远程检索元数据。
-   *
-   * 返回 [Result] 而不是「失败就给空列表」：空结果和「请求出错」对用户是两回事 ——
-   * 前者是真的没匹配上，后者多半是权限 / 图源没配，提示文案必须能区分开。
-   */
-  suspend fun remoteSearchMetadata(
-    server: EmbyServer,
-    searchType: String,
-    lookup: EmbyItemLookupInfo,
-    itemId: String? = null,
-  ): Result<List<EmbyRemoteSearchResult>> = withContext(Dispatchers.IO) {
-    runCatching { EmbyClient.remoteSearch(server, searchType, lookup, itemId) }
-  }
-
-  suspend fun applyRemoteSearchResult(
-    server: EmbyServer,
-    itemId: String,
-    result: EmbyRemoteSearchResult,
-    replaceAllImages: Boolean = false,
-  ): Boolean = withContext(Dispatchers.IO) {
-    runCatching {
-      EmbyClient.applyRemoteSearch(server, itemId, result, replaceAllImages)
-    }.isSuccess
-  }
 
   /**
    * 按演员 / 导演查作品：走 Emby 的 PersonIds 过滤。
@@ -2481,7 +1578,7 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
       val maxItems = 2_000
       var index = startIndex
       var total = Int.MAX_VALUE
-      while (index < total && out.size < maxItems) {
+      while (index < total && index - startIndex < maxItems) {
         val resp = EmbyClient.getItems(
           server = server,
           personIds = listOf(personId),
@@ -2496,10 +1593,10 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
           // 「只有名称排序和随机排序有效果」就是这么来的）
           fields = EmbyClient.ITEM_FIELDS_WITH_SORT_KEYS,
         )
-        if (resp.Items.isEmpty()) break
+        if (resp.consumedCount == 0) break
         out += resp.Items
-        total = resp.TotalRecordCount
-        index += resp.Items.size
+        if (resp.TotalRecordCount > 0) total = resp.TotalRecordCount
+        index += resp.consumedCount
       }
       out
     }.getOrDefault(emptyList())
@@ -2559,311 +1656,6 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
   private suspend fun resolveGenreId(server: EmbyServer, name: String): String? =
     if (name.isBlank()) null else EmbyClient.getGenreIdByName(server, name)
 
-  // ══════════════════════════════════════════════════════════════════════
-  // 演职员合并（Person 去重）
-  // 一条铁律：**判重是纯函数、执行顺序限速、账本必须落盘**。
-  // 写服务器元数据是「影响全局、而且不报错」的操作 —— 一旦误合，
-  // 别人的作品会挂到你名下，而且**你看不到任何异常**。
-  // 所以这里没有任何自动触发的路径：每一批合并都由用户在确认弹窗里点过。
-  // ══════════════════════════════════════════════════════════════════════
-
-  /** 撤销账本：一个批次一个 JSON 文件，落在 App 私有目录（见 [PersonMergeJournal] 的说明） */
-  private val personMergeJournal by lazy {
-    PersonMergeJournal(java.io.File(getApplication<Application>().filesDir, "person_merge"))
-  }
-
-  private val personMerger by lazy { PersonMerger(personMergeJournal) }
-
-  private val _mergeState = MutableStateFlow(MergeUiState())
-  val mergeState: StateFlow<MergeUiState> = _mergeState.asStateFlow()
-
-  private var mergeJob: Job? = null
-
-  /**
-   * 扫重复演员：拉全量人员 → 纯函数聚类 → **只给进了重复组的人**补作品数。
-   *
-   * 为什么只补组内的人：作品数要一个人一次请求，全库上千人就是上千次。
-   * 而只有重复组才需要它（挑保留项、以及给人看「谁作品多」）。
-   */
-  suspend fun scanDuplicateGroups(
-    server: EmbyServer,
-    onProgress: ((Int, Int) -> Unit)? = null,
-  ): List<DuplicateGroup> = withContext(Dispatchers.IO) {
-    val refs = EmbyClient.getPersonsDetailed(server).mapNotNull { it.toPersonRef() }
-    val groups = clusterDuplicatePersons(refs)
-    val needCount = groups.flatMap { g -> g.members.map { it.id } }.distinct()
-    if (needCount.isEmpty()) return@withContext emptyList()
-    val counts = HashMap<String, Int>(needCount.size)
-    needCount.forEachIndexed { index, id ->
-      currentCoroutineContext().ensureActive()
-      onProgress?.invoke(index + 1, needCount.size)
-      counts[id] = EmbyClient.getPersonWorkCount(server, id)
-    }
-    groups.map { g -> g.copy(members = g.members.map { m -> m.copy(workCount = counts[m.id] ?: m.workCount) }) }
-  }
-
-  /** 当前登录账号是不是管理员 —— 不是的话整个「写服务器」的能力都要禁掉 */
-  suspend fun isEmbyAdmin(server: EmbyServer): Boolean =
-    withContext(Dispatchers.IO) { EmbyClient.fetchIsAdmin(server) }
-
-  /** 按名字搜演员（工具页搜索框）。走 /Persons、跨库 */
-  suspend fun searchPersonsForMerge(server: EmbyServer, term: String, limit: Int = 60): List<EmbyItem> =
-    withContext(Dispatchers.IO) {
-      runCatching { EmbyClient.searchPersons(server, term, null, limit) }.getOrDefault(emptyList())
-    }
-
-  /**
-   * 按 Id 批量取作品数（一次请求一个人，只读 TotalRecordCount，很轻）。
-   *
-   * ⚠️ 循环里必须夹 `ensureActive()`：这几个是**阻塞**请求（`EmbyClient` 全是非挂起函数），
-   * 中间没有挂起点，不加这句的话「用户退出页面」根本打断不了循环 ——
-   * 几百个人的全量核对会一直跑到头，白烧流量还占着 IO。
-   */
-  suspend fun loadPersonWorkCounts(
-    server: EmbyServer,
-    ids: List<String>,
-    onProgress: ((Int, Int) -> Unit)? = null,
-  ): Map<String, Int> = withContext(Dispatchers.IO) {
-    val unique = ids.distinct()
-    if (unique.isEmpty()) return@withContext emptyMap()
-    val out = LinkedHashMap<String, Int>(unique.size)
-    unique.forEachIndexed { index, id ->
-      currentCoroutineContext().ensureActive()
-      onProgress?.invoke(index + 1, unique.size)
-      out[id] = EmbyClient.getPersonWorkCount(server, id)
-    }
-    out
-  }
-
-  /** 手动绑定的「预览」：先看看会影响到几部作品，再让用户点确认 */
-  suspend fun previewMergeItems(server: EmbyServer, members: List<PersonRef>): List<MergeItemRef> =
-    withContext(Dispatchers.IO) { personMerger.collectAffectedItems(server, members.map { it.id }) }
-
-  /** 合并历史（按时间倒序） */
-  fun mergeHistory(): List<PersonMergeBatch> = personMergeJournal.list()
-
-  /** 账本里出现过的所有「被并掉的 Person Id」（清理孤立演员默认只在这个范围里找） */
-  fun knownMergeMemberIds(): Set<String> = personMergeJournal.knownMemberIds()
-
-  /**
-   * 服务器上**全部人员**的 Id。
-   *
-   * 只给「孤立演员」的**全库**核对用（账本范围之外的也一起看）。这一步本身是分页拉
-   * `/Persons`，还算轻；重的是后面**逐个**问作品数（一人一次请求）—— 所以调用方
-   * 必须先跟用户确认、并对数量设上限（见 `PersonMergeScreen` 的 800 上限）。
-   */
-  suspend fun allPersonIds(server: EmbyServer): List<String> =
-    withContext(Dispatchers.IO) { EmbyClient.getPersonsDetailed(server).mapNotNull { it.Id } }
-
-  /**
-   * 合并一组：把 [members] 全部并入 [canonical]。
-   *
-   * 跑在 [viewModelScope] 而不是页面作用域：用户切走 / 退页都不能中断一次写了一半的合并。
-   */
-  fun startMerge(server: EmbyServer, canonical: PersonRef, members: List<PersonRef>) {
-    runMergeJob {
-      val outcome = personMerger.merge(server, canonical, members) { p ->
-        _mergeState.value = MergeUiState(
-          running = true,
-          title = canonical.name,
-          phase = p.phase,
-          done = p.done,
-          total = p.total,
-          currentName = p.currentName,
-          wrote = p.wrote,
-          failed = p.failed,
-        )
-      }
-      refreshAfterMerge(members.map { it.id })
-      val autoNote = autoCleanIfEnabled(server, members.map { it.id })
-      _mergeState.value = MergeUiState(
-        message = mergeSummary("「${canonical.name}」", outcome) + autoNote,
-      )
-    }
-  }
-
-  /**
-   * 自动合并一整批组。
-   *
-   * @param rule 判重规则（用户在工具页选的）。⚠️ **必须传**：调用方给的是已经按同一规则
-   *   筛过的列表，这里若回落到默认 STRICT 再筛一次，宽松规则下选中的组会被静默丢掉
-   *   —— 确认弹窗写着 30 组、实际只合了 12 组，且不报错。
-   */
-  fun startAutoMerge(
-    server: EmbyServer,
-    groups: List<DuplicateGroup>,
-    rule: PersonMergeRule,
-  ) {
-    val todo = autoMergeableGroups(groups, rule)
-    if (todo.isEmpty()) {
-      _mergeState.value = MergeUiState(message = "没有可自动合并的同名组")
-      return
-    }
-    runMergeJob {
-      var groupsDone = 0
-      var wrote = 0
-      var failed = 0
-      var skipped = 0
-      val removed = LinkedHashSet<String>()
-      for (group in todo) {
-        val canonical = group.suggestedCanonical
-        val members = group.members.filter { it.id != canonical.id }
-        val label = "自动合并同名（${groupsDone + 1}/${todo.size}）"
-        _mergeState.value = MergeUiState(
-          running = true, title = label, phase = MergePhase.COLLECTING,
-          total = todo.size, done = groupsDone,
-        )
-        val outcome = personMerger.merge(server, canonical, members) { p ->
-          _mergeState.value = MergeUiState(
-            running = true, title = label, phase = p.phase,
-            done = groupsDone, total = todo.size, currentName = p.currentName,
-            wrote = wrote + p.wrote, failed = failed + p.failed,
-          )
-        }
-        groupsDone++
-        wrote += outcome.wrote
-        failed += outcome.failed
-        skipped += outcome.skipped
-        removed += members.map { it.id }
-      }
-      refreshAfterMerge(removed)
-      val autoNote = autoCleanIfEnabled(server, removed)
-      _mergeState.value = MergeUiState(
-        message = "自动合并完成：$groupsDone 组 → 改写 $wrote 部作品" +
-          (if (skipped > 0) "，另有 $skipped 部本来就是它" else "") +
-          (if (failed > 0) "，失败 $failed 部" else "") + autoNote,
-      )
-    }
-  }
-
-  /** 撤销一批合并 */
-  fun startUndo(server: EmbyServer, batch: PersonMergeBatch) {
-    runMergeJob {
-      _mergeState.value = MergeUiState(running = true, title = "撤销合并", phase = MergePhase.WRITING)
-      val outcome = personMerger.undo(server, batch) { done, total ->
-        _mergeState.value = MergeUiState(
-          running = true, title = "撤销合并", phase = MergePhase.WRITING, done = done, total = total,
-        )
-      }
-      // 撤销会把被并掉的演员「还回」作品里，但缓存当时已经单向剔除了它们 ——
-      // 单向剔除救不回来，只能整片作废让下次进页面重新拉
-      EmbyLibraryCache.clear()
-      invalidateFavoritePersonsCache()
-      _mergeState.value = MergeUiState(message = undoSummary(outcome))
-    }
-  }
-
-  /**
-   * 清理孤立演员：**触发服务端自己的「刷新人员」任务**，而不是我们直接删 Person。
-   *
-   * @param auto true = 合并完成后由开关自动跑，false = 用户点了按钮
-   */
-  fun startCleanOrphans(server: EmbyServer, candidateIds: Collection<String>, auto: Boolean) {
-    runMergeJob {
-      _mergeState.value = MergeUiState(
-        running = true,
-        title = if (auto) "自动清理孤立演员" else "清理孤立演员",
-        phase = MergePhase.WRITING,
-      )
-      val result = personMerger.cleanOrphans(server, candidateIds) { done, total ->
-        _mergeState.value = MergeUiState(
-          running = true, title = "清理孤立演员", phase = MergePhase.WRITING,
-          done = done, total = total, currentName = "正在核对演员作品数",
-        )
-      }
-      _mergeState.value = MergeUiState(message = orphanSummary(result, auto))
-    }
-  }
-
-  /** 进度框上的「取消」 */
-  fun cancelMerge() {
-    mergeJob?.cancel()
-  }
-
-  /** 结果提示已弹过，清掉 —— 免得旋转屏幕又弹一遍 */
-  fun clearMergeMessage() {
-    _mergeState.update { it.copy(message = null) }
-  }
-
-  /**
-   * 合并完按开关决定要不要顺手清理孤立演员，返回要追加到结果文案后面的后缀（不需要就是空串）。
-   *
-   * ⚠️ 这里**直接调引擎**而不是再走 [startCleanOrphans]：那个入口用的是同一个 [mergeJob] 槽位，
-   * job 还在跑时会被「已有任务在跑」挡掉，表现就是「开关明明开着、却从来没清理过」。
-   */
-  private suspend fun autoCleanIfEnabled(server: EmbyServer, memberIds: Collection<String>): String {
-    if (memberIds.isEmpty()) return ""
-    if (!browserPreferences.embyAutoCleanOrphans.get()) return ""
-    val result = personMerger.cleanOrphans(server, memberIds)
-    return if (result.orphanCount == 0) "" else "；" + orphanSummary(result, auto = true)
-  }
-
-  private fun runMergeJob(block: suspend () -> Unit) {
-    if (mergeJob?.isActive == true) return
-    mergeJob = viewModelScope.launch {
-      _mergeState.value = MergeUiState(running = true)
-      try {
-        block()
-      } catch (e: CancellationException) {
-        // 取消不是失败：账本在引擎里已经落盘（哪怕协程被取消了），提示里要把这点说出来
-        _mergeState.value = MergeUiState(message = "已取消：已经写入的部分仍可在「合并历史」里撤销")
-        throw e
-      } catch (e: Throwable) {
-        _mergeState.value = MergeUiState(message = "操作失败：${e.message ?: "未知错误"}")
-      }
-    }
-  }
-
-  /**
-   * 合并之后收拾缓存：被并掉的那几个演员条目**当场**从各列表里消失，不用等用户手动刷新
-   * （[EmbyLibraryCache.removeItem] 会置一个 compose 状态，媒体库页即便还活着也会立刻重组剔除）。
-   */
-  private fun refreshAfterMerge(memberIds: Collection<String>) {
-    memberIds.forEach { EmbyLibraryCache.removeItem(it) }
-    // 收藏页的「演员」tab 是按服务器缓存的整份名单，也得作废
-    invalidateFavoritePersonsCache()
-    // 作品数角标同样作废：合并会把 N 部作品的演职员改写成一个人，角标数字全变
-    invalidatePersonWorkCountsCache()
-  }
-
-  private fun mergeSummary(subject: String, o: MergeOutcome): String = buildString {
-    // 回读（含换动词重写、补扫之后）仍看到被并条目挂在原处 —— 明确告知「没写进去」，
-    // 同时说明数据没有被破坏、可撤销；括号里是排障现场，用户原样发回即可定位。
-    if (!o.verified) {
-      append(subject).append("：已向服务器提交 ").append(o.wrote).append(" 部作品的改写，")
-      append("但抽查发现服务器没有接受这次改动（数据没有被破坏，可在「合并历史」里撤销；")
-      append("若重试仍失败，请把括号里的内容发回以便定位）")
-      if (o.failed > 0) append("；另有 ").append(o.failed).append(" 部提交失败")
-      o.writeVerbs?.let { append("；服务器接受的写入方式：").append(it) }
-      o.verifyDetail?.let { append("（").append(it).append("）") }
-      return@buildString
-    }
-    append(subject).append("：改写 ").append(o.wrote).append(" 部作品")
-    if (o.repaired > 0) append("（其中 ").append(o.repaired).append(" 部为二次补写）")
-    if (o.skipped > 0) append("，另有 ").append(o.skipped).append(" 部本来就是它")
-    if (o.failed > 0) append("，失败 ").append(o.failed).append(" 部")
-  }
-
-  private fun undoSummary(o: UndoOutcome): String = buildString {
-    append("已撤销并恢复 ").append(o.restored).append(" 部作品")
-    if (o.renamesRestored > 0) append("，").append(o.renamesRestored).append(" 条演员已恢复原名")
-    if (o.skipped > 0) append("，跳过 ").append(o.skipped).append(" 部（之后被别处改过，未覆盖）")
-    if (o.failed > 0) append("，失败 ").append(o.failed).append(" 部")
-  }
-
-  private fun orphanSummary(result: OrphanCleanOutcome, auto: Boolean): String = when {
-    result.orphanCount == 0 -> "没有发现「已无任何作品」的演员，无需清理"
-    result.noTask -> "发现 ${result.orphanCount} 位已无作品的演员，但服务器上没有可用的「刷新人员」任务，请在 Emby 后台手动跑一次"
-    auto -> "已自动通知服务器执行「${result.taskName}」，将回收 ${result.orphanCount} 位已无作品的演员（后台任务，稍后生效）"
-    else -> "已通知服务器执行「${result.taskName}」，将回收 ${result.orphanCount} 位已无作品的演员（后台任务，稍后生效）"
-  }
-
-  /**
-   * 按「类型」查作品：走 Emby 的 Genres 过滤。
-   *
-   * 详情页点类型 chip 进来，和 [searchGlobal] 一样不传 ParentId —— 全库范围检索，
-   * 只限定可播放类型，避免把 Folder / 合集这类容器混进结果。
-   */
   suspend fun loadGenreItems(
     server: EmbyServer,
     genre: String,
@@ -2942,7 +1734,7 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
         limit = limit,
       )
     }.fold(
-      onSuccess = { EmbyItemsPage(it.Items, it.TotalRecordCount) },
+      onSuccess = { EmbyItemsPage(it.Items, it.TotalRecordCount, it.consumedCount) },
       // ⚠️ 这里以前是 getOrDefault(emptyList())：网络一抖，标签页就变成「该标签下没有作品」，
       // 用户分不清是真没有还是拉失败。返回 total=0 的空页，让 UI 的错误提示有东西可显示。
       onFailure = { e ->
@@ -3022,7 +1814,7 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
         fields = FOLDER_COVER_FIELDS,
       )
       val items = res.Items
-      if (items.isEmpty()) break
+      if (res.consumedCount == 0) break
       for (child in items) {
         val pid = child.ParentId ?: continue
         if (pid !in wanted) continue
@@ -3033,14 +1825,14 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
         val url = folderCoverUrlFor(server, child, id) ?: continue
         pool.add(url)
       }
-      if (!random) startIndex += items.size
+      if (!random) startIndex += res.consumedCount
       // 一个都没落进任何目标文件夹：说明这批条目根本不在这些文件夹下（典型是「合集」——
       // 它只是虚拟分组，片子的 ParentId 指向各自的媒体库，不指向合集），再取也是白取。
-      if (pools.isEmpty()) break
+      if (pools.isEmpty() && items.isNotEmpty()) break
       // 每个文件夹都凑够 4 张了就收工，别把整库翻完
       if (pools.count { it.value.size >= perFolder } == wanted.size) break
-      // 服务端返回的条数少于请求条数 ⇒ 子树里就这么多、已经取全了，两种模式都该收工
-      if (items.size < FOLDER_COVER_BATCH_PAGE_SIZE) break
+      // 服务端可截断 Limit；以原始消费数量和权威总数判断末页。
+      if (res.TotalRecordCount > 0 && startIndex >= res.TotalRecordCount && !random) break
     }
     // ⚠️ 只交出**凑满 perFolder 张**的文件夹，不足的宁可交白卷，让卡片走单文件夹兜底去补齐。
     //   以前把「这一批只扫到 1~2 张」的半成品也交出去，卡片看见 `cached != null` 就不再兜底，
@@ -3106,7 +1898,7 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
         recursive = true,
       )
       val items = page.Items
-      if (items.isEmpty()) break
+      if (page.consumedCount == 0) break
       val before = urls.size
       for (child in items) {
         if (urls.size >= count) break
@@ -3118,12 +1910,12 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
       if (random) {
         // 这一批随机样本一张新图都没带来：要么文件夹里带图的本来就没几张，
         // 要么服务端忽略了 Random（每次都回同一批）。继续重抽也是白费请求，直接收工。
-        if (urls.size == before) break
+        if (urls.size == before && items.isNotEmpty()) break
         continue
       }
-      consumed += items.size
-      // 服务端可能截断 Limit；拿「返回条数 < 请求条数」当「已到末页」的信号。
-      if (items.size < FOLDER_COVER_PAGE_SIZE) break
+      consumed += page.consumedCount
+      // 服务端可能截断 Limit；无总数时继续到原始空页或取样预算结束。
+      if (page.TotalRecordCount > 0 && consumed >= page.TotalRecordCount) break
     }
     urls
   }.getOrElse { e ->
@@ -3254,16 +2046,44 @@ private fun isLocalIsoProxyUrl(url: String): Boolean =
      */
     private const val HOME_LOAD_WAIT_MS = 8_000L
 
-    fun factory(application: Application): ViewModelProvider.Factory = viewModelFactory {
-      initializer { EmbyViewModel(application) }
+    fun factory(application: Application, boundServer: EmbyServer? = null): ViewModelProvider.Factory = viewModelFactory {
+      initializer { EmbyViewModel(application, boundServer) }
     }
   }
+}
+
+internal fun embyPostgresErrorResource(reason: PostgresFailure): Int = when (reason) {
+  PostgresFailure.INVALID_CONFIG -> R.string.emby_shared_error_config
+  PostgresFailure.CONNECTION -> R.string.emby_shared_error_connection
+  PostgresFailure.TIMEOUT -> R.string.emby_shared_error_timeout
+  PostgresFailure.AUTHENTICATION -> R.string.emby_shared_error_auth
+  PostgresFailure.DATABASE -> R.string.emby_shared_error_database
+  PostgresFailure.TLS -> R.string.emby_shared_error_tls
+  PostgresFailure.STORAGE -> R.string.emby_shared_error_storage
+  PostgresFailure.LOAD -> R.string.emby_shared_error_load
+  PostgresFailure.SCHEMA_INCOMPATIBLE -> R.string.emby_shared_error_schema
+  PostgresFailure.SOURCE_CHANGED -> R.string.emby_shared_error_source_changed
+  PostgresFailure.NOT_FOUND -> R.string.emby_shared_error_not_found
+  PostgresFailure.COMMIT_UNKNOWN -> R.string.emby_shared_error_commit_unknown
+  PostgresFailure.UNKNOWN -> R.string.emby_shared_error_unknown
+}
+
+internal fun embyServerErrorResource(failure: Throwable): Int {
+  var candidate: Throwable? = failure
+  repeat(10) {
+    val current = candidate ?: return R.string.emby_shared_operation_failed
+    if (current is PostgresException) return embyPostgresErrorResource(current.reason)
+    candidate = current.cause
+  }
+  return R.string.emby_shared_operation_failed
 }
 
 /** 分页加载结果 */
 data class EmbyItemsPage(
   val items: List<EmbyItem>,
   val totalCount: Int,
+  /** Raw server positions consumed, including hidden/duplicate items. */
+  val consumedCount: Int = items.size,
 )
 
 /**
@@ -3277,6 +2097,7 @@ data class EmbyGlobalSearchResult(
   val items: List<EmbyItem>,
   val totalCount: Int,
   val personCount: Int,
+  val consumedCount: Int = items.size - personCount,
 ) {
   /**
    * 结果是不是被上限截断了。
@@ -3284,5 +2105,5 @@ data class EmbyGlobalSearchResult(
    * UI 据此显示「只显示前 N 条，请输入更精确的关键词」——
    * 静默截断会让用户以为「搜全了就是这个结果」，从而错过想找的片。
    */
-  val truncated: Boolean get() = totalCount > 0 && totalCount > items.size - personCount
+  val truncated: Boolean get() = totalCount > 0 && totalCount > consumedCount
 }

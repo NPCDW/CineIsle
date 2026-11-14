@@ -1,5 +1,5 @@
 <resources>
-  <string name="app_name" translatable="false">影屿</string>
+  <string name="app_name" translatable="false">loembyA</string>
   <string name="widget_continue_watching">Continue Watching</string>
   <string name="widget_continue_watching_empty">Nothing to continue</string>
   <string name="generic_reset">Reset</string>
@@ -21,24 +21,13 @@
   <string name="pref_appearance_material_you_title">Material You</string>
   <string name="pref_appearance_material_you_summary">Enable dynamic colors</string>
   <string name="pref_appearance_material_you_summary_disabled">Only available on Android 12 and above</string>
-  <string name="pref_appearance_unlimited_name_lines_title">Show full names</string>
-  <string name="pref_appearance_unlimited_name_lines_summary">Show full folder and video names without truncation</string>
-  <string name="pref_appearance_hide_player_buttons_background_title">Hide player buttons background</string>
-  <string name="pref_appearance_hide_player_buttons_background_summary">Hide the background of all player control buttons</string>
-  <string name="pref_appearance_category_file_browser">File Browser</string>
-  <string name="pref_appearance_show_unplayed_old_video_label_title">Show label for new unplayed videos</string>
-  <string name="pref_appearance_show_unplayed_old_video_label_summary">Display a \"New\" label on videos added within specified days that have never been played</string>
-  <string name="pref_appearance_unplayed_old_video_days_title">Days threshold for new video label</string>
-  <string name="pref_appearance_unplayed_old_video_days_summary">Videos added within the last %d days without playback history will be marked as new</string>
+  <string name="pref_appearance_category_emby_browser">Emby Browsing</string>
   <string name="pref_appearance_theme_picker_label">App Theme</string>
-  <string name="pref_appearance_auto_scroll_title">Auto-scroll to last played</string>
-  <string name="pref_appearance_auto_scroll_summary">Automatically scroll to the last played video when opening video lists</string>
   <string name="pref_appearance_side_scrollbar_title">Side scrollbar</string>
-  <string name="pref_appearance_side_scrollbar_summary_on">Long lists (network browsing, Emby libraries) show a draggable scrollbar on the right; drag the thumb to jump quickly</string>
+  <string name="pref_appearance_side_scrollbar_summary_on">Long lists in Emby libraries show a draggable scrollbar on the right; drag the thumb to jump quickly</string>
   <string name="pref_appearance_side_scrollbar_summary_off">No scrollbar is shown on any list; scrolling works with gestures only</string>
   <string name="pref_appearance_watched_threshold_title">Watched threshold</string>
   <string name="pref_appearance_watched_threshold_summary">Mark video as watched when playback reaches %d%%</string>
-  <string name="video_label_new">NEW</string>
   <!-- Theme names -->
   <string name="theme_default">Default</string>
   <string name="theme_dynamic">Dynamic</string>
@@ -101,16 +90,6 @@
   <string name="pref_clear_config_cache_summary">Clear the cached mpv.conf settings</string>
   <string name="pref_clear_thumbnail_cache_title">Clear thumbnail cache</string>
   <string name="pref_clear_thumbnail_cache_summary">Delete all cached video thumbnails (will regenerate as you browse folders)</string>
-  <string name="pref_layout_title">Player Layout</string>
-  <string name="pref_layout_summary">Customize player button layout</string>
-  <string name="pref_layout_reset_default">Reset to default</string>
-  <string name="pref_layout_top_right_controls">Top Right Controls</string>
-  <string name="pref_layout_bottom_right_controls">Bottom Right Controls</string>
-  <string name="pref_layout_bottom_left_controls">Bottom Left Controls</string>
-  <string name="pref_layout_portrait_bottom_controls">Portrait Controls</string>
-  <string name="pref_layout_preview">Preview</string>
-  <string name="pref_layout_reset_title">Reset layout?</string>
-  <string name="pref_layout_reset_summary">All customized player control layouts will be reset to default positions</string>
   <string name="pref_player">Player</string>
   <string name="pref_player_summary">Orientation, gestures and controls</string>
   <string name="pref_player_orientation">Orientation</string>
@@ -144,7 +123,6 @@
   <string name="pref_player_gestures_hold_for_multiple_speed">Hold for multi - x speed</string>
   <string name="pref_player_controls">Controls</string>
   <string name="pref_player_controls_allow_gestures_in_panels">Allow gestures in panels</string>
-  <string name="pref_player_controls_display_volume_as_percentage">Display volume as percentage</string>
   <string name="pref_player_controls_show_loading_circle">Show loading circle</string>
   <string name="pref_player_display_show_status_bar">Show system status bar with controls</string>
   <string name="pref_player_display_panel_opacity">Panel opacity</string>
@@ -162,15 +140,12 @@
   <string name="pref_gesture_double_tap_right_title">Double tap (right)</string>
   <string name="pref_gesture_use_single_tap_for_center_title">Use single tap for center gesture</string>
   <string name="pref_gesture_use_single_tap_for_center_summary">Use a single tap in the center for gestures (like play/pause) instead of a double tap.</string>
-  <string name="pref_gesture_view_title">View</string>
   <string name="pref_gesture_double_tap_custom_info">You can bind custom actions to these gestures in input.conf using the following key codes:\n\nLeft: MBTN_LEFT_DBL\nCenter: MBTN_MID_DBL\nRight: MBTN_RIGHT_DBL</string>
   <string name="pref_gesture_media_title">Media controls</string>
   <string name="pref_gesture_media_previous">Previous</string>
   <string name="pref_gesture_media_play">Play/Pause</string>
   <string name="pref_gesture_media_next">Next</string>
   <string name="pref_gesture_media_custom_info">You can bind custom actions to media controls in input.conf using the following key codes:\n\nPrevious: PREV\nPlay/Pause: PLAYPAUSE\nNext: NEXT</string>
-  <string name="pref_gesture_tap_thumbnail_to_select_title">Tap thumbnail to select</string>
-  <string name="pref_gesture_tap_thumbnail_to_select_summary">When enabled, tapping on thumbnails enters selection mode. When disabled, tapping thumbnails plays the video.</string>
   <string name="pref_decoder">Decoder</string>
   <string name="pref_decoder_summary">Hardware decoding, pixel format, debanding</string>
   <string name="pref_decoder_profile_title">MPV Profile</string>
@@ -230,17 +205,6 @@
   <string name="player_crop_applied">Black bars cropped</string>
   <string name="player_crop_failed">No black bars detected</string>
   <string name="player_crop_off">Cropping removed</string>
-  <string name="player_gif_action">Record GIF</string>
-  <string name="player_gif_title">Record a GIF clip</string>
-  <string name="player_gif_hint">Captures the next few seconds from the current position (playback resumes automatically if paused). Saved to Pictures/CineIsle. Higher quality means a larger file.</string>
-  <string name="player_gif_seconds">%1$ds</string>
-  <string name="player_gif_start">Start recording</string>
-  <string name="player_gif_recording">Recording… playback is kept running</string>
-  <string name="player_gif_cancel">Cancel recording</string>
-  <string name="player_gif_saved">GIF saved to Gallery</string>
-  <string name="player_gif_failed">Couldn\'t record the GIF</string>
-  <string name="player_gif_quality">Quality</string>
-  <string name="player_gif_quality_px">%1$dP</string>
   <string name="player_speed_decrease">Decrease speed by 0.05x</string>
   <string name="player_speed_increase">Increase speed by 0.05x</string>
   <string name="pref_audio_channels">Audio channels</string>
@@ -266,8 +230,6 @@
   <string name="pref_advanced_cleared_playback_history">Cleared playback history</string>
   <string name="pref_advanced_clear_fonts_cache">Clear cached fonts</string>
   <string name="pref_advanced_cleared_fonts_cache">Cleared cached fonts</string>
-  <string name="pref_advanced_enable_recently_played_title">Recently Played</string>
-  <string name="pref_advanced_enable_recently_played_summary">Track and display recently played videos and playlists</string>
   <string name="pref_advanced_features_tooltip">Enable experimental or advanced features such as stats page and Anime4K upscaling</string>
   <string name="pref_anime4k_title">Anime4K upscaling (Experimental)</string>
   <string name="pref_anime4k_summary">Enable Anime4K upscaling filter</string>
@@ -283,9 +245,9 @@
   <string name="anime4k_mode_a">A</string>
   <string name="anime4k_mode_b">B</string>
   <string name="anime4k_mode_c">C</string>
-  <string name="anime4k_mode_a_plus">A+</string>
-  <string name="anime4k_mode_b_plus">B+</string>
-  <string name="anime4k_mode_c_plus">C+</string>
+  <string name="anime4k_mode_a_plus">A+A</string>
+  <string name="anime4k_mode_b_plus">B+B</string>
+  <string name="anime4k_mode_c_plus">C+A</string>
   <!-- Anime4K Qualities (Renamed to Mode in UI) -->
   <string name="anime4k_quality_fast">Fast</string>
   <string name="anime4k_quality_balanced">Balanced</string>
@@ -293,17 +255,7 @@
   <string name="pref_about_title">About</string>
   <string name="pref_about_summary">Acknowledgments, licenses</string>
   <string name="pref_about_oss_libraries">Libraries</string>
-  <string name="pref_about_donate_title">Donate</string>
-  <string name="pref_about_donate_kofi">Ko-fi</string>
-  <string name="pref_about_donate_kofi_summary">Support the developer on Ko-fi</string>
-  <string name="pref_about_donate_kofi_url" translatable="false">https://ko-fi.com/adityanarvekar</string>
-  <string name="pref_about_donate_paypal">PayPal</string>
-  <string name="pref_about_donate_paypal_summary">Support the developer on PayPal</string>
-  <string name="pref_about_donate_paypal_url" translatable="false">https://paypal.me/aadinarvekar</string>
-  <string name="pref_about_donate_upi">UPI</string>
-  <string name="pref_about_donate_upi_id" translatable="false">aadiinarvekar@upi</string>
   <string name="player_sheets_add_ext_sub">Add external subtitles</string>
-  <string name="player_sheets_add_ext_audio">Add external audio tracks</string>
   <string name="player_sheets_tracks_off">Off</string>
   <string name="player_sheets_track_title_w_lang" translatable="false">#%d: %s (%s)</string>
   <string name="player_sheets_track_title_wo_lang" translatable="false">#%d: %s</string>
@@ -346,40 +298,14 @@
   <string name="player_sheets_audio_delay_card_title">Audio delay</string>
   <string name="player_sheets_sub_delay_audio_sound_heard">Sound heard</string>
   <string name="player_sheets_sub_delay_sound_sound_spotted">Sound spotted</string>
-  <string name="player_sheets_video_settings_title">Video settings</string>
-  <string name="player_sheets_deband_title">Deband</string>
   <string name="player_sheets_deband_none">None</string>
   <string name="player_sheets_deband_cpu">CPU</string>
   <string name="player_sheets_deband_gpu">GPU</string>
-  <string name="player_sheets_deband_iterations">Iterations</string>
-  <string name="player_sheets_deband_threshold">Threshold</string>
-  <string name="player_sheets_deband_range">Range</string>
-  <string name="player_sheets_deband_grain">Grain</string>
-  <string name="player_sheets_filters_title">Filters</string>
-  <string name="player_sheets_filters_brightness">Brightness</string>
-  <string name="player_sheets_filters_contrast">Contrast</string>
-  <string name="player_sheets_filters_gamma">Gamma</string>
-  <string name="player_sheets_filters_Saturation">Saturation</string>
-  <string name="player_sheets_filters_hue">Hue</string>
-  <string name="player_sheets_filters_sharpness">Sharpness</string>
-  <string name="player_sheets_filters_warning">Some filters may not work on your current video driver</string>
   <string name="player_sheets_speed_slider_label">Speed</string>
   <string name="player_sheets_speed_make_default">Make default speed</string>
   <string name="player_sheets_decoder_formatted" formatted="false">%s (%s)</string>
   <string name="numeric_chooser_value_too_big">Value too big</string>
   <string name="numeric_chooser_value_too_small">Value too small</string>
-  <string name="player_sheets_more_title">More</string>
-  <string name="player_sheets_stats_page_title">Default statistics page</string>
-  <string name="player_sheets_stats_page_chip">Page %d</string>
-  <string name="player_sheets_stats_page_0_desc">Disabled. No overlay statistics.</string>
-  <string name="player_sheets_stats_page_1_desc">Overview. CPU/GPU usage, A/V sync, dropped frames, clock speed.</string>
-  <string name="player_sheets_stats_page_2_desc">Frame timing. Decode/render times, scaler info.</string>
-  <string name="player_sheets_stats_page_3_desc">Cache status. Buffer health, demuxer cache, seekable ranges.</string>
-  <string name="player_sheets_stats_page_4_desc">Current keybindings. List of mapped keyboard shortcuts.</string>
-  <string name="player_sheets_stats_page_5_desc">Track list. Details of video, audio and subtitle tracks.</string>
-  <string name="player_aspect_fit">Fit Screen</string>
-  <string name="player_aspect_crop">Crop</string>
-  <string name="player_aspect_stretch">Stretch</string>
   <string name="crash_screen_title">Oops</string>
   <string name="crash_screen_subtitle">Looks like %s experienced an unexpected error. Consider sharing the crash logs in a GitHub issue.</string>
   <string name="crash_screen_logs_title">Crash logs:</string>
@@ -388,24 +314,11 @@
   <string name="crash_screen_fix_crash">Fix Crash (Delete Database)</string>
   <string name="crash_screen_database_deleted">Database deleted successfully. Please restart the app.</string>
   <string name="crash_screen_database_hint">This crash appears to be database-related. Try deleting the database to fix it.</string>
-  <string name="timer_picker_enter_timer">Enter time</string>
-  <string name="timer_picker_pick_time">Pick time</string>
-  <string name="timer_title">Sleep timer</string>
-  <string name="timer_remaining">%s remaining</string>
-  <string name="toast_sleep_timer_ended">Sleep timer ended</string>
   <string name="toast_file_no_longer_exists">File no longer exists</string>
   <string name="toast_playback_failed">Playback failed: the media could not be opened</string>
   <string name="volume_slider_absolute_value" translatable="false">%d</string>
   <string name="github_repo_url" translatable="false">https://github.com/nu1lkali/CineIsle</string>
-  <string name="swap_the_volume_and_brightness_slider">Swap volume and brightness slider</string>
-  <string name="pref_player_display_reduce_player_animation">Reduce player animation</string>
   <string name="pref_player_display_hide_player_control_time">Hide player control time</string>
-  <string name="show_splash_ovals_on_double_tap_to_seek">Show ripple when double tap seeking</string>
-  <string name="show_time_on_double_tap_to_seek">Show seek time</string>
-  <string name="player_sheets_frame_navigation_title">Frame Navigation</string>
-  <string name="player_sheets_frame_navigation_snapshot_saved" translatable="false">Saved to Pictures/mpvSnaps</string>
-  <string name="player_sheets_frame_navigation_include_subtitles">Include subtitles in snapshot</string>
-  <string name="player_sheets_zoom_slider_label">Video Zoom</string>
   <plurals name="seconds">
     <item quantity="one">%1$d second</item>
     <item quantity="other">%1$d seconds</item>
@@ -449,25 +362,7 @@
   <string name="pref_player_disk_cache_size">Cache size limit</string>
   <string name="pref_player_disk_cache_size_summary">Per stream</string>
   <string name="pref_player_clear_disk_cache">Clear stream cache</string>
-  <string name="pref_player_clear_disk_cache_summary">Delete cached stream data. Downloaded offline files are not affected</string>
-  <!-- Folders Preferences -->
-  <string name="pref_folders_title">Folders</string>
-  <string name="pref_folders_summary">Manage folder blacklist</string>
-  <string name="pref_folders_empty_title">No blacklisted folders</string>
-  <string name="pref_folders_empty_message">Tap the button below to add folders you want to hide from the folder list</string>
-  <string name="pref_folders_add_folder">Add Folder to Blacklist</string>
-  <string name="pref_folders_select_folders">Select folder/s</string>
-  <string name="pref_folders_loading">Loading folders…</string>
-  <string name="pref_folders_no_folders">No folders found</string>
-  <string name="pref_folders_clear_all">Clear all blacklisted folders</string>
-  <string name="pref_folders_clear_all_confirm_title">Clear all blacklisted folders?</string>
-  <string name="pref_folders_clear_all_confirm_message">This will remove all folders from the blacklist. You can add them back later.</string>
-  <string name="pref_folders_blacklist">Blacklist</string>
-  <string name="pref_folders_blacklisted">Folder(s) blacklisted</string>
-  <!-- M3U Playlist Strings -->
-  <string name="pref_subtitles_searching">Searching…</string>
-  <string name="pref_subtitles_found">%d subtitles found</string>
-  <string name="pref_subtitles_online_search_title">Online Subtitle Search</string>
+  <string name="pref_player_clear_disk_cache_summary">Delete cached Emby stream data</string>
   <!-- Additional strings for Chinese translation compatibility -->
   <string name="settings">Settings</string>
   <string name="export_settings">Export settings</string>
@@ -477,22 +372,13 @@
   <string name="double_tap_seek_area_width">Double tap seek area width</string>
   <string name="autoplay_next_video">Autoplay next video</string>
   <string name="enable_next_previous_navigation">Enable next/previous navigation</string>
-  <string name="open_file">Open file</string>
   <string name="recently_played">Recently played</string>
-  <string name="open_link">Open link</string>
   <string name="install">Install</string>
   <string name="download">Download</string>
-  <string name="failed_load_audio_invalid_uri">Failed to load audio file: Invalid URI</string>
-  <string name="audio_track_added">Audio track added</string>
-  <string name="failed_load_audio">Failed to load audio: %s</string>
   <string name="invalid_subtitle_format">Invalid subtitle file format</string>
   <string name="subtitle_added">%s added</string>
   <string name="failed_load_subtitle">Failed to load subtitle</string>
-  <string name="remove_from_playlist">Remove %1$d %2$s from playlist?</string>
-  <string name="remove_playlist_items_confirm">The selected %2$s will be removed from this playlist. Original %3$s will not be deleted.</string>
   <string name="search_videos">Search videos…</string>
-  <string name="search_folders_and_videos">Search folders and videos…</string>
-  <string name="search_playlists">Search playlists…</string>
   <string name="play_recently_played_or_first">Play recently played or first video</string>
   <string name="toggle_menu">Toggle menu</string>
   <string name="close">Close</string>
@@ -517,20 +403,14 @@
   <string name="show_navigation_bar_with_controls">Show navigation bar with controls</string>
   <string name="enable_lua_scripts">Enable Lua scripts</string>
   <string name="manage_lua_scripts">Manage Lua scripts</string>
-  <string name="rename_playlist">Rename playlist</string>
-  <string name="create_playlist">Create playlist</string>
   <string name="add_connection">Add connection</string>
-  <string name="playlist_name">Playlist name</string>
-  <string name="playlist_url">Playlist URL</string>
   <string name="enter_url">Enter URL</string>
   <string name="new_name">New name</string>
   <string name="folder_name">Folder name</string>
   <string name="video_url">Video URL</string>
-  <string name="choose_local_m3u_file">Choose local M3U file</string>
   <string name="add_from_url">Add from URL</string>
   <string name="home">Home</string>
   <string name="recents">Recents</string>
-  <string name="playlists">Playlists</string>
   <string name="network">Network</string>
   <string name="seconds">Seconds</string>
   <string name="milliseconds">Milliseconds</string>
@@ -543,41 +423,13 @@
   <string name="use_https_secure_connection">Use HTTPS (secure connection)</string>
   <string name="username">Username</string>
   <string name="password">Password</string>
-  <string name="selected_long_press_to_reorder">Selected (long press to reorder)</string>
-  <string name="available">Available</string>
   <string name="width">Width</string>
   <string name="height">Height</string>
-  <string name="filter_presets">Filter presets</string>
-  <string name="no_storage_devices_found">No storage devices found</string>
-  <string name="no_folders_or_supported_files">No folders or supported files</string>
   <string name="hello_world">Hello world</string>
-  <!-- M3U Playlist Strings -->
-  <string name="playlist_add_m3u_title">Add M3U Playlist</string>
-  <string name="playlist_add_m3u_description">Enter the URL of an M3U playlist file</string>
-  <string name="playlist_url_label">Playlist URL</string>
-  <string name="playlist_url_placeholder">https://example.com/playlist.m3u</string>
-  <string name="playlist_url_hint">Supports .m3u and .m3u8 formats</string>
-  <string name="playlist_add_success">M3U playlist added successfully</string>
-  <string name="playlist_add_error">Failed to add M3U playlist: %s</string>
-  <string name="playlist_create_empty">Create empty playlist</string>
-  <string name="playlist_add_from_url">Add from M3U/M3U8 URL</string>
-  <string name="playlist_refresh_m3u">Refresh M3U playlist</string>
-  <string name="playlist_refresh_success">Playlist refreshed successfully</string>
-  <string name="playlist_refresh_error">Failed to refresh playlist: %s</string>
-  <string name="playlist_m3u_badge">M3U</string>
 
   <!-- ===== 播放器：控件浮层提示 =====
        这些文案原先硬编码在 PlayerControls.kt 里，中文界面下也照旧显示英文，
        是「汉化不完全」最直接的来源之一。 -->
-  <string name="player_update_repeat_off">Repeat: Off</string>
-  <string name="player_update_repeat_one">Repeat: Current file</string>
-  <string name="player_update_repeat_all">Repeat: All playlist</string>
-  <string name="player_update_shuffle_on">Shuffle: On</string>
-  <string name="player_update_shuffle_off">Shuffle: Off</string>
-  <string name="player_update_shuffle_unavailable">Shuffle: Not available</string>
-  <string name="player_update_frame">Frame: %1$d</string>
-  <string name="player_update_frame_with_total">Frame: %1$d/%2$d</string>
-  <string name="player_update_zoom">Zoom: %1$d%%</string>
 
   <!-- ===== 播放器：控件无障碍描述（TalkBack 朗读用）===== -->
   <string name="player_control_previous">Previous</string>
@@ -585,18 +437,6 @@
   <string name="player_control_rewind_10s">Back %1$d seconds</string>
   <string name="player_control_forward_10s">Forward %1$d seconds</string>
   <string name="player_battery_percent">%1$d%%</string>
-  <string name="pref_seek_step_title">Seek step</string>
-  <string name="pref_seek_step_summary">How far the two arrow buttons jump; forward and backward are set separately</string>
-  <string name="pref_seek_forward_title">Forward step</string>
-  <string name="pref_seek_backward_title">Backward step</string>
-  <string name="pref_seek_seconds">%1$d s</string>
-  <string name="pref_player_status_indicators_title">Control bar info</string>
-  <string name="pref_show_player_clock_title">Show clock</string>
-  <string name="pref_show_player_clock_summary">Show the current time on the control bar</string>
-  <string name="pref_show_player_battery_title">Show battery</string>
-  <string name="pref_show_player_battery_summary">Show the battery icon and percentage (turns red below 15%%)</string>
-  <string name="pref_show_player_net_speed_title">Show network speed</string>
-  <string name="pref_show_player_net_speed_summary">Shows the current network loading speed next to the clock and battery. Only network sources have a reading.</string>
   <string name="pref_media_source_pref_title">Preferred version</string>
   <string name="pref_media_source_pref_summary">When a title has multiple versions, pick one automatically by this rule</string>
   <string name="media_source_pref_default">Follow server default</string>
@@ -607,145 +447,52 @@
   <string name="media_source_pref_smallest_size">Smallest file size</string>
   <string name="media_source_pref_best_quality_per_size">Best quality, then smaller file</string>
   <string name="player_control_playback_speed">Playback Speed</string>
-  <string name="player_control_previous_frame">Previous Frame</string>
-  <string name="player_control_next_frame">Next Frame</string>
-  <string name="player_control_take_screenshot">Take Screenshot</string>
-  <string name="player_control_video_zoom">Video Zoom</string>
-  <string name="player_control_vertical_flip">Vertical Flip</string>
-  <string name="player_control_clear_loop">Clear Loop</string>
-  <string name="player_control_ab_loop">AB Loop</string>
   <string name="player_control_slide_to_unlock">Slide to unlock</string>
   <string name="player_control_back">Back</string>
+  <string name="player_control_open_media_details">Open media details</string>
   <string name="player_control_fullscreen">Fullscreen</string>
   <string name="player_control_play_pause">Play / Pause</string>
   <string name="player_control_lock_controls">Lock controls</string>
-
-  <!-- ===== GSY 播放页：玻璃控件条上的按钮 ===== -->
-  <string name="gsy_control_speed">Speed</string>
-  <string name="gsy_control_loop">Loop</string>
-  <string name="gsy_control_aspect">Display ratio</string>
-  <string name="gsy_control_render">Render mode</string>
-  <string name="gsy_control_filter">Filter</string>
-  <string name="gsy_control_mute">Mute</string>
-  <string name="gsy_control_unmute">Unmute</string>
-  <string name="gsy_control_prev">Previous video</string>
-  <string name="gsy_control_next">Next video</string>
-  <string name="gsy_control_switch_engine">Switch to the mpv player</string>
-  <string name="gsy_control_orientation">Switch portrait / landscape</string>
-  <string name="gsy_control_screenshot">Take screenshot</string>
-  <string name="gsy_control_subtitle">Subtitles</string>
-  <string name="gsy_control_audio_track">Audio track</string>
-  <string name="gsy_control_chapters">Chapters</string>
-  <string name="gsy_control_pip">Picture in picture</string>
-  <string name="gsy_control_cast">Cast (DLNA)</string>
-  <string name="gsy_control_dislike">标记为不喜欢</string>
-  <string name="gsy_control_dislike_on">已标记为不喜欢</string>
-  <string name="gsy_dislike_reason_title">为什么不喜欢它？</string>
-  <string name="gsy_dislike_reason_hint">写一句原因（可不填）</string>
-  <string name="gsy_dislike_unavailable">这一条无法标记</string>
-  <string name="gsy_dislike_reason_save">保存</string>
-  <string name="gsy_dislike_reason_save_and_mark">保存并标记</string>
-
-  <string name="gsy_snapshot_saved">Saved to Pictures/CineIsleSnaps</string>
-  <string name="gsy_snapshot_failed">Failed to save screenshot</string>
-
-  <string name="gsy_subtitle_title">Subtitles</string>
-  <string name="gsy_subtitle_pick">Choose subtitle file…</string>
-  <string name="gsy_subtitle_off">Turn subtitles off</string>
-  <string name="gsy_subtitle_delay">Subtitle delay…</string>
-  <string name="gsy_subtitle_loaded">Subtitles loaded: %1$s</string>
-  <string name="gsy_subtitle_cleared">Subtitles off</string>
-  <string name="gsy_subtitle_delay_value">Delay %1$s</string>
-  <string name="gsy_subtitle_delay_earlier">0.5 s earlier</string>
-  <string name="gsy_subtitle_delay_later">0.5 s later</string>
-  <string name="gsy_subtitle_delay_reset">Reset</string>
-
-  <string name="gsy_audio_title">Audio track</string>
-  <string name="gsy_audio_unsupported">Audio track switching needs the IJK kernel (current: %1$s)</string>
-  <string name="gsy_audio_empty">No audio tracks found</string>
-
-  <string name="gsy_track_unsupported">Switching %1$s needs the IJK kernel (current: %2$s)</string>
-  <string name="gsy_track_empty">No %1$s found</string>
-  <string name="gsy_track_off">Off</string>
-  <string name="gsy_subtitle_track_title">Subtitle track</string>
-  <string name="gsy_track_kind_audio">audio tracks</string>
-  <string name="gsy_track_kind_subtitle">subtitle tracks</string>
-
-  <!-- 字幕样式（清单 #19）。全部与 mpv 侧共用同一份设置，切换内核后依然生效。 -->
-  <string name="gsy_subtitle_style">Subtitle style</string>
-  <!-- %1$s 是本内核做不到的项（字体名 / 粗体 / ASS 覆盖…），如实告知而不是默默忽略 -->
-  <string name="gsy_subtitle_style_with_unsupported">Subtitle style\nNot available on this kernel: %1$s</string>
-  <string name="gsy_subtitle_style_size">Size: %1$d</string>
-  <string name="gsy_subtitle_style_size_pick">Subtitle size</string>
-  <string name="gsy_subtitle_style_shadow">Outline: %1$d</string>
-  <string name="gsy_subtitle_style_shadow_pick">Outline thickness</string>
-  <string name="gsy_subtitle_style_color">Text colour</string>
-  <string name="gsy_subtitle_style_border_color">Outline colour</string>
-  <string name="gsy_subtitle_style_align">Alignment: %1$s</string>
-  <string name="gsy_subtitle_style_align_pick">Alignment</string>
-  <string name="gsy_subtitle_style_align_left">Left</string>
-  <string name="gsy_subtitle_style_align_center">Centre</string>
-  <string name="gsy_subtitle_style_align_right">Right</string>
-  <string name="gsy_subtitle_style_align_auto">Auto</string>
-  <string name="gsy_subtitle_style_reset">Reset style</string>
-  <string name="gsy_subtitle_style_reset_done">Subtitle style reset</string>
-
-  <!-- 章节（清单 #19）。数据来自 Emby，GSY 内核本身没有章节能力。 -->
-  <string name="gsy_chapters_title">Chapters</string>
-  <string name="gsy_chapters_loading">Loading chapters…</string>
-  <string name="gsy_chapters_empty">No chapters for this video</string>
-  <string name="gsy_chapters_local_no_server">Chapters need an Emby library — this file has none</string>
-  <string name="gsy_chapters_untitled">Chapter %1$d</string>
-  <string name="gsy_chapters_now">▶</string>
-  <string name="gsy_chapters_jumped">Jumped to chapter</string>
-  <string name="gsy_chapters_seek_failed">Could not jump to that chapter</string>
-
-  <string name="gsy_pip_unsupported">Picture-in-picture is not supported on this device</string>
-  <string name="gsy_pip_play">Play</string>
-  <string name="gsy_pip_pause">Pause</string>
-  <string name="gsy_pip_rewind">Back 10 s</string>
-  <string name="gsy_pip_forward">Forward 10 s</string>
-  <string name="gsy_cast_no_source">No playable source to cast</string>
-
-  <string name="gsy_pref_rotate_with_system">Follow system auto-rotate</string>
-  <string name="gsy_pref_rotate_with_system_summary">Off (default): the player always reacts to the gravity sensor. On: once the system auto-rotate switch is off, the player stops rotating with the sensor too.</string>
-
-  <!-- ===== GSY 播放器独立设置页（与 mpv 的配置完全隔离） ===== -->
-  <string name="pref_gsy_player">GSY Player</string>
-  <string name="pref_gsy_player_summary">Kernel, rendering, display ratio, gestures, fullscreen and rotation of the standalone GSY player page</string>
+  <string name="player_control_pip">Picture in picture</string>
+  <string name="player_control_more">More</string>
+  <string name="player_more_versions">Versions</string>
+  <string name="player_more_rotate">Rotate screen</string>
+  <string name="player_more_anime4k">Anime4K</string>
+  <string name="player_more_audio_only">Audio-only playback</string>
+  <string name="player_more_statistics">Statistics</string>
+  <string name="player_more_no_versions">No other versions are available</string>
+  <string name="player_more_back">Back</string>
+  <string name="player_more_anime4k_direct_output">Anime4K is unavailable with direct-output hardware decoding</string>
+  <string name="player_more_anime4k_unavailable">Anime4K shaders are unavailable. Reopen the player and try again.</string>
+  <string name="player_control_play">Play</string>
+  <string name="player_control_pause">Pause</string>
+  <string name="player_control_audio">Audio</string>
+  <string name="player_control_subtitles">Subtitles</string>
+  <string name="player_control_playlist">Playlist</string>
+  <string name="player_playlist_metadata_failed">Episode artwork and duration could not be loaded. Titles are still available.</string>
+  <string name="player_media_details_unavailable">Details for the current media are unavailable.</string>
+  <string name="player_seek_progress_description">Playback progress %1$s / %2$s</string>
+  <string name="player_update_pinch_zoom">Pinch zoom updated</string>
+  <string name="player_subtitles_embedded">Embedded subtitles</string>
+  <string name="player_subtitles_local">Local subtitles</string>
+  <string name="player_subtitles_external">External subtitles</string>
+  <string name="player_sync">Synchronization</string>
+  <string name="player_subtitle_sync">Subtitle synchronization</string>
 
   <!-- ===== 「标记为不喜欢」设置页 ===== -->
   <string name="pref_dislike_title">不喜欢视频管理</string>
   <string name="pref_dislike_summary">设置「不喜欢」按钮在哪些地方显示，并管理已标记的列表</string>
   <string name="btn_label_dislike">不喜欢</string>
 
-  <!-- ===== 播放器「更多」面板：快捷功能宫格 =====
-       原先这里放的是「默认统计页面」选择器，已移除；改用宫格收纳低频功能入口。 -->
-  <string name="player_sheets_more_quick_actions">Quick actions</string>
-  <string name="player_sheets_more_chapters">Chapters</string>
-  <!-- 「更多」宫格里的内核切换入口：把当前视频（含整份播放队列与进度）交给 GSY 播放页 -->
-  <string name="player_more_switch_to_gsy">Play with GSY</string>
-  <!-- 拿不到可播地址时（理论上不该发生）的内核切换提示 -->
+  <!-- ===== 播放器「更多」面板 ===== -->
   <string name="player_engine_switch_unavailable">Cannot switch engine: no playable source</string>
 
-  <!-- ===== 播放器「更多」面板：播放开关（循环 / 自动下一集 / 播完退出） ===== -->
-  <string name="player_sheets_more_playback">Playback</string>
-  <string name="player_toggle_repeat">Loop</string>
-  <string name="player_toggle_repeat_off">Off</string>
-  <string name="player_toggle_repeat_one">Repeating the current video</string>
-  <string name="player_toggle_repeat_all">Repeating the whole playlist</string>
   <string name="player_toggle_autoplay_on">Automatically play the next video</string>
   <string name="player_toggle_autoplay_off">Stay on the current video</string>
   <string name="player_toggle_close_eof">Close player when finished</string>
   <string name="player_toggle_close_eof_on">Return to the list when playback ends</string>
   <string name="player_toggle_close_eof_off">Keep the player open when playback ends</string>
-  <string name="i18n_allow_access">ALLOW ACCESS</string>
   <string name="i18n_add_custom_ratio">Add Custom Ratio (e.g. 16:9)</string>
-  <string name="i18n_add_m3u_playlist">Add M3U Playlist</string>
-  <string name="i18n_add_m3u_from_url">Add M3U Playlist from URL</string>
-  <string name="i18n_add_network_connection">Add Network Connection</string>
-  <string name="i18n_network_empty_hint">Add SMB, FTP, WebDAV or AList connections to browse network files</string>
-  <string name="i18n_network_alist_hint">AList uses its own API (not WebDAV). Sign in with your AList account, or leave both fields blank for guest access.</string>
   <string name="i18n_confirm">OK</string>
   <string name="i18n_rename">Rename</string>
   <string name="i18n_delete">Delete</string>
@@ -753,12 +500,8 @@
   <string name="i18n_delete_confirm_message">Delete "%1$s"? This cannot be undone.</string>
   <string name="i18n_renamed">Renamed</string>
   <string name="i18n_deleted">Deleted</string>
-  <string name="i18n_add_to_playlist">Add to Playlist</string>
-  <string name="i18n_playlist_add_hint">Add videos to get started</string>
-  <string name="i18n_layout_all_used">All available buttons are in use.</string>
   <string name="i18n_also_delete_original">Also delete original file(s)</string>
   <string name="i18n_mediainfo_analyzing">Analyzing media file...</string>
-  <string name="i18n_aspect_ratio">Aspect Ratio</string>
   <string name="i18n_auto_check_updates">Auto Check for Updates</string>
   <string name="i18n_auto_pip_hint">Automatically enter PIP mode when pressing home or back</string>
   <string name="i18n_autoplay_next_video">Autoplay next video</string>
@@ -767,44 +510,30 @@
   <string name="i18n_clear_config_cache">Clear config cache</string>
   <string name="i18n_clear_config_cache_hint">Clear the cached mpv.conf settings</string>
   <string name="i18n_clear_thumb_cache">Clear thumbnail cache</string>
-  <string name="i18n_connect_on_launch">Connect automatically on app launch</string>
-  <string name="i18n_create_empty_playlist">Create Empty Playlist</string>
-  <string name="i18n_create_new_folder">Create New Folder</string>
-  <string name="i18n_create_new_playlist">Create New Playlist</string>
-  <string name="i18n_create_blank_playlist_hint">Create a new blank playlist</string>
-  <string name="i18n_create_folder">Create folder</string>
-  <string name="i18n_create_first_playlist">Create your first playlist above</string>
-  <string name="i18n_decrease_zoom">Decrease zoom</string>
   <string name="i18n_clear_thumb_cache_hint">Delete all cached video thumbnails (will regenerate as you browse folders)</string>
+  <string name="i18n_connect_on_launch">Connect automatically on app launch</string>
+  <string name="i18n_create_new_folder">Create New Folder</string>
+  <string name="i18n_create_folder">Create folder</string>
   <string name="i18n_device_info">Device Info</string>
   <string name="i18n_done_reordering">Done reordering</string>
   <string name="i18n_double_tap_area_width">Double Tap Seek Area Width</string>
   <string name="i18n_downloading">Downloading...</string>
-  <string name="i18n_drag_to_reorder">Drag to reorder</string>
-  <string name="i18n_layout_drop_empty">Drop zone is empty</string>
   <string name="i18n_edit_connection">Edit Connection</string>
-  <string name="i18n_enable_nav">Enable next/previous navigation</string>
   <string name="i18n_enter_hide_ms">Enter custom hide time in milliseconds</string>
   <string name="i18n_enter_seek_seconds">Enter custom seek duration in seconds (1-120)</string>
-  <string name="i18n_existing_playlists">Existing Playlists</string>
   <string name="i18n_export_settings">Export Settings</string>
   <string name="i18n_export_settings_hint">Export settings to an XML file</string>
   <string name="i18n_folder_grid">Folder Grid</string>
   <string name="i18n_frame_label">Frame: </string>
-  <string name="i18n_mediainfo_footer">Generated by mpvEx using MediaInfoLib</string>
+  <string name="i18n_mediainfo_footer">Generated by loembyA using MediaInfoLib</string>
   <string name="i18n_go_back">Go back</string>
-  <string name="i18n_go_internal_storage">Go to internal storage</string>
   <string name="i18n_grid_columns">Grid Columns</string>
-  <string name="i18n_icons_legend">Icons Legend</string>
   <string name="i18n_import_settings">Import Settings</string>
-  <string name="i18n_import_m3u_hint">Import a playlist from a web URL</string>
   <string name="i18n_import_settings_hint">Import settings from an XML file</string>
-  <string name="i18n_increase_zoom">Increase zoom</string>
   <string name="i18n_invalid_url">Invalid URL</string>
   <string name="i18n_invalid_url_protocol">Invalid URL protocol</string>
   <string name="i18n_network_locations">Network locations</string>
   <string name="i18n_logcat">Logcat:</string>
-  <string name="i18n_layout_help">Long press to reorder items. Tap the \'-\' icon to remove them.</string>
   <string name="i18n_media_info">Media Info</string>
   <string name="i18n_moved_private_space">Moved to Private Space</string>
   <string name="i18n_no_network_connections">No network connections</string>
@@ -818,23 +547,11 @@
   <string name="i18n_remove_favorite">Remove from favorites</string>
   <string name="i18n_no_subfolders">No subfolders</string>
   <string name="i18n_no_videos_found">No videos found</string>
-  <string name="i18n_no_videos_in_playlist">No videos in playlist</string>
   <string name="i18n_not_available_4k8k">Not available for 4K/8K video</string>
   <string name="i18n_now_playing">Now Playing</string>
   <string name="i18n_playing">Playing</string>
-  <string name="i18n_remove_from_queue">Remove from queue</string>
-  <string name="i18n_playlist_items">%d items</string>
-  <string name="i18n_switch_to_grid">Switch to Grid View</string>
-  <string name="i18n_switch_to_list">Switch to List View</string>
-  <string name="i18n_open_file">Open File</string>
-  <string name="i18n_open_link">Open Link</string>
-  <string name="i18n_pan_zoom">Pan &amp; Zoom</string>
-  <string name="i18n_play_link">Play Link</string>
-  <string name="i18n_playlist_options">Playlist Options</string>
   <string name="i18n_quick_presets">Quick Presets</string>
   <string name="i18n_clear_font_cache_hint">Remove all cached subtitle fonts</string>
-  <string name="i18n_remove_from_playlist">Remove from Playlist</string>
-  <string name="i18n_reorder_playlist">Reorder playlist</string>
   <string name="i18n_reset_default">Reset to default</string>
   <string name="i18n_search_videos">Search videos</string>
   <string name="i18n_select_folder">Select Folder</string>
@@ -842,17 +559,11 @@
   <string name="i18n_speed_overlay_hint">Show advance overlay for speed control during long press and swipe</string>
   <string name="i18n_slide_to_unlock">Slide to Unlock</string>
   <string name="i18n_sort_by">Sort by</string>
-  <string name="i18n_storage_required">Storage Access Required</string>
-  <string name="i18n_stream_link">Stream Link</string>
-  <string name="i18n_layout_palette_hint">Tap buttons from the \'Available Palette\' below</string>
   <string name="i18n_tap_to_edit_config">Tap to edit configuration</string>
-  <string name="i18n_permission_usage">The permission is used exclusively for:</string>
   <string name="i18n_timestamp_label">Timestamp: </string>
   <string name="i18n_unsaved_changes">Unsaved changes</string>
   <string name="i18n_valid_url">Valid URL</string>
   <string name="i18n_video_grid">Video Grid</string>
-  <string name="i18n_why_see_this">Why do I see this?</string>
-  <string name="i18n_why_permission">Why this permission is needed</string>
   <string name="i18n_play">Play</string>
   <string name="i18n_search">Search</string>
   <string name="i18n_settings">Settings</string>
@@ -901,22 +612,17 @@
   <string name="i18n_mpv_gpu_hq">GPU HQ</string>
   <string name="i18n_mpv_low_latency">Low Latency</string>
   <string name="i18n_mpv_sw_fast">SW Fast</string>
-  <string name="i18n_project_name_en" translatable="false">CineIsle</string>
+  <string name="i18n_about_upstream_project">Original project</string>
   <string name="i18n_ack_title">Acknowledgments</string>
   <string name="i18n_ack_tap_to_open">Open the project page</string>
-  <string name="i18n_ack_mpvex_summary">Direct upstream — this project is a secondary development built on it.</string>
+  <string name="i18n_ack_cineisle_summary">Direct upstream — thank you for the Emby client and feature foundation on which loembyA continues development.</string>
+  <string name="i18n_ack_mpvex_summary">Earlier upstream — the player foundation on which CineIsle was built.</string>
   <string name="i18n_ack_mpv_android_summary">mpv bindings and libmpv integration — the primary playback core.</string>
-  <string name="i18n_ack_gsy_summary">The second playback core, together with the IJK (FFmpeg) engine it bundles.</string>
-  <string name="i18n_ack_media3_summary">AndroidX Media3 / ExoPlayer — multi-instance playback used by Vertical Feed.</string>
   <string name="i18n_ack_danmaku_summary">Danmaku rendering engine — vendored as source, with scroll-lifetime and timer fixes.</string>
   <string name="i18n_ack_emby_summary">Official Emby Java SDK — the client\'s API layer is built on it.</string>
-  <string name="i18n_ack_upnpcast_summary">DLNA casting — device discovery and playback control.</string>
   <string name="i18n_ack_aboutlibraries_summary">Generates the open-source license list on this screen.</string>
-  <string name="i18n_ack_network_summary">Network storage and serving — SMB, WebDAV, FTP and an embedded HTTP server.</string>
   <string name="i18n_ack_telephoto_summary">Pinch-to-zoom / pan / double-tap zoom gestures for the photo browser.</string>
   <string name="i18n_ack_coil_summary">Image loading, sampling and caching layer for the photo browser and photo grid.</string>
-  <string name="i18n_preload_next_video">Preload next video</string>
-  <string name="i18n_preload_next_video_summary">2s into playback, fetch the beginning of the next video in the background for smoother switching</string>
   <string name="pref_remember_subtitle_track_title">Remember subtitle track per series</string>
   <string name="pref_remember_subtitle_track_summary_on">Matched by language + codec; the next episode auto-selects the same subtitle track</string>
   <string name="pref_remember_subtitle_track_summary_off">Every episode picks subtitles by the default language rules</string>
@@ -929,41 +635,6 @@
   <string name="pref_auto_skip_outro_title">Auto-skip outro</string>
   <string name="pref_auto_skip_outro_summary_on">Uses server outro markers when available, otherwise skips the last fixed duration (ends the episode)</string>
   <string name="pref_auto_skip_outro_summary_off">Show a tappable "Skip outro" pill while inside the outro</string>
-  <string name="pref_gsy_dual_track_summary">Speed, subtitle styling, gestures and filters each have their own copy per kernel: this page configures GSY, "Playback &amp; controls → Player" configures mpv — changing one never affects the other. A few items are genuinely shared: auto-play next episode (one switch for both kernels). Playback memory (speed / audio track / subtitle track / intro-outro skip) currently applies to the mpv player page only.</string>
-  <string name="i18n_seekbar_standard">Standard</string>
-  <string name="i18n_seekbar_wavy">Wavy</string>
-  <string name="i18n_seekbar_thick">Thick</string>
-  <string name="player_toggle_shuffle">Shuffle</string>
-  <string name="player_toggle_shuffle_on">Play the playlist in random order</string>
-  <string name="player_toggle_shuffle_off">Play the playlist in order</string>
-  <string name="btn_label_back">Back Arrow</string>
-  <string name="btn_label_title">Video Title</string>
-  <string name="btn_label_bookmarks">Chapters / Bookmarks</string>
-  <string name="btn_label_speed">Playback Speed</string>
-  <string name="btn_label_decoder">Decoder</string>
-  <string name="btn_label_rotation">Screen Rotation</string>
-  <string name="btn_label_frame_nav">Frame Navigation</string>
-  <string name="btn_label_zoom">Video Zoom</string>
-  <string name="btn_label_pip">Picture-in-Picture</string>
-  <string name="btn_label_aspect">Aspect Ratio</string>
-  <string name="btn_label_lock">Lock Controls</string>
-  <string name="btn_label_audio">Audio Track</string>
-  <string name="btn_label_subtitles">Subtitles</string>
-  <string name="btn_label_more">More Options</string>
-  <string name="btn_label_chapter">Current Chapter</string>
-  <string name="btn_label_repeat_mode">Repeat Mode</string>
-  <string name="btn_label_shuffle">Shuffle</string>
-  <string name="btn_label_mirror">Horizontal Flip</string>
-  <string name="btn_label_vflip">Vertical Flip</string>
-  <string name="btn_label_ab_loop">A-B Loop</string>
-  <string name="btn_label_custom_skip">Custom Skip</string>
-  <string name="btn_label_bg_playback">Background Playback</string>
-  <string name="btn_label_previous">Previous</string>
-  <string name="btn_label_next">Next</string>
-  <string name="btn_label_emby_favorite">Emby Favorite</string>
-  <string name="btn_label_cast">Cast</string>
-  <string name="btn_label_none">None</string>
-
   <!-- 弹幕 -->
   <string name="danmaku_title">Danmaku</string>
   <string name="danmaku_enable_title">Enable danmaku</string>
@@ -973,39 +644,9 @@
   <string name="danmaku_source_title">Danmaku source</string>
   <string name="danmaku_match_title">Matching</string>
   <string name="danmaku_host_hint">Leave empty for the official source. Put your own address for a self-hosted service.</string>
-  <string name="danmaku_render_hint">Font size, speed, opacity and block words live under More → Danmaku during playback; changes apply there too.</string>
-  <string name="danmaku_not_matched">No danmaku matched yet</string>
-  <string name="danmaku_matched_count">%1$s · %2$d comments</string>
-  <string name="danmaku_off_hint">Turn on to load and show comments. Data comes from a danmaku source, which needs network access.</string>
-  <string name="danmaku_matching">Matching title and loading comments…</string>
-  <string name="danmaku_font_size">Font size</string>
-  <string name="danmaku_speed">Speed</string>
-  <string name="danmaku_opacity">Opacity</string>
-  <string name="danmaku_area">Display area</string>
-  <string name="danmaku_density">Density</string>
-  <string name="danmaku_density_sparse">Low</string>
-  <string name="danmaku_density_normal">Medium</string>
-  <string name="danmaku_density_dense">High</string>
-  <string name="danmaku_block_words">Blocked words (comma separated)</string>
-  <string name="danmaku_prevent_overlapping">Prevent overlap</string>
-  <string name="danmaku_prevent_overlapping_summary">Move a comment to another track instead of letting it pile onto the one in front</string>
+  <string name="danmaku_auto_render_hint">Automatic matches use the built-in rendering defaults during playback.</string>
   <string name="danmaku_auto_match">Auto match</string>
   <string name="danmaku_auto_match_summary">Search by the current title automatically</string>
-  <string name="danmaku_manual_search">Search manually</string>
-  <string name="danmaku_search_hint">Anime title</string>
-  <string name="danmaku_search_action">Search</string>
-  <string name="danmaku_episode_count">%1$d episodes</string>
-  <string name="danmaku_load">Load</string>
-  <string name="danmaku_pick_episode">Episodes</string>
-  <string name="danmaku_select_episode">Pick an episode of this title</string>
-  <string name="danmaku_remember_selection">Remember manual pick</string>
-  <string name="danmaku_remember_selection_summary">Keep the title you picked for the next episodes instead of re-matching by name</string>
-  <string name="danmaku_with_related">Merge related episodes</string>
-  <string name="danmaku_with_related_summary">Include comments from other releases, SPs and OVAs of the same episode for a denser screen</string>
-  <string name="danmaku_time_offset">Timeline offset</string>
-  <string name="danmaku_time_offset_hint">Positive if danmaku appear too early, negative if too late. Saved per series, so switching titles won\'t mix them up.</string>
-  <string name="danmaku_time_offset_saved">Saved for this series</string>
-  <string name="danmaku_time_offset_clear">Use global</string>
   <string name="danmaku_host">Source address</string>
   <string name="danmaku_app_id">App ID</string>
   <string name="danmaku_app_secret">App secret</string>
@@ -1050,15 +691,6 @@
   <string name="app_lock_auto_unlock_badge">auto-unlock</string>
   <string name="app_lock_summary_on_format">On · %1$s</string>
 
-  <!-- 直播电视节目单（a2 + c1） -->
-  <string name="livetv_now_playing">On now: %s</string>
-  <string name="livetv_channel_number">CH %s</string>
-  <string name="livetv_program_guide">Program guide</string>
-  <string name="livetv_watch_live">Watch live</string>
-  <string name="livetv_no_programs">No program guide data</string>
-  <string name="livetv_live_now">ON NOW</string>
-  <string name="livetv_today">Today</string>
-  <string name="livetv_tomorrow">Tomorrow</string>
 
   <!-- 外观深度定制 -->
   <string name="appearance_deep_title">Customize</string>
@@ -1096,7 +728,7 @@
   <string name="pref_appearance_category_ui_style">Interface</string>
   <string name="pref_appearance_ui_style_classic">Classic</string>
   <string name="pref_appearance_ui_style_cine">Cine</string>
-  <string name="pref_appearance_ui_style_summary">Cine adds an image-first home page with a hero banner. Favorites, history, local and network keep the classic layout for now; switch back at any time.</string>
+  <string name="pref_appearance_ui_style_summary">Cine adds an image-first home page with a hero banner while keeping the same navigation and data model.</string>
   <string name="pref_appearance_hide_nav_labels_title">Hide navigation labels</string>
   <string name="pref_appearance_hide_nav_labels_summary">The bottom navigation shows icons only, without the Home / Favorites / History text. Applies to both interface styles.</string>
 
@@ -1110,8 +742,6 @@
   <string name="cine_drawer_section_system">System</string>
   <string name="cine_drawer_downloads">Downloads</string>
   <string name="cine_drawer_offline">Offline</string>
-  <string name="cine_drawer_live_tv">Live TV</string>
-  <string name="cine_drawer_playlists">Playlists</string>
   <string name="cine_drawer_discover">Discover / Mix</string>
   <string name="cine_drawer_collections">Collections</string>
   <string name="cine_drawer_server_manage">Emby Servers</string>
@@ -1171,10 +801,8 @@
   <string name="cine_action_play_from_start">Play from start</string>
   <string name="cine_action_refresh">Refresh</string>
   <string name="cine_action_download">Download</string>
-  <string name="cine_action_play_external">Open in external player</string>
   <string name="cine_action_dislike">Mark as disliked</string>
   <string name="cine_action_undislike">Remove dislike mark</string>
-  <string name="cine_action_external_failed">Couldn\'t open the external player</string>
   <string name="cine_dislike_marked">Marked as disliked</string>
   <string name="cine_dislike_unmarked">Dislike mark removed</string>
   <string name="cine_download_completed">Downloaded</string>
@@ -1191,20 +819,6 @@
   <string name="cine_detail_sort_asc">Oldest</string>
   <string name="cine_detail_sort_desc">Newest</string>
   <string name="cine_detail_episode_count">%1$d eps</string>
-  <string name="cine_cast_title">Cast</string>
-  <string name="cine_cast_searching">Searching for cast devices on your network…</string>
-  <string name="cine_cast_empty">No cast devices found</string>
-  <string name="cine_cast_rescan">Search again</string>
-  <string name="cine_cast_connecting">Connecting to \"%1$s\"…</string>
-  <string name="cine_cast_casting_to">Casting to \"%1$s\"</string>
-  <string name="cine_cast_stop">Stop casting</string>
-  <string name="cine_cast_disconnect">Disconnect</string>
-  <string name="cine_cast_volume">Volume %1$d%%</string>
-  <string name="cine_cast_tv">TV</string>
-  <string name="cine_cast_device">Device</string>
-  <string name="cine_cast_device_sub">%1$s · %2$s</string>
-  <string name="cine_cast_seek_to">Seek to %1$s</string>
-  <string name="cine_cast_open_failed">This item has no playable address to cast</string>
   <string name="cine_detail_cast">Cast</string>
   <string name="cine_detail_episodes">Episodes</string>
   <string name="cine_detail_season">Season %1$d</string>
@@ -1220,9 +834,6 @@
   <string name="cine_favorites_empty_desc">Long-press any poster to add it to favorites</string>
   <string name="cine_favorites_people_empty_title">No favorite people</string>
   <string name="cine_favorites_people_empty_desc">People you favorite will show up here</string>
-  <string name="cine_history_empty_title">Nothing watched yet</string>
-  <string name="cine_history_empty_desc">What you have watched will show up here</string>
-  <string name="cine_history_count">%1$d items</string>
 
   <!-- v131：Cine 长按玻璃菜单（对齐 Classic 的 EmbyMediaActionsDialog 全部动作） -->
   <string name="cine_action_open">Open</string>

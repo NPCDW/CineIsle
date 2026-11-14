@@ -7,6 +7,7 @@ import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalConfiguration
 import app.marlboroadvance.mpvex.ui.cine.components.LocalCineHaze
+import app.marlboroadvance.mpvex.ui.cine.components.LocalCineHazeEnabled
 import app.marlboroadvance.mpvex.ui.cine.tokens.CineColors
 import app.marlboroadvance.mpvex.ui.cine.tokens.CineSpacing
 import app.marlboroadvance.mpvex.ui.cine.tokens.CineTypographySet
@@ -61,6 +62,7 @@ fun CineTheme(content: @Composable () -> Unit) {
     LocalCineTypography provides typography,
     LocalCineSpacing provides spacing,
     LocalCineHaze provides hazeState,
+    LocalCineHazeEnabled provides true,
   ) {
     MaterialTheme(
       colorScheme = scheme,

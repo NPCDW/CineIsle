@@ -38,6 +38,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,9 +47,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -61,8 +64,15 @@ import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.components.LeftSideOvalShape
 import app.marlboroadvance.mpvex.presentation.components.RightSideOvalShape
 import app.marlboroadvance.mpvex.ui.player.Panels
+import app.marlboroadvance.mpvex.ui.player.PlayerDragDirection
 import app.marlboroadvance.mpvex.ui.player.PlayerUpdates
 import app.marlboroadvance.mpvex.ui.player.PlayerViewModel
+import app.marlboroadvance.mpvex.ui.player.VerticalGestureRegion
+import app.marlboroadvance.mpvex.ui.player.classifyPlayerDrag
+import app.marlboroadvance.mpvex.ui.player.isHorizontalSeekEligible
+import app.marlboroadvance.mpvex.ui.player.mapVolumeGesture
+import app.marlboroadvance.mpvex.ui.player.verticalGestureRegion
+import app.marlboroadvance.mpvex.ui.player.volumeGestureScalar
 import app.marlboroadvance.mpvex.ui.player.SingleActionGesture
 import app.marlboroadvance.mpvex.ui.theme.playerRippleConfiguration
 import kotlinx.coroutines.delay
@@ -71,7 +81,6 @@ import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 import kotlin.math.abs
 import kotlin.math.ln
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -99,7 +108,6 @@ fun GestureHandler(
   val allowGesturesInPanels by playerPreferences.allowGesturesInPanels.collectAsState()
   val paused by PlayerLib.propBoolean["pause"].collectAsState()
   val duration by PlayerLib.propInt["duration"].collectAsState()
-  val position by PlayerLib.propInt["time-pos"].collectAsState()
   val playbackSpeed by PlayerLib.propFloat["speed"].collectAsState()
   val controlsShown by viewModel.controlsShown.collectAsState()
   val areControlsLocked by viewModel.areControlsLocked.collectAsState()
@@ -120,9 +128,7 @@ fun GestureHandler(
   val showDynamicSpeedOverlay by playerPreferences.showDynamicSpeedOverlay.collectAsState()
   val brightnessGesture by playerPreferences.brightnessGesture.collectAsState()
   val volumeGesture by playerPreferences.volumeGesture.collectAsState()
-  val swapVolumeAndBrightness by playerPreferences.swapVolumeAndBrightness.collectAsState()
   val pinchToZoomGesture by playerPreferences.pinchToZoomGesture.collectAsState()
-  val panAndZoomEnabled by playerPreferences.panAndZoomEnabled.collectAsState()
   val horizontalSwipeToSeek by playerPreferences.horizontalSwipeToSeek.collectAsState()
   val horizontalSwipeSensitivity by playerPreferences.horizontalSwipeSensitivity.collectAsState()
   // 震动反馈总开关（issue 反馈新增）。下面三处震动都受它控制：
@@ -130,17 +136,20 @@ fun GestureHandler(
   val hapticFeedbackEnabled by playerPreferences.hapticFeedbackEnabled.collectAsState()
   var isLongPressing by remember { mutableStateOf(false) }
   var isDynamicSpeedControlActive by remember { mutableStateOf(false) }
+  var isHorizontalSeekActive by remember { mutableStateOf(false) }
   var dynamicSpeedStartX by remember { mutableStateOf(0f) }
   var dynamicSpeedStartValue by remember { mutableStateOf(2f) }
   var lastAppliedSpeed by remember { mutableStateOf(2f) }
   var hasSwipedEnough by remember { mutableStateOf(false) }
   var longPressTriggeredDuringTouch by remember { mutableStateOf(false) }
   var isVerticalGestureActive by remember { mutableStateOf(false) }
-  val currentVolume by viewModel.currentVolume.collectAsState()
+  val currentVolumeFraction by viewModel.volumeGestureFraction.collectAsState()
   val currentMPVVolume by PlayerLib.propInt["volume"].collectAsState()
   val currentBrightness by viewModel.currentBrightness.collectAsState()
   val volumeBoostingCap = audioPreferences.volumeBoostCap.get()
   val haptics = LocalHapticFeedback.current
+  val touchSlop = LocalViewConfiguration.current.touchSlop
+  val currentDuration by rememberUpdatedState(duration)
   val coroutineScope = rememberCoroutineScope()
 
   // Isolated double-tap state tracking
@@ -200,8 +209,126 @@ fun GestureHandler(
   Box(
     modifier = modifier
       .fillMaxSize()
-      .padding(horizontal = 48.dp, vertical = 48.dp)
-      .pointerInput(areControlsLocked, doubleTapSeekAreaWidth, gesturePreferences, isVerticalGestureActive) {
+      .pointerInput(
+        horizontalSwipeToSeek,
+        areControlsLocked,
+        horizontalSwipeSensitivity,
+        hapticFeedbackEnabled,
+      ) {
+        if (!horizontalSwipeToSeek || areControlsLocked) return@pointerInput
+
+        awaitEachGesture {
+          val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
+          val startPosition = down.position
+          val startTime = android.os.SystemClock.elapsedRealtime()
+
+          var hasStartedSeeking = false
+          var lastSeekDeltaX = 0f
+          var initialVideoPosition = 0f
+          // Count haptic buckets monotonically so reversing does not buzz the same interval twice.
+          var seekHapticBuckets = 0
+          val seekSensitivity = horizontalSwipeSensitivity
+
+          fun updateSeek(deltaX: Float, change: androidx.compose.ui.input.pointer.PointerInputChange) {
+            val targetPosition = (initialVideoPosition + deltaX * seekSensitivity).coerceAtLeast(0f)
+            val maxDuration = viewModel.effectiveDurationSeconds().takeIf { it > 0f }
+              ?: currentDuration?.toFloat() ?: 0f
+            val clampedPosition = targetPosition.coerceAtMost(maxDuration)
+
+            // Retain throttled live scrub, preview, haptics, and an exact final commit.
+            viewModel.scrubTo(clampedPosition)
+
+            if (hapticFeedbackEnabled) {
+              val movedSecs = abs(clampedPosition - initialVideoPosition).toInt()
+              val bucket = movedSecs / SEEK_HAPTIC_INTERVAL_SEC
+              if (bucket > seekHapticBuckets) {
+                seekHapticBuckets = bucket
+                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              }
+            }
+
+            viewModel.updateHorizontalSeekPreview(
+              startSeconds = initialVideoPosition,
+              targetSeconds = clampedPosition,
+              durationSeconds = maxDuration,
+            )
+            change.consume()
+          }
+
+          var clearSeekPreview = false
+          try {
+            do {
+              val event = awaitPointerEvent(PointerEventPass.Final)
+              val pointerCount = event.changes.count { it.pressed }
+
+              if (pointerCount == 1) {
+                event.changes.forEach { change ->
+                  if (change.pressed && !hasStartedSeeking) {
+                    val deltaX = change.position.x - startPosition.x
+                    val deltaY = change.position.y - startPosition.y
+                    val timeSinceStart = android.os.SystemClock.elapsedRealtime() - startTime
+                    lastSeekDeltaX = deltaX
+
+                    if (classifyPlayerDrag(deltaX, deltaY, touchSlop) == PlayerDragDirection.VERTICAL) {
+                      return@awaitEachGesture
+                    }
+                    if (isHorizontalSeekEligible(
+                        deltaX = deltaX,
+                        deltaY = deltaY,
+                        touchSlop = touchSlop,
+                        elapsedMillis = timeSinceStart,
+                        panelOpen = panelShown != Panels.None,
+                        longPressActive = isLongPressing,
+                        speedControlActive = isDynamicSpeedControlActive,
+                        claimedByAnotherGesture = change.isConsumed,
+                      )) {
+                      hasStartedSeeking = true
+                      isHorizontalSeekActive = true
+                      initialVideoPosition = viewModel.precisePosition.value
+
+                      // Keep pause ownership in the ViewModel; StateFlow pause snapshots can lag.
+                      viewModel.beginSeekPause()
+                      viewModel.showSeekBar()
+                      change.consume()
+                    }
+                  } else if (change.pressed) {
+                    lastSeekDeltaX = change.position.x - startPosition.x
+                  }
+
+                  if (change.pressed && hasStartedSeeking) {
+                    updateSeek(lastSeekDeltaX, change)
+                  }
+                }
+              } else if (pointerCount > 1) {
+                if (hasStartedSeeking) {
+                  clearSeekPreview = true
+                  viewModel.playerUpdate.update { PlayerUpdates.None }
+                }
+                break
+              }
+            } while (event.changes.any { it.pressed })
+          } finally {
+            if (hasStartedSeeking) {
+              viewModel.commitScrubSeek()
+              viewModel.endSeekPause()
+              if (clearSeekPreview) {
+                viewModel.clearHorizontalSeekPreview()
+              } else {
+                viewModel.finishHorizontalSeekPreview()
+              }
+            }
+            isHorizontalSeekActive = false
+          }
+        }
+      },
+    ) {
+      Box(
+        // Keep every pre-existing gesture on the original inset surface; only seek lives outside.
+        modifier = Modifier
+          .fillMaxSize()
+          .padding(horizontal = 48.dp, vertical = 48.dp)
+          .pointerInput(areControlsLocked, doubleTapSeekAreaWidth, gesturePreferences, isVerticalGestureActive) {
+
         // Isolated double-tap detection that doesn't interfere with other gestures
         if (isVerticalGestureActive) return@pointerInput
         awaitEachGesture {
@@ -354,17 +481,14 @@ fun GestureHandler(
           longPressTriggeredDuringTouch = false
 
           // State for vertical gestures (volume/brightness)
-          var startingY = 0f
-          var mpvVolumeStartingY = 0f
-          var originalVolume = currentVolume
-          var originalMPVVolume = currentMPVVolume
+          var originalVolumeScalar = volumeGestureScalar(
+            currentVolumeFraction,
+            currentMPVVolume ?: 100,
+            volumeBoostingCap,
+          )
           var originalBrightness = currentBrightness
-          var lastVolumeValue = currentVolume
           var lastMPVVolumeValue = currentMPVVolume ?: 100
           var lastBrightnessValue = currentBrightness
-          val brightnessGestureSens = 0.001f
-          val volumeGestureSens = 0.017f
-          val mpvVolumeGestureSens = 0.017f
 
           // Original speed for long press
           var originalSpeed = playbackSpeed ?: 1f
@@ -452,12 +576,12 @@ fun GestureHandler(
                       "vertical" -> {
                         if ((brightnessGesture || volumeGesture) && !isLongPressing) {
                           isVerticalGestureActive = true
-                          startingY = 0f
-                          mpvVolumeStartingY = 0f
-                          originalVolume = currentVolume
-                          originalMPVVolume = currentMPVVolume
+                          originalVolumeScalar = volumeGestureScalar(
+                            currentVolumeFraction,
+                            currentMPVVolume ?: 100,
+                            volumeBoostingCap,
+                          )
                           originalBrightness = currentBrightness
-                          lastVolumeValue = currentVolume
                           lastMPVVolumeValue = currentMPVVolume ?: 100
                           lastBrightnessValue = currentBrightness
                         }
@@ -507,84 +631,36 @@ fun GestureHandler(
                     }
                     "vertical" -> {
                       if ((brightnessGesture || volumeGesture) && !isLongPressing) {
-                        val amount = currentPosition.y - startPosition.y
+                        val height = size.height.toFloat().coerceAtLeast(1f)
+                        val fractionDelta = -(currentPosition.y - startPosition.y) / height * 1.5f
 
                         val changeVolume: () -> Unit = {
-                          val isIncreasingVolumeBoost: (Float) -> Boolean = {
-                            volumeBoostingCap > 0 && currentVolume == viewModel.maxVolume &&
-                              (currentMPVVolume ?: 100) - 100 < volumeBoostingCap && amount < 0
+                          val target = mapVolumeGesture(originalVolumeScalar + fractionDelta, volumeBoostingCap)
+                          viewModel.updateVolumeGesture(target.systemFraction)
+                          if (target.mpvVolume != lastMPVVolumeValue) {
+                            viewModel.changeMPVVolumeTo(target.mpvVolume)
+                            lastMPVVolumeValue = target.mpvVolume
                           }
-                          val isDecreasingVolumeBoost: (Float) -> Boolean = {
-                            volumeBoostingCap > 0 && currentVolume == viewModel.maxVolume &&
-                              (currentMPVVolume ?: 100) - 100 in 1..volumeBoostingCap && amount > 0
-                          }
-
-                          if (isIncreasingVolumeBoost(amount) || isDecreasingVolumeBoost(amount)) {
-                            if (mpvVolumeStartingY == 0f) {
-                              startingY = 0f
-                              originalVolume = currentVolume
-                              mpvVolumeStartingY = currentPosition.y
-                            }
-                            val newMPVVolume = calculateNewVerticalGestureValue(
-                              originalMPVVolume ?: 100,
-                              mpvVolumeStartingY,
-                              currentPosition.y,
-                              mpvVolumeGestureSens,
-                            ).coerceIn(100..volumeBoostingCap + 100)
-
-                            if (newMPVVolume != lastMPVVolumeValue) {
-                              viewModel.changeMPVVolumeTo(newMPVVolume)
-                              lastMPVVolumeValue = newMPVVolume
-                            }
-                          } else {
-                            if (startingY == 0f) {
-                              mpvVolumeStartingY = 0f
-                              originalMPVVolume = currentMPVVolume
-                              startingY = currentPosition.y
-                            }
-                            val newVolume = calculateNewVerticalGestureValue(
-                              originalVolume,
-                              startingY,
-                              currentPosition.y,
-                              volumeGestureSens,
-                            )
-
-                            if (newVolume != lastVolumeValue) {
-                              viewModel.changeVolumeTo(newVolume)
-                              lastVolumeValue = newVolume
-                            }
-                          }
-
                           viewModel.displayVolumeSlider()
                         }
                         val changeBrightness: () -> Unit = {
-                          if (startingY == 0f) startingY = currentPosition.y
-                          val newBrightness = calculateNewVerticalGestureValue(
-                            originalBrightness,
-                            startingY,
-                            currentPosition.y,
-                            brightnessGestureSens,
-                          )
-
+                          val newBrightness = (originalBrightness + fractionDelta).coerceIn(0f, 1f)
                           if (abs(newBrightness - lastBrightnessValue) > 0.001f) {
-                            viewModel.changeBrightnessTo(newBrightness)
+                            viewModel.changeBrightnessTo(newBrightness, persist = false)
                             lastBrightnessValue = newBrightness
                           }
-
                           viewModel.displayBrightnessSlider()
                         }
 
-                        when {
-                          volumeGesture && brightnessGesture -> {
-                            if (swapVolumeAndBrightness) {
-                              if (currentPosition.x > size.width / 2) changeBrightness() else changeVolume()
-                            } else {
-                              if (currentPosition.x < size.width / 2) changeBrightness() else changeVolume()
-                            }
-                          }
-                          brightnessGesture -> changeBrightness()
-                          volumeGesture -> changeVolume()
-                          else -> {}
+                        when (verticalGestureRegion(
+                          startX = startPosition.x,
+                          width = size.width.toFloat(),
+                          brightnessEnabled = brightnessGesture,
+                          volumeEnabled = volumeGesture,
+                        )) {
+                          VerticalGestureRegion.BRIGHTNESS -> changeBrightness()
+                          VerticalGestureRegion.VOLUME -> changeVolume()
+                          VerticalGestureRegion.NONE -> Unit
                         }
 
                         change.consume()
@@ -601,8 +677,7 @@ fun GestureHandler(
                   "vertical" -> {
                     if (brightnessGesture || volumeGesture) {
                       isVerticalGestureActive = false
-                      startingY = 0f
-                      lastVolumeValue = currentVolume
+                      viewModel.persistBrightness(lastBrightnessValue)
                       lastMPVVolumeValue = currentMPVVolume ?: 100
                       lastBrightnessValue = currentBrightness
                     }
@@ -641,8 +716,7 @@ fun GestureHandler(
             "vertical" -> {
               if (brightnessGesture || volumeGesture) {
                 isVerticalGestureActive = false
-                startingY = 0f
-                lastVolumeValue = currentVolume
+                viewModel.persistBrightness(lastBrightnessValue)
                 lastMPVVolumeValue = currentMPVVolume ?: 100
                 lastBrightnessValue = currentBrightness
               }
@@ -650,319 +724,46 @@ fun GestureHandler(
           }
         }
       }
-      .pointerInput(pinchToZoomGesture, panAndZoomEnabled, areControlsLocked, isVerticalGestureActive) {
+      .pointerInput(pinchToZoomGesture, areControlsLocked, isVerticalGestureActive) {
         if (!pinchToZoomGesture || areControlsLocked || isVerticalGestureActive) return@pointerInput
-
-        // Helper: get video display dimensions at 1x (how mpv fits the video to screen)
-        fun videoDisplaySize(): Pair<Float, Float> {
-          val sw = size.width.toFloat()
-          val sh = size.height.toFloat()
-          val va = PlayerLib.getPropertyDouble("video-params/aspect")?.toFloat() ?: (sw / sh)
-          val sa = sw / sh
-          return if (va >= sa) Pair(sw, sw / va) else Pair(sh * va, sh)
-        }
-
-        // Helper: apply pan with EMA smoothing and bounds clamping
-        fun applyPan(
-          dx: Float, dy: Float, scale: Float,
-          smoothState: FloatArray, // [smoothX, smoothY, initialized]
-          smoothFactor: Float = 0.5f,
-        ) {
-          val sw = size.width.toFloat()
-          val sh = size.height.toFloat()
-          if (sw <= 0 || sh <= 0) return
-          val (bw, bh) = videoDisplaySize()
-          // 1 finger pixel = 1 video pixel
-          val curX = PlayerLib.getPropertyDouble("video-pan-x")?.toFloat() ?: 0f
-          val curY = PlayerLib.getPropertyDouble("video-pan-y")?.toFloat() ?: 0f
-          val targetX = curX + dx / (bw * scale)
-          val targetY = curY + dy / (bh * scale)
-          // Initialize smoothing on first call
-          if (smoothState[2] == 0f) { smoothState[0] = targetX; smoothState[1] = targetY; smoothState[2] = 1f }
-          smoothState[0] += (targetX - smoothState[0]) * smoothFactor
-          smoothState[1] += (targetY - smoothState[1]) * smoothFactor
-          // Bounds: video edge can't go past screen edge
-          val maxPan = ((scale - 1f) / (2f * scale)).coerceAtLeast(0f)
-          viewModel.setVideoPan(
-            smoothState[0].coerceIn(-maxPan, maxPan),
-            smoothState[1].coerceIn(-maxPan, maxPan),
-          )
-        }
-
         awaitEachGesture {
           var zoom = 0f
           var gestureStarted = false
-          var prevDist = 0f
-          var prevMidX = 0f
-          var prevMidY = 0f
-          val panSmooth = floatArrayOf(0f, 0f, 0f) // smoothX, smoothY, initialized
-
+          var previousDistance = 0f
           awaitFirstDown(requireUnconsumed = false)
-
           do {
             val event = awaitPointerEvent()
             val pressed = event.changes.filter { it.pressed }
-
             if (pressed.size == 2) {
-              val p1 = pressed[0].position
-              val p2 = pressed[1].position
-              val dx = p2.x - p1.x
-              val dy = p2.y - p1.y
-              val dist = sqrt((dx * dx + dy * dy).toDouble()).toFloat()
-              val midX = (p1.x + p2.x) / 2f
-              val midY = (p1.y + p2.y) / 2f
-
-              if (prevDist == 0f) {
-                // First frame — capture baseline
-                prevDist = dist
+              val first = pressed[0].position
+              val second = pressed[1].position
+              val dx = second.x - first.x
+              val dy = second.y - first.y
+              val distance = sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+              if (previousDistance == 0f) {
+                previousDistance = distance
                 zoom = PlayerLib.getPropertyDouble("video-zoom")?.toFloat() ?: 0f
-                prevMidX = midX
-                prevMidY = midY
               } else {
-                // Activate on significant pinch movement
-                if (!gestureStarted && abs(dist - prevDist) > 5f) {
+                if (!gestureStarted && abs(distance - previousDistance) > 5f) {
                   gestureStarted = true
-                  viewModel.playerUpdate.update { PlayerUpdates.VideoZoom }
+                  viewModel.playerUpdate.update { PlayerUpdates.PinchZoom }
                 }
-
                 if (gestureStarted) {
-                  // Per-frame zoom: small delta from previous distance → naturally smooth
-                  val zoomDelta = ln((dist / prevDist).toDouble()).toFloat() * 1.2f
-                  zoom = (zoom + zoomDelta).coerceIn(-1f, 3f)
-                  viewModel.setVideoZoom(zoom)
-
-                  // Simultaneous pan while pinching
-                  if (panAndZoomEnabled) {
-                    applyPan(midX - prevMidX, midY - prevMidY, 2f.pow(zoom), panSmooth)
-                  }
+                  val delta = ln((distance / previousDistance).toDouble()).toFloat() * 1.2f
+                  zoom = (zoom + delta).coerceIn(-1f, 3f)
+                  viewModel.applyPinchZoom(zoom)
                 }
-
-                prevDist = dist
-                prevMidX = midX
-                prevMidY = midY
+                previousDistance = distance
               }
-
               pressed.forEach { it.consume() }
-            } else if (pressed.size < 2 && prevDist != 0f) {
+            } else if (pressed.size < 2 && previousDistance != 0f) {
               break
             }
           } while (event.changes.any { it.pressed })
-        }
-      }
-      // Single-finger pan (only when Pan & Zoom enabled and zoomed in)
-      .pointerInput(panAndZoomEnabled, pinchToZoomGesture, areControlsLocked, isVerticalGestureActive) {
-        if (!panAndZoomEnabled || !pinchToZoomGesture || areControlsLocked || isVerticalGestureActive) return@pointerInput
-
-        awaitEachGesture {
-          val down = awaitFirstDown(requireUnconsumed = false)
-          var panning = false
-          var prevX = down.position.x
-          var prevY = down.position.y
-          val startX = prevX
-          val startY = prevY
-          val panSmooth = floatArrayOf(0f, 0f, 0f)
-
-          // Helper: get video display dimensions at 1x
-          fun videoDisplaySize(): Pair<Float, Float> {
-            val sw = size.width.toFloat()
-            val sh = size.height.toFloat()
-            val va = PlayerLib.getPropertyDouble("video-params/aspect")?.toFloat() ?: (sw / sh)
-            val sa = sw / sh
-            return if (va >= sa) Pair(sw, sw / va) else Pair(sh * va, sh)
-          }
-
-          do {
-            val event = awaitPointerEvent()
-            val pressed = event.changes.filter { it.pressed }
-
-            if (pressed.size == 1) {
-              val change = pressed[0]
-              val zoom = PlayerLib.getPropertyDouble("video-zoom")?.toFloat() ?: 0f
-              if (zoom <= 0f) { continue }
-
-              val pos = change.position
-
-              // Activate after 20px drag threshold
-              if (!panning) {
-                val d = sqrt((pos.x - startX).let { it * it } + (pos.y - startY).let { it * it })
-                if (d > 20f) { panning = true; prevX = pos.x; prevY = pos.y }
-              }
-
-              if (panning) {
-                val sw = size.width.toFloat()
-                val sh = size.height.toFloat()
-                if (sw > 0 && sh > 0) {
-                  val scale = 2f.pow(zoom)
-                  val (bw, bh) = videoDisplaySize()
-                  val curX = PlayerLib.getPropertyDouble("video-pan-x")?.toFloat() ?: 0f
-                  val curY = PlayerLib.getPropertyDouble("video-pan-y")?.toFloat() ?: 0f
-                  val targetX = curX + (pos.x - prevX) / (bw * scale)
-                  val targetY = curY + (pos.y - prevY) / (bh * scale)
-                  // Initialize smoothing on first pan frame
-                  if (panSmooth[2] == 0f) { panSmooth[0] = targetX; panSmooth[1] = targetY; panSmooth[2] = 1f }
-                  panSmooth[0] += (targetX - panSmooth[0]) * 0.5f
-                  panSmooth[1] += (targetY - panSmooth[1]) * 0.5f
-                  val maxPan = ((scale - 1f) / (2f * scale)).coerceAtLeast(0f)
-                  viewModel.setVideoPan(
-                    panSmooth[0].coerceIn(-maxPan, maxPan),
-                    panSmooth[1].coerceIn(-maxPan, maxPan),
-                  )
-                  prevX = pos.x
-                  prevY = pos.y
-                }
-                change.consume()
-              }
-            } else if (pressed.size > 1) {
-              break
-            }
-          } while (event.changes.any { it.pressed })
-        }
-      }
-      .pointerInput(horizontalSwipeToSeek, areControlsLocked, gesturePreferences, isVerticalGestureActive) {
-        if (!horizontalSwipeToSeek || areControlsLocked || isVerticalGestureActive) return@pointerInput
-
-        awaitEachGesture {
-          val down = awaitFirstDown(requireUnconsumed = false)
-          val startPosition = down.position
-          val startTime = System.currentTimeMillis()
-          
-          var gestureType: String? = null
-          var hasStartedSeeking = false
-          var initialVideoPosition = 0f
-          // ── 横滑快进的震动计数（issue 反馈新增）─────────────────────
-          // 记「已经震过几个 2 秒档」，而不是「上次震在哪」——
-          // 后者在手指抖回来时会立刻再震一次，手感很碎。
-          // 用「已震档数」单向推进，往回滑也不会重复震动，符合直觉：
-          // 你已经知道「刚才那一段跳了 10 秒」，再滑回去不该重复报。
-          var seekHapticBuckets = 0
-          // Use the sensitivity preference instead of hardcoded value
-          val seekSensitivity = horizontalSwipeSensitivity
-          
-          do {
-            val event = awaitPointerEvent()
-            val pointerCount = event.changes.count { it.pressed }
-
-            if (pointerCount == 1) {
-              event.changes.forEach { change ->
-                if (change.pressed) {
-                  val currentPosition = change.position
-                  val deltaX = currentPosition.x - startPosition.x
-                  val deltaY = currentPosition.y - startPosition.y
-                  val timeSinceStart = System.currentTimeMillis() - startTime
-
-                  // Only activate if this is clearly a horizontal gesture
-                  // and not conflicting with other gestures
-                  if (gestureType == null && 
-                      abs(deltaX) > 30f && 
-                      abs(deltaX) > abs(deltaY) * 2f && // Must be strongly horizontal
-                      timeSinceStart > 100L && // Avoid conflicts with double-tap
-                      !isLongPressing && // Don't conflict with long press
-                      !isDynamicSpeedControlActive && // Don't conflict with speed control
-                      panelShown == Panels.None) { // Only when no panels are shown
-                    
-                    gestureType = "horizontal_seek"
-                    hasStartedSeeking = true
-                    initialVideoPosition = position?.toFloat() ?: 0f
-                    
-                    // Pause before seeking to prevent decoder stalls.
-                    // ⚠️ 暂停/恢复交给 ViewModel 记账（v179）—— 这里不再自己记
-                    // 「本来是否暂停」：那个快照来自 StateFlow，是异步的，
-                    // 上一次手势的恢复还没落地就会被读成「本来在暂停」⇒ 松手不恢复。
-                    viewModel.beginSeekPause()
-                    
-                    // Show seekbar and start seeking mode (same as seekbar scrubbing)
-                    viewModel.showSeekBar()
-                    change.consume()
-                  }
-
-                  if (gestureType == "horizontal_seek" && hasStartedSeeking) {
-                    // Calculate seek amount based on horizontal movement
-                    val seekAmount = deltaX * seekSensitivity
-                    val targetPosition = (initialVideoPosition + seekAmount).coerceAtLeast(0f)
-                    val maxDuration = duration?.toFloat() ?: 0f
-                    val clampedPosition = targetPosition.coerceAtMost(maxDuration)
-                    
-                    // Use the same seeking mechanism as seekbar scrubbing
-                    // This will update the seekbar position and provide live preview
-                    // v217：横滑与进度条拖动同口径 —— 走节流版，每帧直发 seek
-                    // 会在网络流上打出一串「掐掉上一条重来」，拖完卡很久。
-                    viewModel.scrubTo(clampedPosition.toInt())
-
-                    // ── 横滑快进的震动反馈（issue 反馈新增）─────────────
-                    // 每跨过一个「2 秒」档震一次，让用户不看屏幕也知道跳了多少。
-                    // 刻意用「相对位移」而不是当前播放位置：
-                    // 若按绝对时间，滑到 3 小时位置的电影里就会一路震个不停。
-                    // 算式与下面 `seekDelta` 相同 —— 不能直接用 `seekDelta`，
-                    // 它声明在下方（那是给界面显示用的），这里得自己算。
-                    if (hapticFeedbackEnabled) {
-                      val movedSecs = abs(clampedPosition - initialVideoPosition).toInt()
-                      val bucket = movedSecs / SEEK_HAPTIC_INTERVAL_SEC
-                      if (bucket > seekHapticBuckets) {
-                        seekHapticBuckets = bucket
-                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                      }
-                    }
-                    
-                    // Format and display time position updates
-                    val currentPos = clampedPosition.toInt()
-                    val seekDelta = (clampedPosition - initialVideoPosition).toInt()
-                    
-                    val currentTimeStr = formatSeekTime(currentPos)
-                    
-                    // Format seek delta with +/- prefix
-                    val deltaStr = if (seekDelta >= 0) {
-                      "+${formatSeekTime(seekDelta)}"
-                    } else {
-                      "-${formatSeekTime(-seekDelta)}"
-                    }
-                    
-                    // Use PlayerUpdates system like zoom updates
-                    viewModel.playerUpdate.update { 
-                      PlayerUpdates.HorizontalSeek(currentTimeStr, deltaStr)
-                    }
-                    
-                    change.consume()
-                  }
-                }
-              }
-            } else if (pointerCount > 1) {
-              // Multi-finger detected, cancel horizontal seek
-              if (hasStartedSeeking) {
-                hasStartedSeeking = false
-                // Clean up seeking state without showing controls
-                viewModel.playerUpdate.update { PlayerUpdates.None }
-                viewModel.hideSeekBar()
-              }
-              // ⚠️ 必须在这里收尾（v179）：上面把 hasStartedSeeking 置 false 之后，
-              // 手势末尾那段 `if (hasStartedSeeking)` 就整段跳过了 —— 以前正是这里
-              // 漏了恢复，横滑途中再落一根手指 ⇒ 播放永久停在暂停态。
-              // 幂等：这次没打上暂停（用户本来就是暂停的）时是 no-op。
-              // 多指取消也先把最终落点补上（v217）：被节流吞掉的最后一帧
-              // 正好可能是目标位置。
-              viewModel.commitScrubSeek()
-              viewModel.endSeekPause()
-              break
-            }
-          } while (event.changes.any { it.pressed })
-
-          // Apply the final seek when gesture ends
-          if (hasStartedSeeking) {
-            // v217：注释写了 Apply the final seek，但老实现其实只恢复暂停、
-            // 不发 seek —— 最终落点全靠最后一条移动事件，节流/乱序下会停错位置。
-            viewModel.commitScrubSeek()
-            // 恢复播放：幂等，只有这次 seek 里打上的暂停才撤销
-            viewModel.endSeekPause()
-            
-            // Clear the horizontal seek update and hide seekbar after a short delay
-            coroutineScope.launch {
-              delay(300)
-              viewModel.playerUpdate.update { PlayerUpdates.None }
-              viewModel.hideSeekBar()
-            }
-          }
         }
       },
-  )
+    )
+  }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1056,26 +857,6 @@ fun DoubleTapToSeekOvals(
         }
       }
     }
-  }
-}
-
-fun calculateNewVerticalGestureValue(originalValue: Int, startingY: Float, newY: Float, sensitivity: Float): Int {
-  return originalValue + ((startingY - newY) * sensitivity).toInt()
-}
-
-fun calculateNewVerticalGestureValue(originalValue: Float, startingY: Float, newY: Float, sensitivity: Float): Float {
-  return originalValue + ((startingY - newY) * sensitivity)
-}
-
-private fun formatSeekTime(seconds: Int): String {
-  val absSeconds = kotlin.math.abs(seconds)
-  val hours = absSeconds / 3600
-  val minutes = (absSeconds % 3600) / 60
-  val secs = absSeconds % 60
-  return if (hours > 0) {
-    String.format("%d:%02d:%02d", hours, minutes, secs)
-  } else {
-    String.format("%02d:%02d", minutes, secs)
   }
 }
 

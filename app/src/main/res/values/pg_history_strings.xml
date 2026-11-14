@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pg_history_refresh">Refresh history</string>
+    <string name="pg_history_total">%1$d records</string>
+    <string name="pg_history_filters">Filters</string>
+    <string name="pg_history_all_servers">All servers</string>
+    <string name="pg_history_missing_server">Unavailable server</string>
+    <string name="pg_history_series_filter">Series name</string>
+    <string name="pg_history_item_filter">Episode / movie name</string>
+    <string name="pg_history_query">Search</string>
+    <string name="pg_history_reset">Reset filters</string>
+    <string name="pg_history_retry">Retry</string>
+    <string name="pg_history_empty">No playback history matches these filters.</string>
+    <string name="pg_history_mark_conflict">This record changed on another client. Refresh and try again.</string>
+    <string name="pg_history_mark_unknown">The save could not be confirmed. Check the database result before retrying.</string>
+    <string name="pg_history_mark_source_changed">The database connection changed. This operation cannot use the previous source.</string>
+    <string name="pg_history_mark_failed">Could not save the history marker.</string>
+    <string name="pg_history_verify">Check result</string>
+    <string name="pg_history_verifying">Checking the saved marker…</string>
+    <string name="pg_history_close">Dismiss</string>
+    <string name="pg_history_server_unverified">Server configuration could not be verified. Refresh the server list.</string>
+    <string name="pg_history_server_unavailable">This server is unavailable or disabled. The history record is retained.</string>
+    <string name="pg_history_previous">Previous page</string>
+    <string name="pg_history_next">Next page</string>
+    <string name="pg_history_page">%1$d / %2$d</string>
+    <string name="pg_history_pin">Pin history record</string>
+    <string name="pg_history_hide">Mark history record as hidden</string>
+    <string name="pg_history_normal">Clear history marker</string>
+    <string name="pg_history_duration">Played duration: %1$s</string>
+    <string name="pg_history_pinned">Pinned</string>
+    <string name="pg_history_hidden">Hidden marker · record retained</string>
+    <string name="pg_history_mark_checked">The history marker was read again from the database.</string>
+    <string name="pg_history_ordinary">Normal</string>
+    <string name="pg_history_reconciled">Database result checked. Current marker: %1$s. The earlier commit could not be confirmed.</string>
+    <string name="pg_history_reconciled_missing">Database result checked. This history record no longer exists.</string>
+</resources>

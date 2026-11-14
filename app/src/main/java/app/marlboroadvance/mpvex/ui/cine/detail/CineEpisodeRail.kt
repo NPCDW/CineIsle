@@ -96,7 +96,6 @@ internal fun CineEpisodeSection(
   descending: Boolean,
   onToggleSort: () -> Unit,
   onPlayEpisode: (EmbyItem) -> Unit,
-  onToggleEpisodePlayed: (EmbyItem) -> Unit,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
@@ -185,7 +184,6 @@ internal fun CineEpisodeSection(
           thumbUrl = thumbUrl(episode),
           current = index == activeIndex,
           onClick = { onPlayEpisode(episode) },
-          onLongClick = { onToggleEpisodePlayed(episode) },
         )
       }
     }
@@ -361,7 +359,6 @@ private fun EpisodeCard(
   thumbUrl: String?,
   current: Boolean,
   onClick: () -> Unit,
-  onLongClick: () -> Unit,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
@@ -381,7 +378,7 @@ private fun EpisodeCard(
   Column(
     modifier = Modifier
       .width(168.dp)
-      .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+      .clickable(onClick = onClick),
   ) {
     Box(
       modifier = Modifier

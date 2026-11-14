@@ -44,6 +44,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.marlboroadvance.mpvex.domain.emby.EmbyServer
+import app.marlboroadvance.mpvex.ui.browser.emby.components.LocalEmbyImageServer
 import app.marlboroadvance.mpvex.ui.browser.emby.components.EmbyImage
 import app.marlboroadvance.mpvex.ui.cine.CineMediaUi
 import app.marlboroadvance.mpvex.ui.cine.CineTheme
@@ -318,6 +320,7 @@ fun CinePosterGrid(
     itemsIndexed(items, key = { index, media -> media.id.ifBlank { "idx-$index" } }) { _, media ->
       CinePosterCard(
         media = media,
+        server = media.imageServer,
         width = cardWidth,
         onClick = { onClick(media) },
         onLongClick = onLongClick?.let { { it(media) } },
@@ -340,6 +343,7 @@ fun CineMediaListRow(
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
   onLongClick: (() -> Unit)? = null,
+  server: EmbyServer? = LocalEmbyImageServer.current,
 ) {
   val colors = CineTheme.colors
   val type = CineTheme.type
@@ -364,8 +368,9 @@ fun CineMediaListRow(
         .background(colors.skeleton),
     ) {
       EmbyImage(
+        server = media.imageServer ?: server,
         url = media.posterUrl ?: media.thumbUrl,
-        contentDescription = media.title,
+        contentDescription = media.item.Name,
         modifier = Modifier.fillMaxSize(),
         maxWidth = 240,
       )

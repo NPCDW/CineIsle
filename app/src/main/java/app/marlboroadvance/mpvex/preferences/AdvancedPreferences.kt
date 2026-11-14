@@ -12,7 +12,6 @@ class AdvancedPreferences(
 
   val verboseLogging = preferenceStore.getBoolean("verbose_logging", BuildConfig.BUILD_TYPE != "release")
 
-  val enableRecentlyPlayed = preferenceStore.getBoolean("enable_recently_played", true)
 
 }
 
