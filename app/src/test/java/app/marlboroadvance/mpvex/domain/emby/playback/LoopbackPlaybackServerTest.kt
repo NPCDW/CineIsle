@@ -38,6 +38,7 @@ class LoopbackPlaybackServerTest {
     val directory = Files.createTempDirectory("loemby-loopback-test").toFile()
     val calls = AtomicInteger()
     var playbackBody = ""; var payload = ""
+    var playbackEncoding: String? = null
     val server: EmbyServer
     var config: PlaybackConfiguration
     val local: LoopbackPlaybackServer
@@ -57,7 +58,9 @@ class LoopbackPlaybackServerTest {
       upstream.createContext("/emby/Items/item/PlaybackInfo") {
         calls.incrementAndGet(); playbackBody = it.requestBody.bufferedReader().readText()
         Thread.sleep(25)
-        val bytes = payload.toByteArray(); it.sendResponseHeaders(200, bytes.size.toLong()); it.responseBody.use { out -> out.write(bytes) }
+        val bytes = payload.toByteArray().let { if (playbackEncoding == "zstd") Zstd.compress(it) else it }
+        playbackEncoding?.let { encoding -> it.responseHeaders.add("Content-Encoding", encoding) }
+        it.sendResponseHeaders(200, bytes.size.toLong()); it.responseBody.use { out -> out.write(bytes) }
       }
       upstream.start()
     }
@@ -244,6 +247,44 @@ ${f.origin}/absolute.ts\r
       listOf(LoopbackHttpPool.Kind.STREAM, LoopbackHttpPool.Kind.IMAGE, LoopbackHttpPool.Kind.API).forEach {
         assertEquals(java.net.Proxy.NO_PROXY, f.local.http.client(kind = it).proxy)
       }
+    }
+  }
+
+  @Test fun zstdPlaybackInfoAndHlsManifestResolveAndStreamAcrossRepeatedReads() = runBlocking {
+    Fixture().use { f ->
+      f.playbackEncoding = "zstd"
+      f.payload = """{"PlaySessionId":"session","MediaSources":[{"Id":"media","Container":"m3u8","DirectStreamUrl":"/manifest","MediaStreams":[]}]}"""
+      val manifest = "#EXTM3U\n#EXTINF:10,\nsegment.ts\n#EXT-X-ENDLIST\n"
+      val segment = ByteArray(100000) { (it % 251).toByte() }
+      f.upstream.createContext("/emby/manifest", exchange(200, Zstd.compress(manifest.toByteArray()), mapOf(
+        "Content-Type" to "application/vnd.apple.mpegurl", "Content-Encoding" to "zstd",
+      )))
+      f.upstream.createContext("/emby/segment.ts", exchange(200, Zstd.compress(segment), mapOf(
+        "Content-Encoding" to "zstd",
+      )))
+      val play = f.local.register(PlaybackSpec(f.server, "item"))
+      repeat(3) {
+        get(play).use { response ->
+          assertEquals(308, response.code)
+          val video = response.header("Location")!!
+          get(video).use { playlist ->
+            assertEquals(200, playlist.code)
+            assertNull(playlist.header("Content-Encoding"))
+            val text = playlist.body.string()
+            assertTrue(text.startsWith("#EXTM3U\n"))
+            val localSegment = text.lineSequence().single { it.startsWith("http://") }
+            assertTrue(f.local.ownsMediaUrl(play, localSegment))
+            get(localSegment).use { media ->
+              assertEquals(200, media.code)
+              assertNull(media.header("Content-Encoding"))
+              assertNull(media.header("Content-Length"))
+              assertArrayEquals(segment, media.body.bytes())
+            }
+          }
+        }
+        f.local.release(play)
+      }
+      assertEquals(3, f.calls.get())
     }
   }
 

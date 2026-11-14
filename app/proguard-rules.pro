@@ -29,6 +29,12 @@
 -dontnote org.xmlpull.v1.**
 -dontwarn org.slf4j.impl.StaticLoggerBinder
 
+# zstd JNI looks up these streaming offsets by name; Java references alone do not keep them alive.
+-keepclassmembers class com.github.luben.zstd.ZstdInputStreamNoFinalizer {
+    long srcPos;
+    long dstPos;
+}
+
 # pgjdbc optional GSS/Kerberos paths are unused on Android.
 -dontwarn org.ietf.jgss.**
 -dontnote org.ietf.jgss.**
